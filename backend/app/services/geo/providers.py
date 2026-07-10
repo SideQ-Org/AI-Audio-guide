@@ -48,8 +48,10 @@ _SELECTORS = (
     # named squares & pedestrian promenades — the spine of a city walk
     '"place"="square"',
     '"highway"="pedestrian"',
-    # parks, gardens, civic green & sports venues
-    '"leisure"~"park|garden|nature_reserve|common|marina|stadium|sports_centre"',
+    # parks, gardens, civic green & sports venues (incl. pitches/tracks/grounds — a
+    # neighbourhood football field is usually leisure=pitch, not =stadium; it's often
+    # unnamed, so _element_to_place synthesizes a name for the notable sports below)
+    '"leisure"~"park|garden|nature_reserve|common|marina|stadium|sports_centre|pitch|track|sports_hall|recreation_ground"',
     # nature & water — reservoirs, rivers, lakes, forests, hills, caves, rock features
     '"natural"~"water|wood|peak|hill|ridge|bay|beach|cape|cliff|cave_entrance|arch|rock|spring|geyser|waterfall|volcano|glacier|wetland"',
     '"water"',
@@ -125,9 +127,34 @@ def _pick_name(tags: dict) -> str | None:
     return None
 
 
+# Notable-when-unnamed sports features: a curated map from OSM `sport=` to a generic
+# Russian name, so an unnamed football field (leisure=pitch sport=soccer) isn't dropped.
+# Kept tight on purpose — table_tennis / volleyball / basketball-in-a-yard etc. are NOT
+# here, so they stay nameless and get filtered out (no flooding the tour with tiny courts).
+_SPORT_RU = {
+    "soccer": "футбольное поле",
+    "football": "футбольное поле",
+    "athletics": "легкоатлетический стадион",
+    "ice_hockey": "хоккейная коробка",
+    "tennis": "теннисный корт",
+}
+
+
+def _synth_name(tags: dict) -> str | None:
+    """A generic name for a notable UNNAMED feature, so it survives instead of being
+    dropped. Only for a stadium or a curated sport ground — everything else returns None
+    (and is filtered out)."""
+    if tags.get("leisure") == "stadium":
+        return "стадион"
+    if tags.get("leisure") in ("pitch", "track", "sports_hall", "recreation_ground"):
+        sport = (tags.get("sport") or "").split(";")[0].strip()
+        return _SPORT_RU.get(sport)
+    return None
+
+
 def _element_to_place(el: dict, origin: GeoPoint) -> Place | None:
     tags = el.get("tags") or {}
-    name = _pick_name(tags)
+    name = _pick_name(tags) or _synth_name(tags)
     if not name:
         return None
     geometry: list[list[float]] | None = None

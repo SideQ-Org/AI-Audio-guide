@@ -139,8 +139,21 @@ volatile per-tick context (built last, for prompt caching).
 
 The per-tick agent work (discovery → facts → Scorer → Narrator, plus area-monologue interleaving
 and prefetch) is assembled in `pipeline.py` (`TextPipeline`), separate from the orchestrator's
-FSM/persistence. `name_localizer.py` (`NameLocalizer`, cached LLM) renders place titles in the
-session language while keeping proper names transliterated — it feeds both narration and map labels.
+FSM/persistence. `TextPipeline` also **pre-generates** the narration for the object you're walking
+toward (`warm_narration` → `_narr_cache`, keyed `(place_id, lang)`) so its blurb is spoken the
+instant you arrive rather than after a 5–20 s LLM wait; `step()` pops the cache when present.
+`name_localizer.py` (`NameLocalizer`, cached LLM) renders place titles in the session language
+while keeping proper names transliterated — it feeds both narration and map labels.
+
+`narration_schedule.py` (`NarrationScheduler`, pure state/logic, no I/O) is what makes narration
+**sentence-level**: the producer delivers one sentence at a time so a place entering the narrate
+bubble is **woven in at a sentence boundary** (never a mid-word cut). The interrupted line's
+remaining sentences are parked on a stack and **resume** afterward with a spoken connective
+(`resume_connective`), unless the walker has moved too far for it to still make sense. If the
+object being told outranks the newcomer (`current_outranks`), the current line finishes in full and
+the newcomer is covered briefly afterward as "by the way, we passed…" (`passed_object_intro`).
+`languages.py` also holds the instant, no-LLM **session greeting** (`greeting`, time-of-day +
+random tail) spoken the moment a walk starts to fill the cold-load gap before the area intro.
 
 Services (`backend/app/services/`):
 - `geo/` — OSM **Overpass** discovery: radius search, type/distance/gaze-cone ranking, adaptive
@@ -186,10 +199,13 @@ Services (`backend/app/services/`):
 
 ### WebSocket contract (`/ws`)
 
-The single transport. The backend runs a **background producer** per connection that emits one
-narration paragraph at a time, paced by the client's `played` signal; `position` messages just
-refresh live context. A question (`utterance`/`audio`) is top-priority: it cancels the in-flight
-step, answers, then the producer resumes.
+The single transport. The backend runs a **background producer** per connection that emits
+narration **one sentence at a time** (via `NarrationScheduler`, see above), paced by the client's
+`played` signal; `position` messages just refresh live context — and, when a fresh object lands in
+the narrate bubble, `peek_bubble` (cheap, cached-inventory, no network) flags it so the producer
+weaves it in at the next sentence boundary. A question (`utterance`/`audio`) is top-priority: it
+cancels the in-flight step, answers, then the producer resumes. Don't reintroduce paragraph-at-a-
+time delivery — the sentence granularity is what makes seamless weaving possible.
 
 - **In:** `position` (lat/lon/heading/pace), `utterance` (typed question), `audio` (base64 WAV →
   STT), `listen` (mic open/close, sent around a voice question), `played` (paced-playback ack),
@@ -288,8 +304,11 @@ run without keys. For a real walk, flip the wiring:
   A real monthly cap must also be set on the provider dashboard — the code cap is a backstop.
 
 `config.py` has many more knobs, grouped by subsystem: per-role model routing (`MODEL_SCORER`,
-`MODEL_NARRATOR`, `MODEL_COMPANION`, `MODEL_LANDMARK`, `MODEL_ENRICHER`), radius tuning
-(`DEFAULT_RADIUS_M`, `MAX_RADIUS_M`, `WEAVE_RADIUS_M`, `NARRATE_RADIUS_M`, `SCORER_MAX_CANDIDATES`),
+`MODEL_NARRATOR`, `MODEL_COMPANION`, `MODEL_LANDMARK`, `MODEL_ENRICHER`), the instant opener
+(`SESSION_GREETING`), radius tuning (`DEFAULT_RADIUS_M`, `MAX_RADIUS_M`, `WEAVE_RADIUS_M`,
+`NARRATE_RADIUS_M` — the tight "right here" passing bubble, 45 m — and `REACH_RADIUS_M` — the
+tighter cap on the gaze-gated reach fallback so it fires for what you're *about* to reach, not
+150–200 m away — `SCORER_MAX_CANDIDATES`),
 area monologue (`AREA_ENRICH`, `AREA_MAX_BEATS`), the inventory cache (`INVENTORY_ENABLED`,
 `INVENTORY_RADIUS_M`, `INVENTORY_REFETCH_FRAC`, `INVENTORY_TTL_S`), enrichment (`ENRICH_TOP_K`,
 `ENRICH_LOOKAHEAD_K`, `ENRICH_TIMEOUT_S`, `ENRICH_CACHE_PATH`), Whisper (`WHISPER_MODEL_SIZE`,

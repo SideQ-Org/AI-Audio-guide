@@ -28,6 +28,7 @@ from app.services.accounts.api import router as accounts_router
 from app.services.accounts.auth import verify_token
 from app.services.agent.factory import build_orchestrator
 from app.services.agent.languages import normalize, stt_unclear
+from app.services.agent.narration_schedule import NarrationScheduler
 from app.services.agent.orchestrator import Orchestrator, OrchestratorOutput, merge_patch
 from app.services.agent.walklog import get_logger
 from app.services.billing.api import router as billing_router
@@ -299,6 +300,17 @@ class _SessionRuntime:
         self._gps_rejects = 0
         self.played = asyncio.Event()
         self.wake = asyncio.Event()  # context changed (new position / area / theme)
+        # Narration is delivered ONE SENTENCE at a time via this scheduler, so a place that
+        # enters the bubble is woven in at a sentence boundary (never a mid-word cut) and
+        # the interrupted line resumes afterwards. `pending_insert` = a fresh bubble object
+        # (id, significance) flagged by peek_bubble, consumed at the next boundary.
+        self.sched = NarrationScheduler(settings.default_language)
+        self.language = settings.default_language
+        self.pending_insert: tuple[str, object] | None = None
+        self._insert_id: str | None = None  # debounce: don't re-flag the same object
+        # A newcomer we deferred because the object we're narrating outranks it — covered
+        # briefly ("кстати, мы прошли …") once the current object is fully told.
+        self.deferred_object: str | None = None
         self.resume = asyncio.Event()  # a barge-in finished; producer may continue
         self.barging = False
         self.listening = False  # mic open: hold the producer so it can't talk over the user
@@ -438,16 +450,60 @@ class _SessionRuntime:
             return
         SESSION_ID.set(self.session_id)  # attribute LLM cost to this session
         SESSION_TIER.set(self.tier)  # tier -> model + enrichment for this turn
+
+        # 1) A fresh bubble object to weave in at this sentence boundary?
+        ins = self.pending_insert
+        if ins is not None:
+            self.pending_insert = None
+            obj_id, obj_sig = ins
+            if self.sched.current_outranks(obj_sig):
+                # The object we're telling outranks the newcomer -> don't interrupt; finish
+                # it and cover the newcomer briefly afterwards ("кстати, мы прошли …").
+                self.deferred_object = obj_id
+                _walk.info("weave: %s deferred (lower priority), finishing current", obj_id)
+            else:
+                # Park the current line's remaining sentences and narrate the object NOW
+                # (inline, using the pre-generated blurb). MUST fetch it here — otherwise
+                # step 2 would just resume the line we paused and the object would never play.
+                self.sched.pause_current(self.live_position)
+                obj = await self.orch.narrate_object(self.session_id, obj_id)
+                if obj.kind == "narration" and obj.text:
+                    self.sched.set_current(obj)
+                    _walk.info("weave: inserted object %s", obj_id)
+
+        # 2) Speak the next sentence of the current line (never cut — it always finishes),
+        #    else resume a paused line, else cover a deferred newcomer.
+        frame = self.sched.next_frame()
+        if frame is None and self.sched.resume(self.live_position, settings.weave_radius_m):
+            _walk.info("resume: continuing a paused line")
+            frame = self.sched.next_frame()
+        if frame is None and self.deferred_object is not None:
+            dobj, self.deferred_object = self.deferred_object, None
+            out = await self.orch.narrate_object(self.session_id, dobj, passed=True)
+            if out.kind == "narration" and out.text:
+                self.sched.set_current(out)
+                frame = self.sched.next_frame()
+        if frame is not None:
+            await self.send_out(frame)
+            await self._wait_played(frame.text)  # pace per sentence
+            return
+
+        # 3) Nothing scheduled -> ask the orchestrator for the next narration, then deliver
+        #    it sentence by sentence.
         out = await self.orch.on_position(
             self.session_id, self.live_position, self.live_heading, self.live_pace
         )
-        await self.send_out(out)
         await self._maybe_send_places()
         if out.kind == "narration" and out.text:
-            await self._wait_played(out.text)  # pace: don't outrun the player
-        else:
-            self.wake.clear()  # nothing to say -> idle until the context changes
-            await self.wake.wait()
+            self.sched.set_current(out)
+            frame = self.sched.next_frame()
+            if frame is not None:
+                await self.send_out(frame)
+                await self._wait_played(frame.text)
+                return
+        await self.send_out(out)  # state / silence
+        self.wake.clear()  # nothing to say -> idle until the context changes
+        await self.wake.wait()
 
     async def _maybe_send_places(self) -> None:
         """Push the full set of nearby objects for the map when the search disc has
@@ -485,10 +541,18 @@ class _SessionRuntime:
 
     async def _wait_played(self, text: str) -> None:
         self.played.clear()
-        # ~12 chars/sec speaking; fall back if the client never signals (old clients)
-        fallback = min(max(len(text) / 12.0, 4.0), 22.0)
+        # Pace to roughly this sentence's SPOKEN DURATION so we don't outrun the player and
+        # pile sentences up in its queue (the "reply still on the old object" backlog). The
+        # client's `played` (at sentence START) anchors the start; we then hold the rest of
+        # the estimated duration (~14 chars/s for RU) so the NEXT sentence is released about
+        # when this one finishes — a place then weaves in right after it, not behind a queue.
+        dur = min(max(len(text) / 14.0, 1.5), 18.0)
+        t0 = time.monotonic()
         with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(self.played.wait(), timeout=fallback)
+            await asyncio.wait_for(self.played.wait(), timeout=dur)
+        remaining = dur - (time.monotonic() - t0)
+        if remaining > 0.05:
+            await asyncio.sleep(remaining)
 
     async def pause_for_listen(self) -> None:
         """Mic opened (user about to ask): stop the producer's current step and hold,
@@ -713,6 +777,19 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
         )
         rt.live_pace = p.pace
         rt.wake.set()
+        # Object weaving: if a fresh place is now in the narrate bubble, flag it so the
+        # producer slots it in at the NEXT sentence boundary (never mid-word). Cheap
+        # (cached inventory, no network); skipped while the producer is already held.
+        if not (rt.paused or rt.listening or rt.barging):
+            with contextlib.suppress(Exception):
+                hit = await rt.orch.peek_bubble(rt.session_id, fix, rt.live_heading)
+                if hit is not None and hit[0] != rt._insert_id:
+                    rt._insert_id = hit[0]
+                    rt.pending_insert = hit
+                    _walk.info("bubble object %s flagged to weave", hit[0])
+                    rt.wake.set()  # nudge the producer if it's idle
+                elif hit is None:
+                    rt._insert_id = None
         if rt.paused:
             # Tour is paused (no generation), but keep breadcrumbing the GPS track so the
             # walked-while-paused stretch is recorded and flagged for the history route,
@@ -766,6 +843,8 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
         # cache-keyed by language, so they refresh on their own.
         state.area_facts = None
         await orch.store.save(state)
+        rt.language = state.language
+        rt.sched.language = state.language  # resume connectives in the chosen language
         await rt.send_json({"type": "language", "language": state.language})
     elif kind == "theme":
         t = WSSetTheme.model_validate(msg)

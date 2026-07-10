@@ -72,6 +72,12 @@ def _sentences(text: str) -> list[str]:
     return out
 
 
+# Public alias: the narration scheduler (main.py) delivers narration one sentence at a
+# time so an object can be woven in at a boundary instead of cutting a line mid-word.
+def split_sentences(text: str) -> list[str]:
+    return _sentences(text)
+
+
 def _desolicit(text: str, language: str) -> str:
     """Drop trailing listener-directed sentences — a question to the listener or an
     offer ("если хотите, расскажу подробнее"). Narration is a monologue and must never

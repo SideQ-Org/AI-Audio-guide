@@ -102,8 +102,10 @@ def test_walk_log_captures_narration_text_geocode_and_discovery():
         )
         for step in walk(RED_SQUARE, speed_mps=1.3, step_s=8.0):
             out = await orch.on_position("s1", step.position, step.heading, step.pace)
-            if out.kind == "narration" and out.text:
-                return  # got at least one spoken line — enough to assert the trace
+            # wait for an OBJECT narration (place_id) so discovery+geocode have run — the
+            # greeting/area lines have text but no place and fire before discovery.
+            if out.kind == "narration" and out.place_id:
+                return
         return
 
     h = _capture_walk_log()

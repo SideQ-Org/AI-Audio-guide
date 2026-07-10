@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC
 from enum import StrEnum
 
 from app.config import settings
@@ -26,6 +27,7 @@ from app.services.agent import languages as lang
 from app.services.agent.companion import Companion
 from app.services.agent.narrator import split_hook
 from app.services.agent.pipeline import TextPipeline
+from app.services.agent.significance import significance_from_weight
 from app.services.agent.walklog import (
     CURRENT_SID,
     clip,
@@ -35,6 +37,7 @@ from app.services.agent.walklog import (
 )
 from app.services.geo.discovery import Discovery
 from app.services.geo.geocoder import Geocoder
+from app.services.geo.ranking import build_candidates
 from app.services.metrics import GUIDE
 from app.services.state.store import StateStore
 from app.shared.geo_math import haversine_m
@@ -129,6 +132,15 @@ log = get_logger()  # shared walk logger (aiguide.agent); see walklog.py
 # Anti-repeat now lives in SessionState.memory (WalkMemory, shared/memory.py): the corpus
 # is the WHOLE walk, not a window, and callers use `st.memory.is_repeat(text)`.
 
+def _local_hour(lon: float | None) -> int:
+    """Rough local hour (0-23) from longitude — 15°/h — good enough for a morning/day/
+    evening greeting without a timezone database."""
+    from datetime import datetime
+
+    utc = datetime.now(UTC)
+    return int((utc.hour + utc.minute / 60.0 + (lon or 0.0) / 15.0) % 24)
+
+
 def merge_patch(base: ControlPatch, patch: ControlPatch) -> ControlPatch:
     return ControlPatch(
         skip_categories=sorted(set(base.skip_categories) | set(patch.skip_categories)),
@@ -192,6 +204,83 @@ class Orchestrator:
             st.walk_last_event_at = time.time()
         await self.store.save(st)
 
+    async def peek_bubble(
+        self, session_id: str, position: GeoPoint, heading: Heading
+    ) -> tuple[str, Significance] | None:
+        """CHEAP (no network): is there a fresh object right in the narrate bubble at this
+        live position? Ranks the already-cached inventory disc. Returns `(id, significance)`
+        for the nearest unseen object within `narrate_radius_m` that isn't the one we're
+        already narrating — the signal to weave a place in, plus its significance for the
+        priority decision. None when there's nothing new to jump to."""
+        inv_store = getattr(self.discovery, "inventory", None)
+        inv = inv_store.peek(session_id) if inv_store is not None else None
+        if inv is None or not inv.places:
+            return None
+        st = await self.store.load(session_id)
+        cands = build_candidates(
+            position, heading, inv.places, settings.narrate_radius_m, st.seen_place_ids
+        )
+        if not cands:
+            return None
+        top = min(cands, key=self._visible_rank)
+        if top.place.id == st.last_place_id:
+            return None
+        facts = self.pipeline.cache.has(top.place.id, st.language)
+        return top.place.id, significance_from_weight(top.type_weight, facts)
+
+    def _warm_inventory(self, session_id: str, position: GeoPoint) -> None:
+        """Non-blocking: fetch the Overpass disc for this session NOW (during the greeting),
+        so the first real discovery is served from cache instead of a cold ~3 s network
+        fetch — the 'long pause while it looked around' at startup."""
+        inv = getattr(self.discovery, "inventory", None)
+        prov = getattr(self.discovery, "provider", None)
+        if inv is None or prov is None:
+            return
+        try:
+            asyncio.ensure_future(inv.ensure(session_id, position, prov))
+        except Exception:  # noqa: BLE001 — a warm failure must never disturb the greeting
+            pass
+
+    async def narrate_object(
+        self, session_id: str, place_id: str, *, passed: bool = False
+    ) -> OrchestratorOutput:
+        """Narrate a SPECIFIC object on demand — the scheduler's deferred 'кстати, мы
+        прошли' mention of a newcomer that surfaced while a higher-priority object was
+        being told. Ranks the object from the cached inventory, narrates it (pre-gen), and
+        commits like a normal step; prefixes the passed-by intro when `passed`. Silence if
+        it's already seen or no longer in the disc."""
+        st = await self.store.load(session_id)
+        if place_id in st.seen_place_ids or st.position is None:
+            return await self._finish(st, State.IDLE, "silence")
+        inv_store = getattr(self.discovery, "inventory", None)
+        inv = inv_store.peek(session_id) if inv_store is not None else None
+        place = next((p for p in (inv.places if inv else []) if p.id == place_id), None)
+        if place is None:
+            return await self._finish(st, State.IDLE, "silence")
+        cands = build_candidates(
+            st.position, st.heading, [place], settings.weave_radius_m, st.seen_place_ids
+        )
+        if not cands:
+            return await self._finish(st, State.IDLE, "silence")
+        plan = st.narrative_plan
+        try:
+            out = await self.pipeline.step(
+                cands, seen=st.seen_place_ids, history=st.narration_history,
+                address=st.address, heading=st.heading, pace=st.pace,
+                preferences=st.control_patch, language=st.language,
+                theme=plan.active_theme() or None, told=plan.told,
+                next_hook=plan.next_hook, passing=True,
+            )
+        except Exception:
+            return await self._finish(st, State.ERROR, "error")
+        if not (out.text and out.place):
+            return await self._finish(st, State.IDLE, "silence")
+        if passed:  # we've already walked past it -> "кстати, мы прошли …"
+            out = replace(out, text=f"{lang.passed_object_intro(st.language)} {out.text}")
+        log.info("narrate deferred passed=%s place=%r | %s",
+                 passed, out.place.name, clip(out.text))
+        return await self._commit_step(st, out)
+
     async def on_position(
         self, session_id: str, position: GeoPoint, heading: Heading, pace: Pace
     ) -> OrchestratorOutput:
@@ -249,6 +338,17 @@ class Orchestrator:
             # is the client's job offline). Stay until GO_ONLINE.
             return await self._finish(st, State.OFFLINE, "offline")
 
+        # Greet FIRST, INSTANTLY — before the (possibly slow) geocode, so a degraded
+        # Overpass can't stall the opener for 15+ s. It's a varied, time-of-day opener;
+        # the area intro (next tick) names the place. Kick off the disc fetch + geocode in
+        # the background so discovery isn't cold-blocked later.
+        if settings.session_greeting and not st.control_patch.mute and not st.greeted:
+            st.greeted = True
+            self._warm_inventory(session_id, position)
+            text = lang.greeting(st.language, None, _local_hour(position.lon))
+            log.info("greeting | %s", clip(text))
+            return await self._finish(st, State.NARRATING, "narration", text)
+
         # resolve which city/district/street we're in (move-gated, off-cadence).
         await self._resolve_area(st, position)
 
@@ -287,10 +387,17 @@ class Orchestrator:
             log.info("silent: muted (agent ticks, output suppressed)")
             return await self._finish(st, State.IDLE, "silence")
 
-        # Warm facts for the whole live window (non-blocking) — collects facts about
-        # the surrounding objects in the background, so the story is ready the moment
-        # the user reaches one.
-        self.pipeline.warm_ahead(result.candidates, address=st.address, language=st.language)
+        # Warm facts for the whole live window (non-blocking) AND pre-generate the
+        # narration for the object you're walking toward — so its blurb is spoken the
+        # instant you reach it, not 5-20 s later. The arc context is passed so the
+        # pre-generated line fits the running story.
+        plan = st.narrative_plan
+        self.pipeline.warm_ahead(
+            result.candidates, address=st.address, language=st.language,
+            seen=st.seen_place_ids, history=st.narration_history,
+            theme=plan.active_theme() or None, told=plan.told, next_hook=plan.next_hook,
+            heading=heading, pace=pace, preferences=st.control_patch,
+        )
 
         # Narrate an object ONLY when the user is passing close to it ("проходишь
         # мимо"): within the small narrate bubble, nearest first. Outside it the area
@@ -307,13 +414,13 @@ class Orchestrator:
         # Last-resort "reach" set: unseen objects the walker can SEE ahead (in the gaze
         # cone) but that are past the passing bubble. Used only when the area spine runs
         # dry, so the tour reaches a visible object instead of going silent — never
-        # something beside/behind or out of view ("говори о том, что вижу"). Bounded to
-        # the search window (weave_radius_m) even on the expanded inventory disc.
+        # something beside/behind or out of view ("говори о том, что вижу"). Capped tight
+        # (reach_radius_m) so it fires for what you're ABOUT to reach, not 150-200 m away.
         reach = sorted(
             (
                 c for c in result.candidates
                 if c.in_gaze_cone
-                and c.distance_m <= settings.weave_radius_m
+                and c.distance_m <= settings.reach_radius_m
                 and c.place.id not in st.seen_place_ids
                 and c.place.id not in st.reach_exhausted_ids
             ),

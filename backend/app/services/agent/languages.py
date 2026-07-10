@@ -8,6 +8,8 @@ STT needs no mapping. The LLM prompt wants a human-readable language name, so
 
 from __future__ import annotations
 
+import random
+
 # code -> name injected into the CORE prompt's "{language}" placeholder.
 PROMPT_NAME: dict[str, str] = {
     "en": "English",
@@ -246,6 +248,147 @@ def passing_mention(code: str | None, name: str, side: str | None) -> str:
 def bridges(code: str | None) -> tuple[str, ...]:
     """Spoken-verbatim 'let's move on' bridges in the session language."""
     return _BRIDGES.get(normalize(code), _BRIDGES[FALLBACK])
+
+
+# A warm, instant opener spoken the moment a walk starts — no LLM, so the tour begins
+# immediately while discovery/geocode/the area intro load in the background (the area
+# intro, which names the place properly, follows on the next tick).
+# Session opener = a time-of-day greeting + a varied tail (a quick preview intro). Spoken
+# the moment a walk starts, after geolocation is loaded. The tail's "{place}" is the
+# district/city when known, else the no-place variant (avoids awkward grammar). The opener
+# rotates by time of day and the tail is picked at random, so it's different each walk.
+_GREETING_OPENERS: dict[str, dict[str, str]] = {
+    "ru": {"morning": "Доброе утро!", "day": "Добрый день!",
+           "evening": "Добрый вечер!", "night": "Доброй ночи!"},
+    "en": {"morning": "Good morning!", "day": "Good afternoon!",
+           "evening": "Good evening!", "night": "Hello!"},
+    "es": {"morning": "¡Buenos días!", "day": "¡Buenas tardes!",
+           "evening": "¡Buenas noches!", "night": "¡Hola!"},
+    "fr": {"morning": "Bonjour !", "day": "Bonjour !",
+           "evening": "Bonsoir !", "night": "Bonsoir !"},
+    "de": {"morning": "Guten Morgen!", "day": "Guten Tag!",
+           "evening": "Guten Abend!", "night": "Hallo!"},
+    "it": {"morning": "Buongiorno!", "day": "Buon pomeriggio!",
+           "evening": "Buonasera!", "night": "Ciao!"},
+    "pt": {"morning": "Bom dia!", "day": "Boa tarde!",
+           "evening": "Boa noite!", "night": "Olá!"},
+    "zh": {"morning": "早上好！", "day": "下午好！", "evening": "晚上好！", "night": "您好！"},
+}
+
+# Tail = (with-place, without-place). Picked at random for variety.
+_GREETING_TAILS: dict[str, list[tuple[str, str]]] = {
+    "ru": [
+        ("Начинаем прогулку — {place}. Осмотрюсь и расскажу, чем тут интересно.",
+         "Рад пройтись с тобой. Осмотрюсь и расскажу, чем интересны эти места."),
+        ("Мы с тобой — {place}. Дай гляну по сторонам и введу в курс.",
+         "Пройдёмся не спеша. Дай гляну по сторонам и введу в курс."),
+        ("Прогуляемся — {place}. Сейчас осмотрюсь и покажу, что вокруг любопытного.",
+         "Прогуляемся не торопясь. Сейчас осмотрюсь и покажу, что вокруг любопытного."),
+    ],
+    "en": [
+        ("We're near {place}. Let me look around and preview the walk for you.",
+         "Glad to walk with you. Let me look around and preview the walk."),
+        ("Our start is {place}. Give me a moment to look around and set the scene.",
+         "Let's take it slow. Give me a moment to look around and set the scene."),
+    ],
+    "es": [
+        ("Estamos cerca de {place}. Echo un vistazo y te adelanto lo que veremos.",
+         "Me alegra pasear contigo. Echo un vistazo y te adelanto lo que veremos."),
+        ("Empezamos por {place}. Un momento, miro alrededor y te pongo en situación.",
+         "Vamos con calma. Un momento, miro alrededor y te pongo en situación."),
+    ],
+    "fr": [
+        ("Nous sommes près de {place}. Je regarde autour et je t'en fais un aperçu.",
+         "Ravi de marcher avec toi. Je regarde autour et je t'en fais un aperçu."),
+        ("On démarre à {place}. Un instant, je regarde autour et je te situe.",
+         "Allons-y tranquillement. Un instant, je regarde autour et je te situe."),
+    ],
+    "de": [
+        ("Wir sind nahe {place}. Ich schaue mich um und gebe dir kurz einen Überblick.",
+         "Schön, mit dir zu gehen. Ich schaue mich um und gebe dir einen Überblick."),
+        ("Wir starten bei {place}. Moment, ich sehe mich um und ordne alles ein.",
+         "Lass es uns ruhig angehen. Moment, ich sehe mich um und ordne alles ein."),
+    ],
+    "it": [
+        ("Siamo vicino a {place}. Do un'occhiata e ti anticipo cosa vedremo.",
+         "Che bello passeggiare con te. Do un'occhiata e ti anticipo cosa vedremo."),
+        ("Partiamo da {place}. Un attimo, mi guardo intorno e ti oriento.",
+         "Andiamo con calma. Un attimo, mi guardo intorno e ti oriento."),
+    ],
+    "pt": [
+        ("Estamos perto de {place}. Vou olhar em volta e já te dou uma prévia.",
+         "Que bom caminhar com você. Vou olhar em volta e já te dou uma prévia."),
+        ("Começamos por {place}. Um instante, olho em volta e te situo.",
+         "Vamos com calma. Um instante, olho em volta e te situo."),
+    ],
+    "zh": [
+        ("我们就在{place}附近。我看看四周，先给您简单介绍这次散步。",
+         "很高兴与您同行。我看看四周，先给您简单介绍这次散步。"),
+        ("这次从{place}出发。稍等，我看看周围，给您理理头绪。",
+         "我们慢慢走。稍等，我看看周围，给您理理头绪。"),
+    ],
+}
+
+
+def _time_of_day(hour: int) -> str:
+    if 5 <= hour < 12:
+        return "morning"
+    if 12 <= hour < 18:
+        return "day"
+    if 18 <= hour < 23:
+        return "evening"
+    return "night"
+
+
+def greeting(code: str | None, place: str | None = None, hour: int | None = None) -> str:
+    """A varied session opener: a time-of-day greeting ('Доброе утро!' …) + a randomly
+    picked tail that names the district/city when known. `hour` is the walker's LOCAL hour
+    (0-23); None => a neutral 'day' opener."""
+    lang = normalize(code)
+    openers = _GREETING_OPENERS.get(lang, _GREETING_OPENERS[FALLBACK])
+    opener = openers[_time_of_day(hour if hour is not None else 12)]
+    with_place, without_place = random.choice(
+        _GREETING_TAILS.get(lang, _GREETING_TAILS[FALLBACK])
+    )
+    tail = with_place.format(place=place) if place else without_place
+    return f"{opener} {tail}"
+
+
+# Woven back into a narration we paused to slip an object in (spoken before the remaining
+# sentences resume) — so the return doesn't feel like a jump-cut.
+_RESUME_CONNECTIVES: dict[str, str] = {
+    "ru": "Так вот, вернёмся.",
+    "en": "So, back to what I was saying.",
+    "es": "Bueno, volvamos a lo que decía.",
+    "fr": "Bref, revenons à ce que je disais.",
+    "de": "Also, zurück zu dem, was ich sagte.",
+    "it": "Dunque, torniamo a quello che dicevo.",
+    "pt": "Então, voltando ao que eu dizia.",
+    "zh": "好，我们接着刚才说的。",
+}
+
+# Prefix for an object we only get to AFTER finishing a higher-priority one — we've
+# already walked past it, so frame it as "by the way, we passed …".
+_PASSED_OBJECT_INTROS: dict[str, str] = {
+    "ru": "Кстати, мы только что прошли кое-что.",
+    "en": "By the way, we just passed something.",
+    "es": "Por cierto, acabamos de pasar algo.",
+    "fr": "Au fait, on vient de passer quelque chose.",
+    "de": "Übrigens, wir sind gerade an etwas vorbeigekommen.",
+    "it": "A proposito, siamo appena passati accanto a qualcosa.",
+    "pt": "A propósito, acabamos de passar por algo.",
+    "zh": "对了，我们刚刚路过一个地方。",
+}
+
+
+def resume_connective(code: str | None) -> str:
+    """Spoken before the remaining sentences of a narration we paused to weave an object in."""
+    return _RESUME_CONNECTIVES.get(normalize(code), _RESUME_CONNECTIVES[FALLBACK])
+
+
+def passed_object_intro(code: str | None) -> str:
+    """Prefix for an object narrated after we'd already walked past it ('кстати, мы прошли')."""
+    return _PASSED_OBJECT_INTROS.get(normalize(code), _PASSED_OBJECT_INTROS[FALLBACK])
 
 
 def stt_unclear(code: str | None) -> str:

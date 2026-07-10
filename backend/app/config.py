@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     # ungrounded cascade is skipped in fact-less areas; the planned arc + reach + real objects
     # carry the tour instead. Grounded areas cascade as before.
     area_cascade_requires_facts: bool = True
+    # Speak an instant, warm greeting the moment a walk starts (fills the load gap so the
+    # tour begins immediately; the area intro follows). Off => the tour opens with the area intro.
+    session_greeting: bool = True
     # Activate the cross-paragraph "next_hook" baton: the Narrator emits a short
     # internal HOOK: line that we strip from speech and hand to the next paragraph,
     # so transitions are woven rather than improvised cold. Kept on the creative
@@ -150,11 +153,14 @@ class Settings(BaseSettings):
     # close to it. Outside the bubble the area story spine (city/district/street)
     # carries the tour — the guide doesn't narrate objects scattered across the
     # wider search radius. Small so narration tracks where the user actually is.
-    # 60 m: tight enough that a narrated object is genuinely "right here", not 70+ m to
-    # the side where the walker can't see it (a real walk narrated a kindergarten/orchard
-    # ~72 m off and it read as "talking about far things"). Objects between this and
-    # weave_radius_m are still reachable via the gaze-gated reach fallback.
-    narrate_radius_m: float = 60.0
+    # 45 m: tight enough that a narrated object is genuinely "right here", not several
+    # houses away. Objects between this and reach_radius_m are still reachable via the
+    # gaze-gated reach fallback (but that's now capped much tighter — see reach_radius_m).
+    narrate_radius_m: float = 45.0
+    # The reach fallback (gaze-gated) narrates an object AHEAD only within this radius —
+    # much tighter than weave_radius_m so the guide doesn't announce a place 150-200 m
+    # away ("triggered several houses off"). It fires only for what you're about to reach.
+    reach_radius_m: float = 100.0
     # Cap how many (nearest) candidates are considered per tick — bounds the
     # Scorer's input/output size (its JSON grows linearly with candidate count).
     scorer_max_candidates: int = 6

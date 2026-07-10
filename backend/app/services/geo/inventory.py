@@ -120,6 +120,12 @@ class InventoryStore:
         self._cap()
         return inv
 
+    def peek(self, session_id: str) -> SessionInventory | None:
+        """The session's cached disc WITHOUT fetching — for the cheap per-frame bubble
+        check that drives object preemption (no Overpass on the hot path)."""
+        entry = self._data.get(session_id)
+        return entry[1] if entry is not None else None
+
     def update_approach(self, inv: SessionInventory, position: GeoPoint) -> None:
         """Refresh each object's distance memory from the live position."""
         close = settings.weave_radius_m

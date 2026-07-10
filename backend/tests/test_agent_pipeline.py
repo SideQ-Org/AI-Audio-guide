@@ -11,12 +11,15 @@ from app.services.geo.providers import StaticPlaceProvider
 from app.services.llm.client import FakeLLM
 from app.services.llm.router import Role
 from app.shared.schemas import (
+    Address,
     Candidate,
     CompanionInput,
     GazeConfidence,
     GeoPoint,
+    Heading,
     NarratorFlags,
     NarratorInput,
+    Pace,
     Place,
     ScorerInput,
     Significance,
@@ -37,6 +40,41 @@ def _candidate(pid, name, category, weight, dist=10.0, facts=None) -> Candidate:
         facts_available=facts is not None,
         facts_snippet=facts,
     )
+
+
+def test_warm_narration_populates_the_pregeneration_cache():
+    """Pre-generating the passing narration for an object you're approaching fills the
+    cache keyed (place_id, lang), so step() can speak it instantly on arrival."""
+    async def run():
+        pipeline = TextPipeline(
+            HeuristicScorer(), TemplateNarrator(),
+            MockEnricher({"p": "Большой музей девятнадцатого века."}), enrich_top_k=3,
+        )
+        cand = _candidate("p", "Музей", "museum", 0.6, dist=120, facts=None)
+        await pipeline.warm_narration(
+            cand, seen=[], history=[], address=Address(), heading=Heading(),
+            pace=Pace.SLOW, preferences=None, language="ru", theme=None, told=[],
+            next_hook=None,
+        )
+        return pipeline._narr_cache
+
+    cache = asyncio.run(run())
+    assert ("p", "ru") in cache
+    assert cache[("p", "ru")][0]  # non-empty pre-generated text
+
+
+def test_step_uses_and_pops_the_pregeneration_cache():
+    """step() speaks the pre-generated blurb (no LLM call) and removes it — one-shot."""
+    async def run():
+        pipeline = TextPipeline(HeuristicScorer(), TemplateNarrator(), MockEnricher({}))
+        pipeline._narr_cache[("p", "ru")] = ("Готовый рассказ про музей.", "хук")
+        near = _candidate("p", "Музей", "museum", 0.6, dist=30, facts=None)
+        out = await pipeline.step([near], seen=[], history=[], language="ru", passing=True)
+        return out, pipeline._narr_cache
+
+    out, cache = asyncio.run(run())
+    assert out.text == "Готовый рассказ про музей."  # spoke the cached text...
+    assert ("p", "ru") not in cache  # ...and popped it (one-shot)
 
 
 def test_template_narrator_silence_when_nothing_new():

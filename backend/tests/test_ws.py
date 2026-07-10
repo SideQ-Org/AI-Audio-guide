@@ -16,6 +16,7 @@ def _heuristic_app(stt_text: str = "А когда его построили?"):
     settings.geo_source = "fixture"
     settings.stt_backend = "mock"
     settings.stt_mock_text = stt_text
+    settings.session_greeting = False  # test the narration flow without the one-time opener
     main_module._orchestrator = build_orchestrator()
     main_module._stt = build_stt()
     return TestClient(main_module.app)

@@ -47,6 +47,10 @@ WEIGHT_BY_CATEGORY: dict[str, float] = {
     "community_centre": 0.4,
     "club": 0.4,
     "sports_centre": 0.45,
+    "pitch": 0.4,
+    "track": 0.4,
+    "sports_hall": 0.42,
+    "recreation_ground": 0.4,
     "square": 0.55,
     "pedestrian": 0.4,
     "stadium": 0.55,
@@ -139,6 +143,7 @@ KEEP_TAGS = frozenset(
         "club",
         "ruins",
         "heritage",
+        "sport",
         "healthcare",
     }
 )
@@ -224,6 +229,7 @@ def _category(t: dict[str, str]) -> str:
     leisure = t.get("leisure")
     if leisure in {
         "park", "garden", "nature_reserve", "common", "marina", "stadium", "sports_centre",
+        "pitch", "track", "sports_hall", "recreation_ground",
     }:
         return leisure
 

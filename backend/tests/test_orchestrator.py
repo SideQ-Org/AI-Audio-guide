@@ -37,6 +37,14 @@ def _orch(places, facts=None, companion=None) -> Orchestrator:
     )
 
 
+async def _skip_greeting(orch, sid):
+    """Mark the session greeted so the one-time session-opener greeting doesn't shift a
+    test that asserts the FIRST on_position outcome (discovery/silence)."""
+    st = await orch.store.load(sid)
+    st.greeted = True
+    await orch.store.save(st)
+
+
 class CountingPipeline(TextPipeline):
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
@@ -58,7 +66,7 @@ def test_walk_narrates_and_persists_memory():
         narrated = []
         for step in walk(RED_SQUARE, speed_mps=1.3, step_s=8.0):
             out = await orch.on_position("s1", step.position, step.heading, step.pace)
-            if out.kind == "narration":
+            if out.kind == "narration" and out.place_id:  # skip greeting/area lines (no place)
                 narrated.append(out.place_id)
         state = await orch.store.load("s1")
         return narrated, state
@@ -96,6 +104,7 @@ def test_heuristic_gate_skips_llm_on_unchanged_set():
         discovery = Discovery(StaticPlaceProvider([_place("shop1", "ГУМ", "shop")]))
         pipeline = CountingPipeline(HeuristicScorer(), TemplateNarrator(), MockEnricher({}))
         orch = Orchestrator(discovery, pipeline, HeuristicCompanion(), InMemoryStateStore())
+        await _skip_greeting(orch, "s")
         o1 = await orch.on_position("s", HERE, Heading(), Pace.SLOW)
         o2 = await orch.on_position("s", HERE, Heading(), Pace.SLOW)
         return o1, o2, pipeline.calls
@@ -192,6 +201,7 @@ def test_object_narrated_only_within_passing_bubble():
     orch = _orch([p], facts={"p": "Большой музей."})
 
     async def run():
+        await _skip_greeting(orch, "s")
         far = GeoPoint(lat=HERE.lat + 0.0018, lon=HERE.lon)  # ~200 m: in window, not in bubble
         o_far = await orch.on_position("s", far, Heading(), Pace.SLOW)
         assert o_far.kind != "narration"
@@ -207,11 +217,12 @@ def test_reach_narrates_in_cone_object_instead_of_silence():
     """Last-resort reach: when the passing bubble is empty and the area spine is dry
     (here: no area at all), a visible object AHEAD (in the gaze cone, past the bubble)
     is narrated instead of dead air — but only when it's actually in view."""
-    p = _place("p", "Музей", "museum", lat=HERE.lat + 0.0013)  # ~145 m due north
+    p = _place("p", "Музей", "museum", lat=HERE.lat + 0.0007)  # ~78 m due north (within reach)
     facts = {"p": "Большой музей."}
 
     async def run_facing_it():
         orch = _orch([p], facts=facts)
+        await _skip_greeting(orch, "s")
         facing = Heading(direction_deg=0.0)  # north — the object is in the cone
         out = await orch.on_position("s", HERE, facing, Pace.SLOW)
         assert out.kind == "narration"
@@ -219,12 +230,68 @@ def test_reach_narrates_in_cone_object_instead_of_silence():
 
     async def run_facing_away():
         orch = _orch([p], facts=facts)
+        await _skip_greeting(orch, "s")
         away = Heading(direction_deg=180.0)  # south — object NOT in view -> stay silent
         out = await orch.on_position("s", HERE, away, Pace.SLOW)
         assert out.kind != "narration"
 
     asyncio.run(run_facing_it())
     asyncio.run(run_facing_away())
+
+
+def test_greeting_fires_once_at_session_start():
+    """The instant session-opener greeting is the first thing spoken (no place), exactly
+    once, so the tour starts immediately while the rest loads."""
+    orch = _orch([])
+
+    async def run():
+        settings.session_greeting = True
+        o1 = await orch.on_position("g", HERE, Heading(), Pace.SLOW)
+        st = await orch.store.load("g")
+        o2 = await orch.on_position("g", HERE, Heading(), Pace.SLOW)
+        return o1, o2, st.greeted
+
+    o1, o2, greeted = asyncio.run(run())
+    assert o1.kind == "narration" and o1.place_id is None and o1.text  # the greeting
+    assert greeted is True
+    assert o2.text != o1.text  # not greeted again on the next tick
+
+
+def test_peek_bubble_flags_fresh_in_bubble_object():
+    """The cheap per-frame check flags a fresh object sitting in the narrate bubble (the
+    signal to preempt), and stops flagging it once it's been narrated."""
+    p = _place("p", "Музей", "museum")  # at HERE
+    orch = _orch([p])
+
+    async def run():
+        await _skip_greeting(orch, "s")
+        far = GeoPoint(lat=HERE.lat + 0.0018, lon=HERE.lon)  # ~200 m: builds inventory
+        await orch.on_position("s", far, Heading(), Pace.SLOW)
+        hit = await orch.peek_bubble("s", HERE, Heading())  # p is right here now
+        await orch.on_position("s", HERE, Heading(), Pace.SLOW)  # narrate it
+        hit2 = await orch.peek_bubble("s", HERE, Heading())
+        return hit, hit2
+
+    hit, hit2 = asyncio.run(run())
+    assert hit is not None and hit[0] == "p"  # (id, significance) for the bubble object
+    assert hit2 is None  # already narrated -> nothing fresh to jump to
+
+
+def test_narrate_object_passed_prefixes_ksstati():
+    """narrate_object(passed=True) narrates a specific object we've walked past, prefixed
+    with the 'кстати, мы прошли' framing — the scheduler's deferred-mention path."""
+    p = _place("p", "Музей", "museum")  # at HERE
+    orch = _orch([p], facts={"p": "Большой музей девятнадцатого века."})
+
+    async def run():
+        await _skip_greeting(orch, "s")
+        far = GeoPoint(lat=HERE.lat + 0.0018, lon=HERE.lon)  # ~200 m: builds inventory, p unseen
+        await orch.on_position("s", far, Heading(), Pace.SLOW)
+        return await orch.narrate_object("s", "p", passed=True)
+
+    out = asyncio.run(run())
+    assert out.kind == "narration" and out.place_id == "p"
+    assert out.text.startswith("Кстати,")  # the passed-object framing prefix
 
 
 def test_street_change_weaves_transition_without_resetting_arc():
@@ -409,6 +476,7 @@ def test_passing_notable_object_floored_when_facts_cold_not_left_silent():
 
     async def run():
         orch = _orch([p], facts={})  # cold: no facts on the first approach
+        await _skip_greeting(orch, "s")
         near = GeoPoint(lat=HERE.lat + 0.00035, lon=HERE.lon)  # ~39 m: in the bubble
         o1 = await orch.on_position("s", near, Heading(), Pace.SLOW)
         # named immediately via the floor mention, even with no facts and a silent model

@@ -178,6 +178,9 @@ def test_arc_opener_then_woven_object_then_outline_beats_no_repeats():
 
     async def run():
         orch = _orch([place])
+        st = await orch.store.load("s1")  # skip the one-time opener greeting for this arc test
+        st.greeted = True
+        await orch.store.save(st)
         here = GeoPoint(lat=55.7415, lon=37.6539)
         outs = []
         for _ in range(5):

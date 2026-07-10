@@ -977,6 +977,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (!_speaking && (!_paused || !isNarration)) _speakNext();
   }
 
+  // A narration about an object you're passing RIGHT NOW (server `interrupt` flag): cut
+  // the line currently playing and drop the queue, then speak this one immediately — so
+  // "прямо перед тобой" lands while you're still there, not after you've walked on.
+  Future<void> _speakInterrupting(String text) async {
+    if (_voice && !_recording) await _hush();  // cut current + clear queue
+    _enqueueSpeech(text, isNarration: true);    // then speak it now (or ack if muted)
+  }
+
   Future<void> _speakNext() async {
     if (_speaking || _speakQueue.isEmpty) return;
     // While paused, only a reply may play; narration stays queued until resume. Speak
@@ -1183,7 +1191,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               _curIsReply = false;
             });
             _add('guide', t);
-            _enqueueSpeech(t, isNarration: true); // queued; paced by `played`
+            if (m['interrupt'] == true) {
+              _speakInterrupting(t); // object you're passing now — cut current, speak it
+            } else {
+              _enqueueSpeech(t, isNarration: true); // queued; paced by `played`
+            }
             _maybeShowMidAd(); // free tier: an ad break every few narrations
             break;
           case 'reply':

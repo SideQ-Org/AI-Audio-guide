@@ -2,12 +2,26 @@ import asyncio
 from pathlib import Path
 
 from app.services.geo.discovery import Discovery
-from app.services.geo.providers import StaticPlaceProvider
+from app.services.geo.providers import StaticPlaceProvider, _element_to_place
 from app.shared.schemas import GazeConfidence, GeoPoint, Heading, Pace, Place
 from sim.routes import RED_SQUARE
 from sim.walk import walk
 
 FIXTURE = Path(__file__).parent / "fixtures" / "places_red_square.json"
+
+
+def test_unnamed_sports_pitch_gets_a_synthesized_name():
+    """A neighbourhood football field (leisure=pitch sport=soccer) is usually unnamed —
+    it must survive discovery with a synthesized name, while a tiny table-tennis court
+    stays nameless and is dropped (no flooding the tour)."""
+    o = GeoPoint(lat=55.0, lon=37.0)
+    soccer = {"type": "way", "id": 1, "tags": {"leisure": "pitch", "sport": "soccer"},
+              "geometry": [{"lat": 55.0, "lon": 37.0}], "center": {"lat": 55.0, "lon": 37.0}}
+    p = _element_to_place(soccer, o)
+    assert p is not None and p.name == "футбольное поле" and p.category == "pitch"
+    tt = {"type": "node", "id": 2, "tags": {"leisure": "pitch", "sport": "table_tennis"},
+          "lat": 55.0, "lon": 37.0}
+    assert _element_to_place(tt, o) is None  # not a notable sport -> dropped
 
 
 def test_walk_yields_monotonic_steps_with_heading():

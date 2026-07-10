@@ -307,6 +307,7 @@ class SessionState(BaseModel):
     # narration_history window) and the substrate for callbacks / long-term memory.
     memory: WalkMemory = Field(default_factory=WalkMemory)
     state: str = "idle"  # FSM state name
+    greeted: bool = False  # the instant session-opener greeting was already spoken (once)
     tick_seq: int = 0  # monotonic position-tick counter (walk-log correlation only)
     last_log_pos: GeoPoint | None = None  # last position printed to the walk log (move delta)
 

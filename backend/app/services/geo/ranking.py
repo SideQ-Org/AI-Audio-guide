@@ -21,7 +21,7 @@ from app.shared.schemas import Candidate, GazeConfidence, GeoPoint, Heading, Pla
 
 from .categories import weight_for
 
-GAZE_CONE_DEG = 45.0
+GAZE_CONE_DEG = 35.0  # narrower cone: only fire for what's clearly ahead, not off to the side
 _GAZE_BOOST_HIGH = 1.5
 _GAZE_BOOST_LOW = 1.2
 

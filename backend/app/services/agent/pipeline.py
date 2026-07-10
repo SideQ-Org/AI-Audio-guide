@@ -113,6 +113,10 @@ class TextPipeline:
         # No-LLM default: deterministic exonym/romanization (offline + tests).
         self.name_localizer = name_localizer or NameLocalizer()
         self._warm_tasks: set[asyncio.Task] = set()  # hold refs to background warms
+        # Pre-generated object narrations: (place_id, lang) -> (text, hook). Filled by
+        # `warm_narration` for the object you're walking toward, read+popped by `step` so
+        # the blurb is spoken the INSTANT you reach it (no 5-20 s LLM wait on arrival).
+        self._narr_cache: dict[tuple[str, str], tuple[str, str]] = {}
 
     def warm_ahead(
         self,
@@ -120,6 +124,14 @@ class TextPipeline:
         *,
         address: Address | None = None,
         language: str | None = None,
+        seen: list[str] | None = None,
+        history: list[str] | None = None,
+        theme: str | None = None,
+        told: list[str] | None = None,
+        next_hook: str | None = None,
+        heading: Heading | None = None,
+        pace: Pace = Pace.SLOW,
+        preferences: ControlPatch | None = None,
     ):
         """Non-blocking: warm the fact cache for objects the user is walking TOWARD
         (in the course cone, nearest first), so facts are ready before arrival. A
@@ -128,6 +140,32 @@ class TextPipeline:
         if self.enrich_top_k is None or not candidates:
             return None
         lang = language or self.language
+
+        # Pre-generate the narration for the object you're walking TOWARD (nearest
+        # in-cone, unseen, approaching but not yet in the bubble), so step() speaks it
+        # the instant you arrive. Independent of fact-prefetch below (warm_narration
+        # warms its own facts). Only when the orchestrator passes the arc context.
+        if seen is not None:
+            seen_set = set(seen)
+            target = next(
+                (
+                    c for c in candidates
+                    if c.in_gaze_cone
+                    and c.place.id not in seen_set
+                    and settings.narrate_radius_m < c.distance_m <= settings.weave_radius_m
+                    and (c.place.id, lang) not in self._narr_cache
+                ),
+                None,
+            )
+            if target is not None:
+                t2 = asyncio.ensure_future(self.warm_narration(
+                    target, seen=seen, history=history or [], address=address,
+                    heading=heading, pace=pace, preferences=preferences, language=lang,
+                    theme=theme, told=told or [], next_hook=next_hook,
+                ))
+                self._warm_tasks.add(t2)
+                t2.add_done_callback(self._warm_tasks.discard)
+
         # Cone-first, then nearest: facts for what you're walking toward are warmed
         # first, but nearby objects off the cone still get facts too — so the guide
         # has something ready whichever object you end up passing (background
@@ -153,6 +191,61 @@ class TextPipeline:
         self._warm_tasks.add(task)
         task.add_done_callback(self._warm_tasks.discard)
         return task
+
+    async def _render_object(
+        self, chosen, place, sig, *, addr, heading, pace, switching, theme, told,
+        next_hook, history, preferences, passing, in_view, lang, nothing_new,
+    ) -> tuple[str, str]:
+        """The narrator call for one chosen object — shared by step() and
+        warm_narration() so a pre-generated blurb matches what step would produce."""
+        raw = await self.narrator.narrate(
+            NarratorInput(
+                place=place, significance=sig, facts=chosen.facts_snippet,
+                distance_m=chosen.distance_m, heading=heading or Heading(),
+                side=chosen.side, in_view=in_view, pace=pace, context=_context(addr),
+                theme=theme, told=told or [], next_hook=next_hook, history=history,
+                flags=NarratorFlags(
+                    switching=switching, nothing_new=nothing_new,
+                    passing=passing, preferences=preferences,
+                ),
+                language=lang,
+            )
+        )
+        return split_hook(raw, lang)
+
+    async def warm_narration(
+        self, chosen, *, seen, history, address, heading, pace, preferences,
+        language, theme, told, next_hook,
+    ) -> None:
+        """Pre-render the PASSING narration for an object you're walking toward, so
+        step() speaks it the instant you reach it (no LLM wait on arrival). Facts are
+        warmed first; a cold-facts silence just isn't cached (step generates + floors
+        on arrival as usual)."""
+        lang = language or self.language
+        key = (chosen.place.id, lang)
+        if chosen.place.id in set(seen) or key in self._narr_cache:
+            return
+        addr = address or Address()
+        ctx = ", ".join(p for p in (addr.city, addr.country) if p) or None
+        await prefetch(
+            [chosen], self.enricher, self.cache, top_k=1,
+            timeout_s=self.enrich_timeout_s, context=ctx, language=lang,
+        )
+        enriched = attach_facts([chosen], self.cache, lang)[0]
+        place = enriched.place.model_copy(update={"name": await self.name_localizer.localize(
+            enriched.place.tags, enriched.place.name, lang)})
+        sig = significance_from_weight(enriched.type_weight, enriched.facts_available)
+        text, hook = await self._render_object(
+            enriched, place, sig, addr=addr, heading=heading, pace=pace, switching=False,
+            theme=theme, told=told, next_hook=next_hook, history=history,
+            preferences=preferences, passing=True, in_view=enriched.in_gaze_cone,
+            lang=lang, nothing_new=False,
+        )
+        if text:
+            self._narr_cache[key] = (text, hook)
+            if len(self._narr_cache) > 32:  # bound: keep the freshest handful
+                self._narr_cache.pop(next(iter(self._narr_cache)))
+            log.info("pregenerate place=%r | %s", place.name, clip(text))
 
     async def step(
         self,
@@ -232,31 +325,18 @@ class TextPipeline:
         in_view = chosen.in_gaze_cone and (
             reach or chosen.distance_m <= settings.narrate_radius_m
         )
-        raw = await self.narrator.narrate(
-            NarratorInput(
-                place=place,
-                significance=sig,
-                facts=chosen.facts_snippet,
-                distance_m=chosen.distance_m,
-                heading=heading or Heading(),
-                side=chosen.side,
-                in_view=in_view,
-                pace=pace,
-                context=_context(addr),
-                theme=theme,
-                told=told or [],
-                next_hook=next_hook,
-                history=history,
-                flags=NarratorFlags(
-                    switching=switching,
-                    nothing_new=not candidates,
-                    passing=passing,
-                    preferences=preferences,
-                ),
-                language=lang,
+        # Pre-generated? Speak it instantly (the whole point — no LLM wait on arrival).
+        cached = self._narr_cache.pop((chosen.place.id, lang), None)
+        if cached is not None:
+            text, hook = cached
+            log.info("step CACHED place=%r (pre-generated) | %s", place.name, clip(text))
+        else:
+            text, hook = await self._render_object(
+                chosen, place, sig, addr=addr, heading=heading, pace=pace,
+                switching=switching, theme=theme, told=told, next_hook=next_hook,
+                history=history, preferences=preferences, passing=passing,
+                in_view=in_view, lang=lang, nothing_new=not candidates,
             )
-        )
-        text, hook = split_hook(raw, lang)
         # Guarantee a close, named object is never dead air. DeepSeek sometimes ignores
         # the "passing -> never silent" rule (especially with empty facts), and a
         # silenced passing object would then be gated out forever (its facts-aware
