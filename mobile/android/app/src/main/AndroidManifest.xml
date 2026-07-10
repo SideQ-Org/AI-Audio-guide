@@ -1,0 +1,91 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Real GPS sensor (heading derived from GPS course) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!-- WebSocket to the backend; cleartext allows ws:// to a LAN IP / emulator -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Microphone for voice barge-in (ask the guide by voice) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- Background operation: keep narrating with the screen locked / phone in a
+         pocket. geolocator runs a foreground LOCATION service that holds the process
+         alive, so GPS, the WebSocket and on-device TTS keep running in the background.
+         ACCESS_BACKGROUND_LOCATION is optional (the foreground-service-while-in-use
+         model already works); granting "Allow all the time" just makes long walks more
+         resilient on aggressive-battery OEMs. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- Lets us ask aggressive-battery OEMs (Samsung etc.) not to freeze the service. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+    <application
+        android:label="AI Audio Guide"
+        android:name="${applicationName}"
+        android:usesCleartextTraffic="true"
+        android:icon="@mipmap/ic_launcher">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- OAuth (Google/Apple via Supabase): after the browser sign-in, Supabase
+                 redirects to this deep link and the OS routes it back to the app. Must
+                 match SUPABASE_OAUTH_REDIRECT (default aiguide://login-callback). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="aiguide" android:host="login-callback"/>
+            </intent-filter>
+        </activity>
+        <!-- flutter_foreground_task: the service that keeps the tour alive in the
+             background. Type 'location' so background GPS keeps flowing; the plugin
+             does NOT declare the service itself, so we declare it here. -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="location"
+            android:stopWithTask="true"
+            android:exported="false" />
+        <!-- AdMob (free-tier video ads). This is Google's official SAMPLE app id, which
+             serves TEST ads only — replace it with your real AdMob app id before release
+             (AdMob console -> App settings). The per-unit ad ids are set via dart-define
+             (see lib/ads/ads_service.dart). Required by google_mobile_ads or the app
+             crashes on start. -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-3940256099942544~3347511713" />
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>

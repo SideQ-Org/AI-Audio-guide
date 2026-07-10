@@ -1,0 +1,30 @@
+# Normalize line endings across platforms: store text as LF in the repo and check
+# it out as LF everywhere. Files came in with CRLF after a Windows->macOS transfer;
+# this makes the repo canonical so line endings never show up as spurious diffs again.
+* text=auto eol=lf
+
+# Windows scripts must stay CRLF to run.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Explicitly binary — never touch these (git usually auto-detects, but be safe).
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.pdf   binary
+*.jar   binary
+*.keystore binary
+*.jks   binary
+*.p12   binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
+*.apk   binary
+*.aab   binary
+*.ipa   binary
+*.tgz   binary
+*.zip   binary

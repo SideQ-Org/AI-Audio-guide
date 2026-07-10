@@ -1,0 +1,67 @@
+# Codemagic CI — build the test apps without a Mac and ship iOS to TestFlight.
+# In the Codemagic UI: set this app's project path to `mobile/`, add an App Store Connect
+# API key integration, set your bundle id, and the WS_URL (the backend host). Then run a workflow.
+# Docs: https://docs.codemagic.io/yaml-quick-start/building-a-flutter-app/
+
+workflows:
+  android-test:
+    name: Android test APK
+    instance_type: linux_x2
+    environment:
+      flutter: stable
+      vars:
+        WS_URL: "wss://178.83.121.62.sslip.io/ws"   # <-- the backend host
+    scripts:
+      - flutter pub get
+      - flutter build apk --release --dart-define=WS_URL=$WS_URL
+    artifacts:
+      - build/**/outputs/**/*.apk                    # download/share the APK from the build
+    # publishing:  # optional Google Play internal track — add a service account first
+    #   google_play:
+    #     credentials: $GCLOUD_SERVICE_ACCOUNT_CREDENTIALS
+    #     track: internal
+
+  ios-testflight:
+    name: iOS TestFlight
+    instance_type: mac_mini_m2
+    integrations:
+      app_store_connect: CodemagicASCKey            # <-- name of your App Store Connect API key in Codemagic
+    environment:
+      flutter: stable
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.example.ai_audio_guide   # <-- your real bundle id (not com.example for the store)
+      vars:
+        WS_URL: "wss://178.83.121.62.sslip.io/ws"
+    scripts:
+      - flutter pub get
+      - xcode-project use-profiles                  # apply the signing profiles Codemagic fetched
+      - flutter build ipa --release --dart-define=WS_URL=$WS_URL
+          --export-options-plist=/Users/builder/export_options.plist
+    artifacts:
+      - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true                  # your lead installs via the TestFlight app
+
+  ios-unsigned:
+    # FREE path — NO Apple Developer account, NO Mac of your own. Builds an UNSIGNED
+    # .ipa. Whoever has an iPhone installs it with Sideloadly/AltStore on Windows
+    # using a free Apple ID (the install is valid 7 days, just re-sign weekly).
+    # Codemagic's free tier includes ~500 macOS M2 minutes/month — enough for this.
+    name: iOS unsigned IPA (free, sideload)
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      vars:
+        WS_URL: "wss://178.83.121.62.sslip.io/ws"   # <-- the backend host (baked in)
+    scripts:
+      - flutter pub get
+      - flutter build ios --release --no-codesign --dart-define=WS_URL=$WS_URL
+      # package the built .app into an unsigned .ipa (Payload/ layout) for sideloading
+      - mkdir -p build/sideload/Payload
+      - cp -r build/ios/iphoneos/Runner.app build/sideload/Payload/
+      - cd build/sideload && zip -r AIGuide-unsigned.ipa Payload
+    artifacts:
+      - build/sideload/*.ipa                          # download this, sign+install with Sideloadly

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Template for `flutter build ipa --export-options-plist ios/ExportOptions.plist`.
+     Copy to ios/ExportOptions.plist and fill in teamID once the Apple Developer account
+     exists (Xcode → Signing & Capabilities shows the Team, or developer.apple.com →
+     Membership → Team ID). `method=app-store` targets TestFlight / App Store Connect. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key>
+  <string>app-store</string>
+  <key>teamID</key>
+  <string>YOUR_TEAM_ID</string>
+  <key>signingStyle</key>
+  <string>automatic</string>
+  <key>uploadSymbols</key>
+  <true/>
+  <key>destination</key>
+  <string>export</string>
+</dict>
+</plist>

@@ -1,0 +1,37 @@
+name: ai_audio_guide
+description: AI Audio Guide — real-time autonomous walking tour client.
+publish_to: "none"
+version: 0.0.1+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:    # localized Material/Cupertino widgets + gen-l10n runtime
+    sdk: flutter
+  intl: ^0.20.2             # ICU message formatting for the generated AppLocalizations
+  web_socket_channel: ^3.0.1
+  geolocator: ^13.0.1
+  flutter_tts: ^4.2.0       # on-device TTS — the guide speaks the narration aloud
+  record: ^7.0.0            # mic capture for voice barge-in (7.x: internally consistent federated set)
+  path_provider: ^2.1.4     # temp dir for the recorded clip
+  flutter_map: ^8.0.0       # open-source map (Leaflet-like, pure Dart, no API key)
+  latlong2: ^0.9.1          # LatLng type for flutter_map
+  sensors_plus: ^6.0.1      # magnetometer+accelerometer -> device facing (gaze_confidence=high)
+  shared_preferences: ^2.3.2 # persist the user's theme + language choice across launches
+  flutter_foreground_task: ^9.2.2
+  supabase_flutter: ^2.8.0   # accounts: Google/Apple/email auth + JWT (optional; off without keys)
+  http: ^1.2.2               # REST calls to the walk-history endpoints (/me, /walks)
+  in_app_purchase: ^3.2.0    # paid tier: Google Play Billing / StoreKit subscriptions
+  google_mobile_ads: ^5.1.0  # free tier: rewarded/interstitial video ads (pre-roll + mid-tour)
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  generate: true            # run gen-l10n from lib/l10n/*.arb on build

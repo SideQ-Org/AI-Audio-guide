@@ -1,0 +1,29 @@
+# Deploy the backend on a LAN server:
+#   cp .env.example .env   # then fill OPENAI_API_KEY
+#   docker compose up -d --build
+# The phone points at  ws://<this-server-ip>:8000/ws
+services:
+  backend:
+    build: .
+    image: ai-audio-guide-backend
+    container_name: ai-guide
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Persist the Whisper model + the fact cache on a volume (survive rebuilds).
+      HF_HOME: /data/hf
+      ENRICH_CACHE_PATH: /data/enrich.json
+    volumes:
+      - guide-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  guide-data:

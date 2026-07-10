@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Flutter / Dart
+mobile/.dart_tool/
+mobile/build/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.packages
+mobile/pubspec.lock
+
+# Build artifacts & signing material — must never be committed
+*.apk
+*.aab
+*.ipa
+*.keystore
+*.jks
+*.p12
+mobile/android/key.properties
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+
+# Local fact-enrichment cache
+backend/.enrich_cache.json
+
+# stray local backend tarball (may contain secrets) — never commit
+guide-backend.tgz
+
+# Local design scratch + assistant working docs + pulled prod logs (not for the shared repo)
+/design/
+/MEMORY_GRAPH_DESIGN.md
+/WALK_LOG_*.md
+/prod_walk_*.log
+/simulator_screenshot_*.png
+/.claude/
+
+# Operational handoff docs — contain prod IP / SSH workflow / test-account creds; keep
+# them out of the shared repo (they live locally and in the personal repo).
+/CONTINUE.md
+/SUPABASE_SETUP.md
+/PROD_INFRA.md

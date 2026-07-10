@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Audio Guide — дашборд</title>
+<style>
+  :root {
+    --bg: #0b0f14; --panel: #131a22; --panel2: #0f151c; --line: #22303c;
+    --ink: #e6edf3; --muted: #8899a6; --accent: #58a6ff; --good: #3fb950;
+    --warn: #d29922; --bad: #f85149; --chip: #1c2733;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.45 -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: rgba(11,15,20,.92); backdrop-filter: blur(6px); z-index: 5;
+  }
+  h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  h1 small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+  .pill {
+    padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 650;
+    border: 1px solid var(--line);
+  }
+  .pill.good { color: var(--good); border-color: #1c3a24; background: #0e1c13; }
+  .pill.bad  { color: var(--bad);  border-color: #47201d; background: #1c0f0e; }
+  .chip {
+    padding: 3px 9px; border-radius: 6px; font-size: 12px; color: var(--muted);
+    background: var(--chip); border: 1px solid var(--line);
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+  .spacer { flex: 1 1 auto; }
+  .ctl { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+  .ctl button {
+    background: var(--chip); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px;
+  }
+  .ctl button:hover { border-color: var(--accent); }
+  main { padding: 18px 20px 40px; max-width: 1400px; margin: 0 auto; }
+  .section-title {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
+    margin: 26px 4px 10px; font-weight: 650;
+  }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 13px 14px; min-height: 76px;
+  }
+  .card .k { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .5px; }
+  .card .v { font-size: 26px; font-weight: 680; margin-top: 6px; line-height: 1.1; }
+  .card .v.sm { font-size: 20px; }
+  .card .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .v.good { color: var(--good); } .v.warn { color: var(--warn); } .v.bad { color: var(--bad); }
+  .wide { grid-column: 1 / -1; }
+  .bar { height: 7px; border-radius: 4px; background: var(--panel2); overflow: hidden; margin-top: 9px; border: 1px solid var(--line); }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+  .bar > span.good { background: var(--good); } .bar > span.warn { background: var(--warn); } .bar > span.bad { background: var(--bad); }
+  .dist { display: flex; flex-direction: column; gap: 7px; }
+  .dist .row { display: grid; grid-template-columns: 120px 1fr 44px; align-items: center; gap: 10px; font-size: 12.5px; }
+  .dist .row .name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dist .row .n { text-align: right; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .5px; }
+  td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  td.num, th.num { text-align: right; }
+  .muted { color: var(--muted); }
+  .err { color: var(--bad); font-family: ui-monospace, monospace; font-size: 12px; word-break: break-word; }
+  .panel-box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .cols { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .flash { animation: flash .5s ease; }
+  @keyframes flash { from { background: #1a2836; } to { background: var(--panel); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>AI Audio Guide <small>ops-дашборд</small></h1>
+  <span id="ready" class="pill">…</span>
+  <span class="chip" id="c-backend">backend: …</span>
+  <span class="chip" id="c-geo">geo: …</span>
+  <span class="chip" id="c-enrich">enrich: …</span>
+  <span class="chip" id="c-model">model: …</span>
+  <span class="spacer"></span>
+  <div class="ctl">
+    <span id="uptime">uptime —</span>
+    <span id="updated" class="muted">—</span>
+    <button id="pause">⏸ пауза</button>
+    <select id="rate">
+      <option value="2000">2s</option>
+      <option value="3000" selected>3s</option>
+      <option value="5000">5s</option>
+      <option value="10000">10s</option>
+    </select>
+  </div>
+</header>
+
+<main>
+  <div class="section-title">Живой мониторинг</div>
+  <div class="grid" id="live"></div>
+
+  <div class="section-title">Экономика</div>
+  <div class="grid" id="econ"></div>
+
+  <div class="section-title">Продуктовые KPI прогулки</div>
+  <div class="grid" id="kpi"></div>
+
+  <div class="section-title">Распределения</div>
+  <div class="cols">
+    <div class="panel-box"><div class="k muted" style="margin-bottom:10px">Языки</div><div class="dist" id="d-lang"></div></div>
+    <div class="panel-box"><div class="k muted" style="margin-bottom:10px">Категории объектов</div><div class="dist" id="d-cat"></div></div>
+    <div class="panel-box"><div class="k muted" style="margin-bottom:10px">Значимость</div><div class="dist" id="d-sig"></div></div>
+  </div>
+
+  <div class="section-title">Обогащение фактами (экономика)</div>
+  <div class="grid" id="enrich"></div>
+
+  <div class="section-title">Инфраструктура — Overpass</div>
+  <div class="grid" id="infra"></div>
+
+  <div class="section-title">Активные прогулки (по числу озвучек)</div>
+  <div class="panel-box"><table id="walks"><thead><tr>
+    <th>сессия</th><th class="num">озвучено</th><th class="num">переключений</th>
+    <th class="num">тишина</th><th>языки</th><th class="num">длит.</th>
+  </tr></thead><tbody></tbody></table></div>
+
+  <div class="section-title">Топ сессий по стоимости</div>
+  <div class="panel-box"><table id="cost"><thead><tr>
+    <th>сессия</th><th class="num">вызовов</th><th class="num">$</th>
+  </tr></thead><tbody></tbody></table></div>
+
+  <p class="muted" style="margin-top:26px;font-size:12px" id="footer"></p>
+</main>
+
+<script>
+const TOKEN = "__DASH_TOKEN__";
+const $ = s => document.querySelector(s);
+let timer = null, paused = false, prev = {};
+
+function fmtInt(n){ return (n==null) ? "—" : Number(n).toLocaleString("ru-RU"); }
+function fmtUsd(n){ return (n==null) ? "—" : "$" + Number(n).toFixed(4); }
+function fmtDur(s){
+  if (s==null) return "—";
+  s = Math.round(s);
+  if (s < 60) return s + "с";
+  if (s < 3600) return Math.floor(s/60) + "м " + (s%60) + "с";
+  return Math.floor(s/3600) + "ч " + Math.floor((s%3600)/60) + "м";
+}
+function pct(x){ return x==null ? "—" : Math.round(x*100) + "%"; }
+
+function card(k, v, sub, cls){
+  return `<div class="card"><div class="k">${k}</div>`
+       + `<div class="v ${cls||""}">${v}</div>`
+       + (sub ? `<div class="sub">${sub}</div>` : "") + `</div>`;
+}
+function cardBar(k, v, frac, sub, barCls){
+  const w = Math.max(0, Math.min(100, (frac||0)*100));
+  return `<div class="card"><div class="k">${k}</div>`
+       + `<div class="v sm">${v}</div>`
+       + `<div class="bar"><span class="${barCls||""}" style="width:${w}%"></span></div>`
+       + (sub ? `<div class="sub">${sub}</div>` : "") + `</div>`;
+}
+function dist(el, obj, colorClass){
+  const entries = Object.entries(obj||{});
+  if (!entries.length){ el.innerHTML = `<div class="muted">нет данных</div>`; return; }
+  const max = Math.max(...entries.map(e => e[1])) || 1;
+  el.innerHTML = entries.map(([name, n]) =>
+    `<div class="row"><div class="name">${name}</div>`
+    + `<div class="bar"><span class="${colorClass||""}" style="width:${(n/max*100)}%"></span></div>`
+    + `<div class="n">${fmtInt(n)}</div></div>`).join("");
+}
+
+async function tick(){
+  let d;
+  try {
+    const r = await fetch(`/dashboard/data?token=${encodeURIComponent(TOKEN)}`, {cache:"no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    d = await r.json();
+  } catch (e) {
+    $("#ready").className = "pill bad"; $("#ready").textContent = "нет связи с бэкендом";
+    $("#updated").textContent = "ошибка: " + e.message;
+    return;
+  }
+  const s = d.server, c = d.config, cost = d.cost, g = d.guide;
+
+  // header
+  $("#ready").className = "pill " + (s.ready ? "good" : "bad");
+  $("#ready").textContent = s.ready ? "READY" : "NOT READY";
+  $("#c-backend").innerHTML = "backend: <b>" + c.agent_backend + "</b>";
+  $("#c-geo").innerHTML = "geo: <b>" + c.geo_source + "</b>";
+  $("#c-enrich").innerHTML = "enrich: <b>" + c.enrichment_source + "</b>";
+  $("#c-model").innerHTML = "model: <b>" + c.model + "</b>";
+  $("#uptime").textContent = "uptime " + fmtDur(g.uptime_s);
+  $("#updated").textContent = "обновлено " + new Date().toLocaleTimeString("ru-RU");
+
+  // live
+  $("#live").innerHTML =
+      card("Активных сессий", fmtInt(s.active_sessions))
+    + card("LLM-вызовов", fmtInt(cost.calls))
+    + card("Ошибок LLM", fmtInt(cost.errors), "всего после ретраев", cost.errors ? "warn" : "")
+    + card("Подряд сбоев", fmtInt(s.consecutive_llm_failures),
+           "≥3 → /ready 503", s.consecutive_llm_failures>=3 ? "bad" : (s.consecutive_llm_failures? "warn":""))
+    + card("WS step-ошибок", fmtInt(s.ws_step_errors), null, s.ws_step_errors?"warn":"")
+    + card("WS вопрос-ошибок", fmtInt(s.ws_question_errors), null, s.ws_question_errors?"warn":"");
+
+  // economy
+  const walks = g.tracked_walks || 0;
+  const perWalk = walks ? cost.cost_usd / walks : null;
+  const cacheShare = cost.tok_in ? cost.tok_cached / (cost.tok_in) : null;
+  const econEls = [
+    card("Суммарно", fmtUsd(cost.cost_usd), "провайдерская стоимость"),
+    card("$ / прогулку", perWalk==null?"—":fmtUsd(perWalk), walks + " прогулок в учёте"),
+    card("Токенов in / out", fmtInt(cost.tok_in) + " / " + fmtInt(cost.tok_out),
+         "cached " + fmtInt(cost.tok_cached)),
+    cardBar("Доля кэша", pct(cacheShare), cacheShare, "чем больше, тем дешевле", "good"),
+  ];
+  if (c.usd_hard_cap > 0){
+    econEls.push(cardBar("Hard-cap", fmtUsd(cost.cost_usd) + " / $" + c.usd_hard_cap,
+      cost.cap_used_frac, "осталось " + fmtUsd(cost.cap_remaining_usd),
+      cost.cap_used_frac>=0.9?"bad":(cost.cap_used_frac>=0.6?"warn":"good")));
+  } else {
+    econEls.push(card("Hard-cap", "нет", "USD_HARD_CAP=0 — без потолка", "warn"));
+  }
+  $("#econ").innerHTML = econEls.join("");
+
+  // product KPIs
+  const nar = g.narrations || 0;
+  const switchRate = nar ? g.switches / nar : null;
+  const silenceTotal = g.silences + g.narrations;
+  const silenceRate = silenceTotal ? g.silences / silenceTotal : null;
+  $("#kpi").innerHTML =
+      card("Озвучено объектов", fmtInt(g.narrations))
+    + card("Переключений", fmtInt(g.switches), "доля " + pct(switchRate))
+    + card("Floor-упоминаний", fmtInt(g.floors), "близкий объект без фактов")
+    + card("Тишина", fmtInt(g.silences), "доля " + pct(silenceRate), g.silences?"warn":"")
+    + card("Подавлено повторов", fmtInt(g.suppressed_repeats), "no-repeat net", g.suppressed_repeats?"warn":"")
+    + card("Доп. рассказов", fmtInt(g.elaborations), "«расскажи ещё»")
+    + card("Area-битов", fmtInt(g.area_beats), "монолог о районе");
+
+  dist($("#d-lang"), g.by_language, "");
+  dist($("#d-cat"), g.by_category, "good");
+  dist($("#d-sig"), g.by_significance, "warn");
+
+  // enrichment economy
+  const et = g.enrich_wiki_hits + g.enrich_web_calls + g.enrich_misses;
+  $("#enrich").innerHTML =
+      cardBar("Бесплатные вики-факты", fmtInt(g.enrich_wiki_hits),
+              g.enrich_wiki_share, "доля " + pct(g.enrich_wiki_share) + " от " + fmtInt(et), "good")
+    + card("Платный веб-поиск", fmtInt(g.enrich_web_calls), "fallback за деньги", g.enrich_web_calls?"warn":"")
+    + card("Без фактов", fmtInt(g.enrich_misses), "гид честно молчит/называет")
+    + card("Всего обогащений", fmtInt(et));
+
+  // infra
+  const ot = g.overpass_ok + g.overpass_fail;
+  $("#infra").innerHTML =
+      cardBar("Успешность Overpass", pct(g.overpass_ok_rate), g.overpass_ok_rate,
+              fmtInt(g.overpass_ok) + " ok / " + fmtInt(g.overpass_fail) + " fail из " + fmtInt(ot),
+              g.overpass_ok_rate!=null && g.overpass_ok_rate<0.8 ? "bad" : "good")
+    + card("Успешных запросов", fmtInt(g.overpass_ok), null, "good")
+    + card("Провалов", fmtInt(g.overpass_fail), null, g.overpass_fail?"bad":"")
+    + `<div class="card wide"><div class="k">Последняя ошибка Overpass</div>`
+      + `<div class="err" style="margin-top:6px">${g.overpass_last_error || "—"}</div></div>`;
+
+  // walks table
+  const wb = $("#walks tbody");
+  wb.innerHTML = (g.top_walks||[]).map(w =>
+    `<tr><td class="mono">${w.session.slice(0,12)}…</td>`
+    + `<td class="num">${fmtInt(w.narrations)}</td>`
+    + `<td class="num">${fmtInt(w.switches)}</td>`
+    + `<td class="num">${fmtInt(w.silences)}</td>`
+    + `<td>${(w.languages||[]).join(", ")||"—"}</td>`
+    + `<td class="num">${fmtDur(w.duration_s)}</td></tr>`).join("")
+    || `<tr><td colspan="6" class="muted">пока нет прогулок</td></tr>`;
+
+  // cost table
+  const cb = $("#cost tbody");
+  cb.innerHTML = (cost.top_sessions||[]).map(t =>
+    `<tr><td class="mono">${t.session.slice(0,12)}…</td>`
+    + `<td class="num">${fmtInt(t.calls)}</td>`
+    + `<td class="num">${fmtUsd(t.cost_usd)}</td></tr>`).join("")
+    || `<tr><td colspan="3" class="muted">нет данных</td></tr>`;
+
+  $("#footer").textContent =
+    `v${s.version} · отслеживается прогулок: ${g.tracked_walks} · сессий с расходом: ${cost.tracked_sessions}`;
+  prev = d;
+}
+
+function schedule(){
+  if (timer) clearInterval(timer);
+  if (paused) return;
+  const ms = Number($("#rate").value);
+  timer = setInterval(tick, ms);
+}
+$("#pause").addEventListener("click", () => {
+  paused = !paused;
+  $("#pause").textContent = paused ? "▶ старт" : "⏸ пауза";
+  if (!paused) tick();
+  schedule();
+});
+$("#rate").addEventListener("change", schedule);
+tick(); schedule();
+</script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+# Automatic HTTPS via Let's Encrypt. The sslip.io hostname resolves to the server IP,
+# so no domain purchase is needed.
+#
+# Caddy serves the Flutter **web build** (static, identical to the mobile app) and
+# reverse-proxies only the API + WebSocket to the backend container. Access logging is
+# on (JSON to stdout -> `docker logs ai-guide-caddy`) so we can see real client IP/geo
+# of testers (the backend only ever sees Caddy's internal IP).
+#
+# NOTE: use `handle` blocks (mutually exclusive, source-ordered) so the static
+# try_files fallback can't swallow the API paths — a plain matcher + try_files would
+# rewrite /health -> /index.html before the proxy matcher runs.
+178.83.121.62.sslip.io {
+	encode zstd gzip
+
+	log {
+		format json
+	}
+
+	# Security headers (audit H3). Applied to every response. HSTS is safe here (the
+	# site is HTTPS-only via Let's Encrypt). CSP is intentionally NOT set: a wrong policy
+	# blank-screens the Flutter web app (it needs wasm-eval + the map-tile / Supabase /
+	# backend origins) — add one only after testing against the built app.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# API + WebSocket -> backend (WS upgrade handled automatically). Includes the
+	# accounts REST routes (/me, /walks[...]), billing (/billing/*), and the ops
+	# dashboard (/dashboard[...]); without these they'd fall through to the static file
+	# server and 404.
+	@api path /ws /health /ready /stats /me /walks /walks/* /billing/* /dashboard /dashboard/*
+	handle @api {
+		reverse_proxy backend:8000
+	}
+
+	# Everything else -> the Flutter web client (SPA); fall back to index.html.
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
+}

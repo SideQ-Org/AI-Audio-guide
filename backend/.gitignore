@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.DS_Store
+
+# accounts dev sqlite (local run)
+accounts_dev.db
+*.db
+
+# windows/cygwin crash dumps + prod-served web snapshot (not source)
+*.stackdump
+web/_prod_served.html

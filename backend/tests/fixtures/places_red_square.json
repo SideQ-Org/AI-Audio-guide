@@ -1,0 +1,50 @@
+[
+  {
+    "id": "way/saint-basil",
+    "name": "Собор Василия Блаженного",
+    "category": "place_of_worship",
+    "lat": 55.7525,
+    "lon": 37.6231,
+    "tags": { "historic": "church", "wikidata": "Q132974" }
+  },
+  {
+    "id": "way/lenin-mausoleum",
+    "name": "Мавзолей Ленина",
+    "category": "memorial",
+    "lat": 55.7537,
+    "lon": 37.6199,
+    "tags": { "historic": "memorial", "wikidata": "Q133038" }
+  },
+  {
+    "id": "way/gum",
+    "name": "ГУМ",
+    "category": "shop",
+    "lat": 55.7547,
+    "lon": 37.6215,
+    "tags": { "shop": "mall", "wikidata": "Q1517887" }
+  },
+  {
+    "id": "way/kazan-cathedral",
+    "name": "Казанский собор",
+    "category": "place_of_worship",
+    "lat": 55.7552,
+    "lon": 37.6196,
+    "tags": { "religion": "christian", "wikidata": "Q1736673" }
+  },
+  {
+    "id": "way/historical-museum",
+    "name": "Государственный исторический музей",
+    "category": "museum",
+    "lat": 55.7553,
+    "lon": 37.6178,
+    "tags": { "tourism": "museum", "wikidata": "Q1349906" }
+  },
+  {
+    "id": "node/cafe-bosco",
+    "name": "Кафе Bosco",
+    "category": "cafe",
+    "lat": 55.7546,
+    "lon": 37.6210,
+    "tags": { "amenity": "cafe" }
+  }
+]

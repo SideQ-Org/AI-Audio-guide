@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>AI Audio Guide</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; max-width: 760px; margin: 0 auto;
+      padding: 12px 14px 90px; background: #0d0f14; color: #e8eaed; }
+    h1 { font-size: 1.1rem; margin: .4rem 0 .8rem; }
+    .row { display: flex; gap: .5rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
+    button, select, input { font-size: 1rem; padding: .5rem .7rem; border-radius: 10px;
+      border: 1px solid #2a2f3a; background: #161a22; color: #e8eaed; }
+    button { cursor: pointer; }
+    button.primary { background: #18b8a6; color: #042; border: none; font-weight: 700; }
+    button:disabled { opacity: .4; cursor: default; }
+    button.on { background: #18b8a6; color: #042; border: none; }
+    #card { background: #161a22; border: 1px solid #2a2f3a; border-radius: 16px; padding: 14px;
+      margin: .6rem 0; min-height: 64px; }
+    #card .title { font-weight: 700; margin-bottom: 4px; }
+    #card .text { white-space: pre-wrap; line-height: 1.45; }
+    #log { margin-top: .6rem; }
+    .msg { padding: .55rem .8rem; border-radius: 12px; margin: .4rem 0; max-width: 92%; line-height: 1.4; }
+    .guide { background: #16203a; }
+    .reply { background: #10301f; }
+    .you   { background: #23262e; margin-left: auto; }
+    .meta  { color: #8a90a0; font-size: .8rem; }
+    .pill  { display:inline-block; padding:.1rem .55rem; border-radius:999px; background:#23262e; font-size:.75rem; }
+    .dot { display:inline-block; width:.7rem; height:.7rem; border-radius:50%; background:#c0392b; vertical-align:middle; }
+    .dot.on { background:#27c08a; }
+    label.f { font-size: .8rem; color:#8a90a0; }
+  </style>
+</head>
+<body>
+  <h1>🎧 AI Audio Guide</h1>
+
+  <div class="row">
+    <span id="dot" class="dot"></span> <span id="status">не подключено</span>
+    · <span id="state" class="pill">—</span>
+  </div>
+
+  <div class="row">
+    <label class="f">Язык</label>
+    <select id="lang">
+      <option value="ru">Русский</option><option value="en">English</option>
+      <option value="es">Español</option><option value="fr">Français</option>
+      <option value="de">Deutsch</option><option value="it">Italiano</option>
+      <option value="pt">Português</option><option value="zh">中文</option>
+    </select>
+    <label class="f">Тема</label>
+    <select id="theme">
+      <option value="">🎲 Авто</option>
+      <option value="история">🏛 История</option>
+      <option value="архитектура">🏗 Архитектура</option>
+      <option value="люди и судьбы">👤 Люди</option>
+      <option value="культура и искусство">🎭 Культура</option>
+      <option value="легенды и тайны">🕯 Легенды</option>
+    </select>
+    <button id="voice" class="on">🔊 Голос</button>
+  </div>
+
+  <div class="row">
+    <label class="f">Источник</label>
+    <select id="mode">
+      <option value="gps">📍 Реальный GPS (иди гуляй)</option>
+      <option value="demo">🧭 Демо-маршрут (Москва)</option>
+    </select>
+    <button id="start" class="primary">▶ Старт</button>
+    <button id="stop" disabled>⏹ Стоп</button>
+  </div>
+
+  <div id="card"><div class="text" style="color:#8a90a0">Нажми «Старт» — гид подключится и
+    начнёт рассказ о том, что вокруг. Разреши доступ к геолокации (и микрофону для вопросов).</div></div>
+
+  <div class="row">
+    <input id="msg" placeholder="Спросить гида голосом текстом…" style="flex:1; min-width:160px" />
+    <button id="ask" disabled>Спросить</button>
+    <button id="mic" disabled>🎤</button>
+  </div>
+
+  <div id="log"></div>
+
+  <script>
+  (function () {
+    // ---- WS protocol endpoint (same host, wss when the page is https) -------
+    const WS_TOKEN = '__WS_TOKEN__'; // injected by the server ('' => open endpoint)
+    const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws'
+      + (WS_TOKEN ? '?token=' + encodeURIComponent(WS_TOKEN) : '');
+    const TTS_LANG = { en:'en-US', ru:'ru-RU', es:'es-ES', fr:'fr-FR', de:'de-DE', it:'it-IT', pt:'pt-BR', zh:'zh-CN' };
+
+    // ---- demo route: the real Moscow walk (interpolated) --------------------
+    const ROUTE = [[55.725789,37.685192],[55.728789,37.677015],[55.741959,37.653943],[55.732312,37.639737]];
+    const STEP_M = 10, STEP_MS = 4000; // ~9 km/h
+    const R=6371000, rad=d=>d*Math.PI/180;
+    const dist=(a,b)=>{const dl=rad(b[0]-a[0]),dn=rad(b[1]-a[1]),la1=rad(a[0]),la2=rad(b[0]);
+      const h=Math.sin(dl/2)**2+Math.cos(la1)*Math.cos(la2)*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(h));};
+    function buildPoints(){const pts=[];for(let i=0;i<ROUTE.length-1;i++){const a=ROUTE[i],b=ROUTE[i+1],len=dist(a,b);
+      for(let t=0;t<len;t+=STEP_M){const f=t/len;pts.push({lat:a[0]+(b[0]-a[0])*f,lon:a[1]+(b[1]-a[1])*f});}}
+      pts.push({lat:ROUTE.at(-1)[0],lon:ROUTE.at(-1)[1]});return pts;}
+
+    // ---- DOM ----------------------------------------------------------------
+    const $ = id => document.getElementById(id);
+    const setState = s => $('state').textContent = s;
+    const setStatus = (s,on)=>{ $('status').textContent=s; $('dot').classList.toggle('on',!!on); };
+    const add = (cls,txt)=>{const d=document.createElement('div');d.className='msg '+cls;d.textContent=txt;
+      $('log').appendChild(d);window.scrollTo(0,document.body.scrollHeight);};
+    const card = (title,text)=>{$('card').innerHTML='';
+      if(title){const t=document.createElement('div');t.className='title';t.textContent=title;$('card').appendChild(t);}
+      const x=document.createElement('div');x.className='text';x.textContent=text;$('card').appendChild(x);};
+
+    let ws=null, timer=null, watchId=null, points=[], idx=0, running=false;
+    let voiceOn=true;
+
+    // ---- TTS queue, paced by `played` (pipeline the next paragraph) ---------
+    const queue=[]; let speaking=false;
+    function enqueue(text, isNarration){
+      if(!voiceOn){ if(isNarration) send({type:'played'}); return; }
+      queue.push({text,isNarration}); if(!speaking) speakNext();
+    }
+    function speakNext(){
+      if(speaking || !queue.length) return;
+      const s=queue.shift(); speaking=true;
+      const u=new SpeechSynthesisUtterance(s.text);
+      u.lang=TTS_LANG[$('lang').value]||'ru-RU'; u.rate=0.98;
+      u.onstart=()=>{ if(s.isNarration) send({type:'played'}); }; // ready the next while this plays
+      u.onend=()=>{ speaking=false; speakNext(); };
+      u.onerror=()=>{ speaking=false; speakNext(); };
+      try { speechSynthesis.speak(u); } catch(e){ speaking=false; }
+    }
+    function hush(){ queue.length=0; try{ speechSynthesis.cancel(); }catch(e){} speaking=false; }
+
+    // ---- WS ----------------------------------------------------------------
+    const send = o => { if(ws && ws.readyState===1) ws.send(JSON.stringify(o)); };
+    function connect(){
+      return new Promise((res)=>{
+        ws=new WebSocket(WS_URL);
+        ws.onopen=()=>{ setStatus('подключено',true);
+          send({type:'language',language:$('lang').value});
+          const th=$('theme').value; if(th) send({type:'theme',theme:th});
+          $('ask').disabled=false; $('mic').disabled=false; res(); };
+        ws.onclose=()=>{ setStatus('не подключено',false); stopAll(); };
+        ws.onerror=()=>{ add('meta','⚠ ошибка соединения'); };
+        ws.onmessage=(e)=>{ const m=JSON.parse(e.data);
+          if(m.type==='state') setState(m.state);
+          else if(m.type==='narration'){ card(m.place_name||'Район', m.text); add('guide','🗣 '+m.text); enqueue(m.text,true); }
+          else if(m.type==='reply'){ card('Ответ', m.text); add('reply','💬 '+m.text); enqueue(m.text,false); }
+          else if(m.type==='transcript') add('you','🎙 '+m.text);
+          else if(m.type==='error') add('meta','⚠ '+m.message);
+        };
+      });
+    }
+
+    // ---- start / stop -------------------------------------------------------
+    async function start(){
+      if(running) return;
+      // a user gesture is required to unlock TTS on mobile — speak a blank now
+      try{ speechSynthesis.speak(new SpeechSynthesisUtterance('')); }catch(e){}
+      if(!ws || ws.readyState>1) await connect();
+      running=true; $('start').disabled=true; $('stop').disabled=false;
+      if($('mode').value==='demo'){
+        points=buildPoints(); idx=0;
+        timer=setInterval(()=>{ if(idx>=points.length){ stopAll(); return; }
+          const p=points[idx++]; send({type:'position',lat:p.lat,lon:p.lon,pace:'slow'}); }, STEP_MS);
+      } else {
+        if(!navigator.geolocation){ add('meta','⚠ геолокация недоступна'); return; }
+        watchId=navigator.geolocation.watchPosition(
+          pos=>{ const c=pos.coords; send({type:'position', lat:c.latitude, lon:c.longitude,
+              direction_deg: (c.heading!=null && !isNaN(c.heading))?c.heading:null,
+              gaze_confidence:(c.heading!=null)?'high':'low', pace:'slow'}); },
+          err=>add('meta','⚠ GPS: '+err.message),
+          {enableHighAccuracy:true, maximumAge:2000, timeout:15000});
+      }
+    }
+    function stopAll(){
+      running=false; if(timer){clearInterval(timer);timer=null;}
+      if(watchId!=null){navigator.geolocation.clearWatch(watchId);watchId=null;}
+      hush(); $('start').disabled=false; $('stop').disabled=true;
+    }
+
+    // ---- asking (barge-in) --------------------------------------------------
+    function askText(){ const t=$('msg').value.trim(); if(!t||!ws) return;
+      hush(); add('you','🎙 '+t); send({type:'utterance',text:t}); $('msg').value=''; }
+
+    let rec=null, chunks=[], recording=false;
+    async function toggleMic(){
+      if(!recording){
+        try{ const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+          rec=new MediaRecorder(stream); chunks=[];
+          rec.ondataavailable=e=>chunks.push(e.data);
+          rec.onstop=async()=>{ stream.getTracks().forEach(t=>t.stop());
+            const blob=new Blob(chunks,{type:'audio/webm'}); const buf=new Uint8Array(await blob.arrayBuffer());
+            let bin=''; buf.forEach(b=>bin+=String.fromCharCode(b));
+            send({type:'audio',data_b64:btoa(bin),format:'webm'}); };
+          hush(); rec.start(); recording=true; $('mic').textContent='⏺'; $('mic').classList.add('on');
+        }catch(e){ add('meta','⚠ нет доступа к микрофону'); }
+      } else { rec.stop(); recording=false; $('mic').textContent='🎤'; $('mic').classList.remove('on'); }
+    }
+
+    // ---- wire up ------------------------------------------------------------
+    $('start').onclick=start; $('stop').onclick=stopAll;
+    $('ask').onclick=askText; $('mic').onclick=toggleMic;
+    $('msg').addEventListener('keydown',e=>{ if(e.key==='Enter') askText(); });
+    $('voice').onclick=()=>{ voiceOn=!voiceOn; if(!voiceOn) hush();
+      $('voice').classList.toggle('on',voiceOn); $('voice').textContent=voiceOn?'🔊 Голос':'🔇 Выкл'; };
+    $('lang').onchange=()=>send({type:'language',language:$('lang').value});
+    $('theme').onchange=()=>send({type:'theme',theme:$('theme').value});
+  })();
+  </script>
+</body>
+</html>

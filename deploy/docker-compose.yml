@@ -1,0 +1,49 @@
+# Production host: Caddy (automatic HTTPS) terminates TLS and reverse-proxies to the
+# FastAPI backend. Only Caddy is public (80/443); the backend is internal-only.
+#
+# Deploy on the Ubuntu server (from this deploy/ folder):
+#   docker compose up -d --build
+# Apps connect to:  wss://178.83.121.62.sslip.io/ws
+services:
+  backend:
+    build: ../backend
+    image: ai-audio-guide-backend
+    container_name: ai-guide
+    restart: unless-stopped
+    env_file:
+      - ../backend/.env          # OPENAI_API_KEY, GEO_SOURCE=overpass, ENRICHMENT_SOURCE=websearch, ...
+    environment:
+      HF_HOME: /data/hf          # cache the Whisper model on a volume
+      ENRICH_CACHE_PATH: /data/enrich.json
+      WALK_LOG_VERBOSE: "1"      # full per-tick walk trace (debugging)
+      WALK_LOG_DIR: /data/walks  # persist the trace to /data/walks/walk.log (survives docker-logs rotation)
+    volumes:
+      - guide-data:/data
+    expose:
+      - "8000"                   # internal only — Caddy fronts it; not published
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  caddy:
+    image: caddy:2
+    container_name: ai-guide-caddy
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"                  # needed for the Let's Encrypt HTTP-01 challenge
+      - "443:443"                # public HTTPS / wss
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web:/srv/web:ro        # Flutter web build (static client), served at /
+      - caddy-data:/data         # persists the issued TLS certificates
+      - caddy-config:/config
+
+volumes:
+  guide-data:
+  caddy-data:
+  caddy-config:
