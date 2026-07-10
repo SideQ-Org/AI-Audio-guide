@@ -59,15 +59,40 @@ def _strip_hook(text: str) -> tuple[str, str | None]:
 
 _SENT_BOUNDARY = re.compile(r"(?<=[.!?…。！？])\s+")
 
+# Common Russian abbreviations that end in a period WITHOUT ending a sentence — so the
+# fragment after them ("г. Москва", "ул. Тверская", "д. 5") must not be split off as its
+# own "sentence" (which would speak a bare "Москва" alone and let the scheduler weave an
+# object at a fake boundary). Single letters + "." (initials, "р. Волга") are caught too.
+_ABBR = frozenset({
+    "г", "ул", "д", "им", "пр", "наб", "пл", "р", "оз", "с", "пос", "просп", "бул",
+    "ст", "стр", "корп", "к", "обл", "р-н", "мкр", "туп", "ш", "пер",
+})
+_ABBR_TAIL = re.compile(r"(?:^|\s)([А-Яа-яA-Za-z-]{1,5}|[А-Яа-яA-Za-z])\.$")
+
+
+def _ends_with_abbrev(piece: str) -> bool:
+    """True when `piece` ends with an abbreviation period (so the next piece continues it)."""
+    m = _ABBR_TAIL.search(piece)
+    if m is None:
+        return False
+    tok = m.group(1)
+    return len(tok) == 1 or tok.lower() in _ABBR
+
 
 def _sentences(text: str) -> list[str]:
     """Split narration into sentences (also on newlines), dropping empties. Rough but
-    enough for the trailing-sentence guards below (narration is short, plain prose)."""
+    enough for the trailing-sentence guards below (narration is short, plain prose).
+    Fragments after a known abbreviation ('г.', 'д.', initials) are re-merged so an
+    abbreviation period isn't mistaken for a sentence end."""
     out: list[str] = []
     for line in text.split("\n"):
         for s in _SENT_BOUNDARY.split(line.strip()):
             s = s.strip()
-            if s:
+            if not s:
+                continue
+            if out and _ends_with_abbrev(out[-1]):
+                out[-1] = f"{out[-1]} {s}"  # continuation of an abbreviation, not a new sentence
+            else:
                 out.append(s)
     return out
 

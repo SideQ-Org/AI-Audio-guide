@@ -46,6 +46,25 @@ def test_resume_discards_a_line_we_walked_away_from():
     assert s.resume(GeoPoint(lat=55.1, lon=37.0), 300.0) is False
 
 
+def test_resume_connective_rotates_across_weaves():
+    # A walk with several weave-ins must not repeat the same connective verbatim (the
+    # "затёртые связки по кругу" the narrator prompt bans) — it rotates by resume index.
+    s = NarrationScheduler("ru")
+    seen = []
+    for i in range(3):
+        s.set_current(_narr("Первое предложение здесь. Второе предложение здесь."))
+        s.next_frame()  # speak the first sentence
+        s.pause_current(GeoPoint(lat=55.0, lon=37.0))
+        s.set_current(_narr("Вот объект.", place_id=f"p{i}", sig="MEDIUM"))
+        s.next_frame()  # object done
+        assert s.resume(GeoPoint(lat=55.0, lon=37.0), 300.0) is True
+        seen.append(s.next_frame().text)  # the connective
+        s.next_frame()  # the remaining sentence
+    assert seen == [resume_connective("ru", 0), resume_connective("ru", 1),
+                    resume_connective("ru", 2)]
+    assert len(set(seen)) == 3  # three distinct connectives in a row
+
+
 def test_priority_area_yields_object_outranks_lower():
     s = NarrationScheduler()
     # an area line (no place) always yields to an object

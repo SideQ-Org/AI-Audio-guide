@@ -277,9 +277,11 @@ def test_peek_bubble_flags_fresh_in_bubble_object():
     assert hit2 is None  # already narrated -> nothing fresh to jump to
 
 
-def test_narrate_object_passed_prefixes_ksstati():
-    """narrate_object(passed=True) narrates a specific object we've walked past, prefixed
-    with the 'кстати, мы прошли' framing — the scheduler's deferred-mention path."""
+def test_narrate_object_passed_narrates_without_canned_prefix():
+    """narrate_object(passed=True) narrates a specific object we've walked past — the
+    scheduler's deferred-mention path. Past-tense framing now rides on the `passed` flag in
+    the prompt, NOT a canned 'кстати, мы прошли' prefix, so no stock lead-in is prepended
+    (which also avoids the old present/past tense clash with the body)."""
     p = _place("p", "Музей", "museum")  # at HERE
     orch = _orch([p], facts={"p": "Большой музей девятнадцатого века."})
 
@@ -291,7 +293,8 @@ def test_narrate_object_passed_prefixes_ksstati():
 
     out = asyncio.run(run())
     assert out.kind == "narration" and out.place_id == "p"
-    assert out.text.startswith("Кстати,")  # the passed-object framing prefix
+    assert out.text  # the object was narrated
+    assert not out.text.startswith("Кстати,")  # no canned passed-object prefix anymore
 
 
 def test_street_change_weaves_transition_without_resetting_arc():

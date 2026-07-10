@@ -41,7 +41,7 @@ from .languages import passing_mention
 from .name_localizer import NameLocalizer
 from .narrator import Narrator, split_hook
 from .scorer import Scorer
-from .significance import at_least, significance_from_weight
+from .significance import at_least, significance_from_weight, tags_have_wiki
 from .walklog import clip, get_logger
 
 log = get_logger()  # shared walk logger (aiguide.agent); see walklog.py
@@ -195,6 +195,7 @@ class TextPipeline:
     async def _render_object(
         self, chosen, place, sig, *, addr, heading, pace, switching, theme, told,
         next_hook, history, preferences, passing, in_view, lang, nothing_new,
+        passed=False,
     ) -> tuple[str, str]:
         """The narrator call for one chosen object — shared by step() and
         warm_narration() so a pre-generated blurb matches what step would produce."""
@@ -206,7 +207,7 @@ class TextPipeline:
                 theme=theme, told=told or [], next_hook=next_hook, history=history,
                 flags=NarratorFlags(
                     switching=switching, nothing_new=nothing_new,
-                    passing=passing, preferences=preferences,
+                    passing=passing, passed=passed, preferences=preferences,
                 ),
                 language=lang,
             )
@@ -234,11 +235,19 @@ class TextPipeline:
         enriched = attach_facts([chosen], self.cache, lang)[0]
         place = enriched.place.model_copy(update={"name": await self.name_localizer.localize(
             enriched.place.tags, enriched.place.name, lang)})
-        sig = significance_from_weight(enriched.type_weight, enriched.facts_available)
+        sig = significance_from_weight(
+            enriched.type_weight, enriched.facts_available,
+            has_wiki=tags_have_wiki(enriched.place.tags),
+        )
+        # Pre-gen runs minutes before arrival — a baked "справа" would be wrong once the
+        # user turns or passes (violating "never a wrong left/right"). Generate side-neutral
+        # and not-yet-visible, so the blurb uses neutral framing; the live step() re-derives
+        # the true side/in_view when a fresh candidate arrives with facts already cached.
+        neutral = enriched.model_copy(update={"side": None})
         text, hook = await self._render_object(
-            enriched, place, sig, addr=addr, heading=heading, pace=pace, switching=False,
+            neutral, place, sig, addr=addr, heading=heading, pace=pace, switching=False,
             theme=theme, told=told, next_hook=next_hook, history=history,
-            preferences=preferences, passing=True, in_view=enriched.in_gaze_cone,
+            preferences=preferences, passing=True, in_view=False,
             lang=lang, nothing_new=False,
         )
         if text:
@@ -263,6 +272,7 @@ class TextPipeline:
         told: list[str] | None = None,
         next_hook: str | None = None,
         passing: bool = False,
+        passed: bool = False,
         reach: bool = False,
     ) -> StepResult:
         """Narrate the nearest weave-worthy object, woven INTO the story arc.
@@ -316,7 +326,10 @@ class TextPipeline:
             update={"name": await self.name_localizer.localize(
                 chosen.place.tags, chosen.place.name, lang)}
         )
-        sig = significance_from_weight(chosen.type_weight, chosen.facts_available)
+        sig = significance_from_weight(
+            chosen.type_weight, chosen.facts_available,
+            has_wiki=tags_have_wiki(chosen.place.tags),
+        )
         # Visible now = in the forward gaze cone AND inside the narrate bubble. Threaded
         # so the narrator frames "вон то, перед тобой" vs "проходишь мимо / не видно" (A5).
         # On a REACH (last-resort fallback before silence) the gate is the cone alone: an
@@ -326,7 +339,9 @@ class TextPipeline:
             reach or chosen.distance_m <= settings.narrate_radius_m
         )
         # Pre-generated? Speak it instantly (the whole point — no LLM wait on arrival).
-        cached = self._narr_cache.pop((chosen.place.id, lang), None)
+        # A pre-gen blurb is present-framed ("проходишь мимо"), so DON'T reuse it on the
+        # `passed` path — a passed object must be told in the past tense (regenerate).
+        cached = None if passed else self._narr_cache.pop((chosen.place.id, lang), None)
         if cached is not None:
             text, hook = cached
             log.info("step CACHED place=%r (pre-generated) | %s", place.name, clip(text))
@@ -335,7 +350,7 @@ class TextPipeline:
                 chosen, place, sig, addr=addr, heading=heading, pace=pace,
                 switching=switching, theme=theme, told=told, next_hook=next_hook,
                 history=history, preferences=preferences, passing=passing,
-                in_view=in_view, lang=lang, nothing_new=not candidates,
+                passed=passed, in_view=in_view, lang=lang, nothing_new=not candidates,
             )
         # Guarantee a close, named object is never dead air. DeepSeek sometimes ignores
         # the "passing -> never silent" rule (especially with empty facts), and a
@@ -389,7 +404,7 @@ class TextPipeline:
                         told=told or [], next_hook=next_hook, history=history,
                         flags=NarratorFlags(
                             switching=switching, nothing_new=not candidates,
-                            passing=passing, preferences=preferences,
+                            passing=passing, passed=passed, preferences=preferences,
                         ),
                         language=lang,
                     )

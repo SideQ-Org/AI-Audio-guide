@@ -11,7 +11,7 @@ import json
 from functools import cache
 from pathlib import Path
 
-from app.services.agent.languages import prompt_language
+from app.services.agent.languages import clean_continuation, prompt_language
 from app.services.llm.router import Role
 from app.shared.schemas import (
     AreaInput,
@@ -108,15 +108,17 @@ def build_narrator_user(inp: NarratorInput) -> str:
             "THEME": inp.theme,
             "TOLD": inp.told,
             "NEXT_HOOK": inp.next_hook,
-            # The last 1-2 spoken paragraphs, verbatim — CONTINUE this voice/thread (A1),
-            # a POSITIVE continuity signal, distinct from HISTORY (the do-not-repeat ledger).
-            "CONTINUE_FROM": inp.history[-2:],
+            # The last 1-2 SUBSTANTIVE paragraphs — CONTINUE this voice/thread (A1), a
+            # POSITIVE continuity signal, distinct from HISTORY (the do-not-repeat ledger).
+            # Terse bridges/floor lines are filtered so we don't seed on "Пройдём дальше."
+            "CONTINUE_FROM": clean_continuation(inp.history, inp.language),
             "HISTORY": inp.history,
             "FLAGS": {
                 "switching": inp.flags.switching,
                 "nothing_new": inp.flags.nothing_new,
                 "elaborate": inp.flags.elaborate,
                 "passing": inp.flags.passing,
+                "passed": inp.flags.passed,  # already behind us -> past tense (see role block)
                 "preferences": (
                     inp.flags.preferences.model_dump() if inp.flags.preferences else None
                 ),
@@ -136,7 +138,8 @@ def build_area_user(inp: AreaInput) -> str:
             "NEXT_HOOK": inp.next_hook,
             "LAST_PLACE": inp.last_place_name,
             "BEAT_MODE": inp.beat_mode,  # rotating rhetorical angle for variety (A1)
-            "CONTINUE_FROM": inp.history[-2:],  # continue this voice (A1)
+            # continue this voice (A1), filtering terse bridges/floor lines
+            "CONTINUE_FROM": clean_continuation(inp.history, inp.language),
             "HISTORY": inp.history,
             "PACE": inp.pace.value,
         }

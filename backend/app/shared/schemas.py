@@ -138,6 +138,10 @@ class NarratorFlags(BaseModel):
     nothing_new: bool = False
     elaborate: bool = False  # tell MORE about an already-covered place (nothing new nearby)
     passing: bool = False  # user is right beside this object — introduce it, never SKIP
+    # The object is already BEHIND the walker (a lower-priority newcomer covered after a
+    # higher-priority object finished). Frame it in the past ("мы прошли …"), never "проходишь
+    # мимо". `passing` stays true so the never-dead-air floor still applies.
+    passed: bool = False
     preferences: ControlPatch | None = None
 
 

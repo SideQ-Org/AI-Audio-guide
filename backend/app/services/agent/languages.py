@@ -250,6 +250,23 @@ def bridges(code: str | None) -> tuple[str, ...]:
     return _BRIDGES.get(normalize(code), _BRIDGES[FALLBACK])
 
 
+# Minimum length for a line to seed CONTINUE_FROM — terse floor/bridge one-liners below
+# this are noise ("continue this voice" from "Пройдём дальше." reads limp).
+_CONTINUE_MIN_CHARS = 24
+
+
+def clean_continuation(history: list[str], code: str | None, *, n: int = 2) -> list[str]:
+    """The last `n` SUBSTANTIVE narration lines, for the CONTINUE_FROM seed. Drops the terse
+    connectives that pollute raw `history[-n:]` — the verbatim 'let's move on' bridges and
+    short floor one-liners — so the narrator continues from real prose, not a stub."""
+    bset = set(bridges(code))
+    substantive = [
+        h for h in history
+        if h.strip() not in bset and len(h.strip()) >= _CONTINUE_MIN_CHARS
+    ]
+    return substantive[-n:]
+
+
 # A warm, instant opener spoken the moment a walk starts — no LLM, so the tour begins
 # immediately while discovery/geocode/the area intro load in the background (the area
 # intro, which names the place properly, follows on the next tick).
@@ -355,40 +372,27 @@ def greeting(code: str | None, place: str | None = None, hour: int | None = None
 
 
 # Woven back into a narration we paused to slip an object in (spoken before the remaining
-# sentences resume) — so the return doesn't feel like a jump-cut.
-_RESUME_CONNECTIVES: dict[str, str] = {
-    "ru": "Так вот, вернёмся.",
-    "en": "So, back to what I was saying.",
-    "es": "Bueno, volvamos a lo que decía.",
-    "fr": "Bref, revenons à ce que je disais.",
-    "de": "Also, zurück zu dem, was ich sagte.",
-    "it": "Dunque, torniamo a quello che dicevo.",
-    "pt": "Então, voltando ao que eu dizia.",
-    "zh": "好，我们接着刚才说的。",
-}
-
-# Prefix for an object we only get to AFTER finishing a higher-priority one — we've
-# already walked past it, so frame it as "by the way, we passed …".
-_PASSED_OBJECT_INTROS: dict[str, str] = {
-    "ru": "Кстати, мы только что прошли кое-что.",
-    "en": "By the way, we just passed something.",
-    "es": "Por cierto, acabamos de pasar algo.",
-    "fr": "Au fait, on vient de passer quelque chose.",
-    "de": "Übrigens, wir sind gerade an etwas vorbeigekommen.",
-    "it": "A proposito, siamo appena passati accanto a qualcosa.",
-    "pt": "A propósito, acabamos de passar por algo.",
-    "zh": "对了，我们刚刚路过一个地方。",
+# sentences resume) — so the return doesn't feel like a jump-cut. Several variants per
+# language, rotated by call index (like `beat_mode`) so a walk with many weave-ins doesn't
+# repeat the same connective verbatim — that repetition is exactly what the narrator prompt
+# bans ("затёртые связки по кругу").
+_RESUME_CONNECTIVES: dict[str, tuple[str, ...]] = {
+    "ru": ("Так вот, вернёмся.", "На чём я остановился…", "Ну, продолжим."),
+    "en": ("So, back to what I was saying.", "Anyway, where was I…", "Right, let's carry on."),
+    "es": ("Bueno, volvamos a lo que decía.", "¿Por dónde iba…", "En fin, sigamos."),
+    "fr": ("Bref, revenons à ce que je disais.", "Où en étais-je…", "Bon, continuons."),
+    "de": ("Also, zurück zu dem, was ich sagte.", "Wo war ich…", "Gut, weiter geht's."),
+    "it": ("Dunque, torniamo a quello che dicevo.", "Dov'ero rimasto…", "Bene, andiamo avanti."),
+    "pt": ("Então, voltando ao que eu dizia.", "Onde é que eu ia…", "Enfim, vamos continuar."),
+    "zh": ("好，我们接着刚才说的。", "刚才说到哪了……", "好，继续吧。"),
 }
 
 
-def resume_connective(code: str | None) -> str:
-    """Spoken before the remaining sentences of a narration we paused to weave an object in."""
-    return _RESUME_CONNECTIVES.get(normalize(code), _RESUME_CONNECTIVES[FALLBACK])
-
-
-def passed_object_intro(code: str | None) -> str:
-    """Prefix for an object narrated after we'd already walked past it ('кстати, мы прошли')."""
-    return _PASSED_OBJECT_INTROS.get(normalize(code), _PASSED_OBJECT_INTROS[FALLBACK])
+def resume_connective(code: str | None, index: int = 0) -> str:
+    """Spoken before the remaining sentences of a narration we paused to weave an object in.
+    `index` rotates through the per-language variants (`% len`) so repeated resumes vary."""
+    variants = _RESUME_CONNECTIVES.get(normalize(code), _RESUME_CONNECTIVES[FALLBACK])
+    return variants[index % len(variants)]
 
 
 def stt_unclear(code: str | None) -> str:

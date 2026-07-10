@@ -66,6 +66,19 @@ _SID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
 _WEB_INDEX = Path(__file__).resolve().parent.parent / "web" / "index.html"
 _WEB_DASHBOARD = Path(__file__).resolve().parent.parent / "web" / "dashboard.html"
+
+# Spoken-duration estimate for pacing sentence delivery (see _wait_played). Latin/Cyrillic
+# scripts run ~14 chars/s; logographic scripts (Chinese/Japanese) pack far more content per
+# character, so a flat 14 badly under-estimates them and releases the next sentence early —
+# re-creating the queue pile-up weaving is meant to avoid. Keyed by normalized language.
+_CHARS_PER_SEC: dict[str, float] = {"zh": 5.0, "ja": 5.0, "ko": 6.0}
+_DEFAULT_CHARS_PER_SEC = 14.0
+
+
+def _speech_seconds(text: str, language: str | None) -> float:
+    """Estimated spoken duration of `text` in the session language, clamped to [1.5, 18.0]s."""
+    rate = _CHARS_PER_SEC.get((language or "").split("-")[0].lower(), _DEFAULT_CHARS_PER_SEC)
+    return min(max(len(text) / rate, 1.5), 18.0)
 _orchestrator: Orchestrator | None = None
 _stt: STTClient | None = None
 _stt_lock = asyncio.Lock()
@@ -544,9 +557,9 @@ class _SessionRuntime:
         # Pace to roughly this sentence's SPOKEN DURATION so we don't outrun the player and
         # pile sentences up in its queue (the "reply still on the old object" backlog). The
         # client's `played` (at sentence START) anchors the start; we then hold the rest of
-        # the estimated duration (~14 chars/s for RU) so the NEXT sentence is released about
+        # the estimated duration (per-language chars/s) so the NEXT sentence is released about
         # when this one finishes — a place then weaves in right after it, not behind a queue.
-        dur = min(max(len(text) / 14.0, 1.5), 18.0)
+        dur = _speech_seconds(text, self.language)
         t0 = time.monotonic()
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self.played.wait(), timeout=dur)

@@ -278,8 +278,9 @@ def test_split_hook_companion_language_and_english_guards():
 
 
 def test_narrator_user_threads_continue_from_and_in_view():
-    # A1: CONTINUE_FROM = last 1-2 spoken paragraphs (positive continuity signal,
-    # distinct from HISTORY). A5: in_view is threaded into HEADING.
+    # A1: CONTINUE_FROM = last 1-2 SUBSTANTIVE spoken paragraphs (positive continuity
+    # signal, distinct from HISTORY). Terse bridges are filtered so we don't seed the
+    # "continue this voice" thread on a stub. A5: in_view is threaded into HEADING.
     import json
 
     from app.services.agent.prompts import build_narrator_user
@@ -291,10 +292,18 @@ def test_narrator_user_threads_continue_from_and_in_view():
         distance_m=20.0,
         side="ahead",
         in_view=True,
-        history=["Первый абзац.", "Второй абзац.", "Третий абзац."],
+        history=[
+            "Мы идём по старинному центру города.",
+            "Пройдём дальше, тут пока тихо.",  # a real bridge -> filtered out
+            "Слева остаётся тихий зелёный сквер.",
+            "Впереди открывается вид на реку.",
+        ],
     )
     payload = json.loads(build_narrator_user(inp))
-    assert payload["CONTINUE_FROM"] == ["Второй абзац.", "Третий абзац."]
+    assert payload["CONTINUE_FROM"] == [
+        "Слева остаётся тихий зелёный сквер.",
+        "Впереди открывается вид на реку.",
+    ]
     assert payload["HEADING"]["in_view"] is True
 
 
@@ -304,10 +313,20 @@ def test_area_user_threads_beat_mode_and_continue_from():
     from app.services.agent.prompts import build_area_user
     from app.shared.schemas import AreaInput
 
-    inp = AreaInput(history=["a", "b", "c"], beat_mode="sensory")
+    inp = AreaInput(
+        history=[
+            "Здесь раньше стоял торговый посад.",
+            "Идём дальше.",  # a bridge -> filtered out of CONTINUE_FROM
+            "Улицы тут кривые и узкие с давних пор.",
+        ],
+        beat_mode="sensory",
+    )
     payload = json.loads(build_area_user(inp))
     assert payload["BEAT_MODE"] == "sensory"
-    assert payload["CONTINUE_FROM"] == ["b", "c"]
+    assert payload["CONTINUE_FROM"] == [
+        "Здесь раньше стоял торговый посад.",
+        "Улицы тут кривые и узкие с давних пор.",
+    ]
 
 
 def test_beat_mode_rotates_distinct_angles():
@@ -316,6 +335,55 @@ def test_beat_mode_rotates_distinct_angles():
     modes = [beat_mode(i) for i in range(5)]
     assert len(set(modes)) == 5, "five distinct rhetorical angles in one cycle"
     assert beat_mode(5) == beat_mode(0), "rotation wraps"
+
+
+def test_sentence_split_keeps_abbreviations_together():
+    # A period after a known abbreviation ("д.", "г.") is NOT a sentence end — otherwise a
+    # bare fragment gets spoken alone and the scheduler weaves at a fake boundary.
+    from app.services.agent.narrator import split_sentences
+
+    assert split_sentences("Улица Тверская, д. 5. Это старый дом.") == [
+        "Улица Тверская, д. 5.",
+        "Это старый дом.",
+    ]
+    assert split_sentences("Мы в г. Москве сейчас идём.") == ["Мы в г. Москве сейчас идём."]
+    assert split_sentences("Первое. Второе.") == ["Первое.", "Второе."]  # real boundaries split
+
+
+def test_pregeneration_is_side_neutral():
+    # A pre-generated blurb is spoken minutes later on arrival — a baked "справа" would be
+    # stale/wrong. warm_narration must render side-neutral and not-yet-visible.
+    class _Rec:
+        def __init__(self):
+            self.last = None
+
+        async def narrate(self, inp):
+            self.last = inp
+            return "Готовый рассказ про музей рядом."
+
+        async def narrate_area(self, inp):  # unused here
+            return ""
+
+    async def run():
+        rec = _Rec()
+        pipeline = TextPipeline(
+            HeuristicScorer(), rec,
+            MockEnricher({"p": "Музей девятнадцатого века."}), enrich_top_k=3,
+        )
+        cand = _candidate("p", "Музей", "museum", 0.6, dist=120, facts=None)
+        cand = cand.model_copy(update={"side": "right"})  # a concrete side on the candidate
+        await pipeline.warm_narration(
+            cand, seen=[], history=[], address=Address(), heading=Heading(),
+            pace=Pace.SLOW, preferences=None, language="ru", theme=None, told=[],
+            next_hook=None,
+        )
+        return rec.last
+
+    inp = asyncio.run(run())
+    assert inp is not None
+    assert inp.side is None  # no baked left/right
+    assert inp.in_view is False  # not framed as visible-now
+    assert inp.flags.passing is True  # still never-dead-air
 
 
 def test_narrator_sampling_hotter_than_companion():

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC
 from enum import StrEnum
 
@@ -27,7 +27,7 @@ from app.services.agent import languages as lang
 from app.services.agent.companion import Companion
 from app.services.agent.narrator import split_hook
 from app.services.agent.pipeline import TextPipeline
-from app.services.agent.significance import significance_from_weight
+from app.services.agent.significance import significance_from_weight, tags_have_wiki
 from app.services.agent.walklog import (
     CURRENT_SID,
     clip,
@@ -226,7 +226,9 @@ class Orchestrator:
         if top.place.id == st.last_place_id:
             return None
         facts = self.pipeline.cache.has(top.place.id, st.language)
-        return top.place.id, significance_from_weight(top.type_weight, facts)
+        return top.place.id, significance_from_weight(
+            top.type_weight, facts, has_wiki=tags_have_wiki(top.place.tags)
+        )
 
     def _warm_inventory(self, session_id: str, position: GeoPoint) -> None:
         """Non-blocking: fetch the Overpass disc for this session NOW (during the greeting),
@@ -244,11 +246,12 @@ class Orchestrator:
     async def narrate_object(
         self, session_id: str, place_id: str, *, passed: bool = False
     ) -> OrchestratorOutput:
-        """Narrate a SPECIFIC object on demand — the scheduler's deferred 'кстати, мы
-        прошли' mention of a newcomer that surfaced while a higher-priority object was
-        being told. Ranks the object from the cached inventory, narrates it (pre-gen), and
-        commits like a normal step; prefixes the passed-by intro when `passed`. Silence if
-        it's already seen or no longer in the disc."""
+        """Narrate a SPECIFIC object on demand — the scheduler's deferred mention of a
+        newcomer that surfaced while a higher-priority object was being told. Ranks the
+        object from the cached inventory, narrates it, and commits like a normal step. When
+        `passed`, the object is already behind us: the Narrator frames it in the past tense
+        (`NarratorFlags.passed`, not a canned prefix). Silence if it's already seen or no
+        longer in the disc."""
         st = await self.store.load(session_id)
         if place_id in st.seen_place_ids or st.position is None:
             return await self._finish(st, State.IDLE, "silence")
@@ -269,14 +272,12 @@ class Orchestrator:
                 address=st.address, heading=st.heading, pace=st.pace,
                 preferences=st.control_patch, language=st.language,
                 theme=plan.active_theme() or None, told=plan.told,
-                next_hook=plan.next_hook, passing=True,
+                next_hook=plan.next_hook, passing=True, passed=passed,
             )
         except Exception:
             return await self._finish(st, State.ERROR, "error")
         if not (out.text and out.place):
             return await self._finish(st, State.IDLE, "silence")
-        if passed:  # we've already walked past it -> "кстати, мы прошли …"
-            out = replace(out, text=f"{lang.passed_object_intro(st.language)} {out.text}")
         log.info("narrate deferred passed=%s place=%r | %s",
                  passed, out.place.name, clip(out.text))
         return await self._commit_step(st, out)

@@ -52,6 +52,7 @@ class NarrationScheduler:
         self.current: NarrItem | None = None
         self.paused: list[NarrItem] = []  # stack — most-recent interruption resumes first
         self.language = language
+        self._resume_i = 0  # rotates the resume connective so it doesn't repeat verbatim
 
     def set_current(self, out: OrchestratorOutput) -> None:
         self.current = NarrItem(out, split_sentences(out.text) or [out.text])
@@ -87,7 +88,10 @@ class NarrationScheduler:
             ):
                 continue  # walked too far — don't resume a line about somewhere behind us
             if not item.resumed:
-                item.sentences.insert(item.cursor, resume_connective(self.language))
+                item.sentences.insert(
+                    item.cursor, resume_connective(self.language, self._resume_i)
+                )
+                self._resume_i += 1
                 item.resumed = True
             self.current = item
             return True
