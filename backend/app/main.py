@@ -554,18 +554,13 @@ class _SessionRuntime:
 
     async def _wait_played(self, text: str) -> None:
         self.played.clear()
-        # Pace to roughly this sentence's SPOKEN DURATION so we don't outrun the player and
-        # pile sentences up in its queue (the "reply still on the old object" backlog). The
-        # client's `played` (at sentence START) anchors the start; we then hold the rest of
-        # the estimated duration (per-language chars/s) so the NEXT sentence is released about
-        # when this one finishes — a place then weaves in right after it, not behind a queue.
-        dur = _speech_seconds(text, self.language)
-        t0 = time.monotonic()
+        # The client acks `played` at TTS COMPLETION, so release the NEXT sentence the moment
+        # this one finishes — exact pacing, no queue pile-up, and a place weaves in right
+        # after the current sentence. A generous cap (if the ack is ever dropped) prevents a
+        # stall; the per-language duration estimate is only that ceiling now.
+        cap = min(_speech_seconds(text, self.language) * 1.6, 25.0)
         with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(self.played.wait(), timeout=dur)
-        remaining = dur - (time.monotonic() - t0)
-        if remaining > 0.05:
-            await asyncio.sleep(remaining)
+            await asyncio.wait_for(self.played.wait(), timeout=cap)
 
     async def pause_for_listen(self) -> None:
         """Mic opened (user about to ask): stop the producer's current step and hold,

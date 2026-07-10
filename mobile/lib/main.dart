@@ -996,10 +996,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
     final s = _speakQueue.removeAt(idx);
     setState(() => _speaking = true); // claim synchronously to avoid overlap
-    // Pace the server the moment a paragraph starts (so it prepares the next one).
-    // Sent here — not from the TTS start callback — because that callback is
-    // unreliable on web; missing it stalled the whole story after one paragraph.
-    if (s.isNarration) _send({'type': 'played'});
     // Chrome's SpeechSynthesis clips an utterance at ~15s, cutting long lines off
     // mid-phrase. Speak in sentence-sized chunks so each stays well under that.
     final chunks = kIsWeb ? _chunkForTts(s.text) : [s.text];
@@ -1019,6 +1015,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         }
       } catch (_) {/* keep the queue moving even if one chunk fails */}
     }
+    // Pace the server on COMPLETION (not start): it releases the NEXT sentence the moment
+    // this one finishes — tight, no queue pile-up, no length-estimate guessing. Sent after
+    // the loop (whose per-chunk web watchdog guarantees it resolves) so a dropped 'end'
+    // event can't stall the story.
+    if (s.isNarration && mounted) _send({'type': 'played'});
     if (!mounted) return;
     setState(() => _speaking = false);
     _speakNext(); // drive the next paragraph ourselves (don't depend on callbacks)
