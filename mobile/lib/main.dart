@@ -32,6 +32,7 @@ import 'accounts/auth_gate.dart';
 import 'accounts/auth_service.dart';
 import 'accounts/login_screen.dart';
 import 'accounts/models.dart';
+import 'accounts/realtime_service.dart';
 import 'accounts/register_screen.dart';
 import 'ads/ads_service.dart';
 import 'billing/billing_service.dart';
@@ -702,6 +703,45 @@ const _catEveryday = Color(0xFFA7B0BE); // faint slate — shops, cafes, plain b
 // A small, minimalist map badge for a found-but-not-narrated object: a translucent
 // "glass" disc (matches the top-bar pills) with the category icon tinted its family
 // colour. Reads at a glance without a tap; still tappable for the info card.
+// A friend's live position while co-walking (realtime): avatar dot + name label.
+class _CoWalkPin extends StatelessWidget {
+  const _CoWalkPin({this.name});
+  final String? name;
+
+  @override
+  Widget build(BuildContext context) {
+    final uc = Theme.of(context).extension<ui.AppColors>()!;
+    final initial =
+        (name != null && name!.trim().isNotEmpty) ? name!.trim()[0].toUpperCase() : '·';
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      Container(
+        width: 34,
+        height: 34,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: uc.primary,
+          border: Border.all(color: Colors.white, width: 2),
+          boxShadow: [BoxShadow(color: uc.primary.withValues(alpha: .5), blurRadius: 10, spreadRadius: -2)],
+        ),
+        child: Text(initial,
+            style: TextStyle(color: uc.onPrimary, fontWeight: FontWeight.w800, fontSize: 15)),
+      ),
+      if (name != null && name!.trim().isNotEmpty) ...[
+        const SizedBox(height: 2),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+          decoration: BoxDecoration(color: uc.primary, borderRadius: BorderRadius.circular(6)),
+          child: Text(name!,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: uc.onPrimary, fontSize: 10, fontWeight: FontWeight.w700)),
+        ),
+      ],
+    ]);
+  }
+}
+
 class _CategoryPin extends StatelessWidget {
   const _CategoryPin({required this.style});
   final ({IconData icon, Color color}) style;
@@ -906,6 +946,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     // React to sign-in / sign-out: refresh the settings UI and (re)send the auth
     // token to the backend so the running tour binds/unbinds the user id live.
     AuthService.instance.addListener(_onAuthChanged);
+    // Live presence for Community ("на прогулке" + co-walk) — no-op if signed out.
+    if (AccountsConfig.enabled && AuthService.instance.isSignedIn) {
+      RealtimeService.instance.startPresence();
+    }
     // Notification button presses (Pause/Resume/Finish) arrive here from the service isolate.
     if (!kIsWeb) FlutterForegroundTask.addTaskDataCallback(_onFgServiceData);
     _initTts();
@@ -1339,6 +1383,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (!mounted) return;
     setState(() {}); // refresh the account tile in settings
     if (_connected) _sendAuth();
+    // Bring live presence up/down with the session.
+    if (AccountsConfig.enabled && AuthService.instance.isSignedIn) {
+      RealtimeService.instance.startPresence();
+    } else {
+      RealtimeService.instance.stopPresence();
+    }
   }
 
   // Primary action: one button to start the experience and to stop it.
@@ -1449,6 +1499,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     };
     _lastPositionMsg = msg; // replayed on reconnect so the tour resumes at once
     _send(msg);
+    // Publish live presence (coarse) so friends see "на прогулке" + co-walk dots.
+    RealtimeService.instance.updateSelf(walking: _active, lat: lat, lon: lon);
     setState(() {
       _here = LatLng(lat, lon);
       _heading = dir;
@@ -1556,6 +1608,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     _recentCourses.clear();
     _paused = false;
     _stopForegroundService(); // drops the shade card + frees the foreground service
+    RealtimeService.instance.updateSelf(walking: false); // clear live "на прогулке"
     setState(() {});
   }
 
@@ -2040,6 +2093,20 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                 ),
               ),
         ]),
+        // Co-walk: live dots of friends walking together with you (realtime presence).
+        ListenableBuilder(
+          listenable: RealtimeService.instance,
+          builder: (context, _) => MarkerLayer(markers: [
+            for (final peer in RealtimeService.instance.coWalkPeers)
+              if (peer.hasPosition)
+                Marker(
+                  point: LatLng(peer.lat!, peer.lon!),
+                  width: 96,
+                  height: 58,
+                  child: _CoWalkPin(name: peer.name),
+                ),
+          ]),
+        ),
         MarkerLayer(markers: [
           for (final p in _places)
             Marker(

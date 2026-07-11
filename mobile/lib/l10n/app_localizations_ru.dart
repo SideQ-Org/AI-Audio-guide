@@ -658,6 +658,37 @@ class AppLocalizationsRu extends AppLocalizations {
   }
 
   @override
+  String get communityCoWalk => 'Пройтись вместе';
+
+  @override
+  String get communityCoWalkSub => 'Живая сессия с другом';
+
+  @override
+  String get communityCoWalkActive => 'Идёте вместе';
+
+  @override
+  String get communityCoWalkWaiting => 'Ждём друга…';
+
+  @override
+  String get communityCoWalkLeave => 'Выйти';
+
+  @override
+  String get communityCoWalkExplain =>
+      'Создай код и дай другу, или введи его код — увидите друг друга на карте вживую.';
+
+  @override
+  String get communityCoWalkCreate => 'Создать комнату';
+
+  @override
+  String get communityCoWalkOrJoin => 'или войти';
+
+  @override
+  String get communityCoWalkJoin => 'Войти';
+
+  @override
+  String get communityCoWalkEnterCode => 'код';
+
+  @override
   String xpValue(int n) {
     return '$n XP';
   }

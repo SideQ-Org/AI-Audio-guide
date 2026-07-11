@@ -655,6 +655,37 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
+  String get communityCoWalk => 'Walk together';
+
+  @override
+  String get communityCoWalkSub => 'Live session with a friend';
+
+  @override
+  String get communityCoWalkActive => 'Walking together';
+
+  @override
+  String get communityCoWalkWaiting => 'Waiting for a friend…';
+
+  @override
+  String get communityCoWalkLeave => 'Leave';
+
+  @override
+  String get communityCoWalkExplain =>
+      'Create a code and share it, or enter a friend\'s code — you\'ll see each other live on the map.';
+
+  @override
+  String get communityCoWalkCreate => 'Create a room';
+
+  @override
+  String get communityCoWalkOrJoin => 'or join';
+
+  @override
+  String get communityCoWalkJoin => 'Join';
+
+  @override
+  String get communityCoWalkEnterCode => 'code';
+
+  @override
   String xpValue(int n) {
     return '$n XP';
   }

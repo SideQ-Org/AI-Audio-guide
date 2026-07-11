@@ -1286,6 +1286,66 @@ abstract class AppLocalizations {
   /// **'{name} started a challenge'**
   String feedChallenge(String name);
 
+  /// No description provided for @communityCoWalk.
+  ///
+  /// In en, this message translates to:
+  /// **'Walk together'**
+  String get communityCoWalk;
+
+  /// No description provided for @communityCoWalkSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Live session with a friend'**
+  String get communityCoWalkSub;
+
+  /// No description provided for @communityCoWalkActive.
+  ///
+  /// In en, this message translates to:
+  /// **'Walking together'**
+  String get communityCoWalkActive;
+
+  /// No description provided for @communityCoWalkWaiting.
+  ///
+  /// In en, this message translates to:
+  /// **'Waiting for a friend…'**
+  String get communityCoWalkWaiting;
+
+  /// No description provided for @communityCoWalkLeave.
+  ///
+  /// In en, this message translates to:
+  /// **'Leave'**
+  String get communityCoWalkLeave;
+
+  /// No description provided for @communityCoWalkExplain.
+  ///
+  /// In en, this message translates to:
+  /// **'Create a code and share it, or enter a friend\'s code — you\'ll see each other live on the map.'**
+  String get communityCoWalkExplain;
+
+  /// No description provided for @communityCoWalkCreate.
+  ///
+  /// In en, this message translates to:
+  /// **'Create a room'**
+  String get communityCoWalkCreate;
+
+  /// No description provided for @communityCoWalkOrJoin.
+  ///
+  /// In en, this message translates to:
+  /// **'or join'**
+  String get communityCoWalkOrJoin;
+
+  /// No description provided for @communityCoWalkJoin.
+  ///
+  /// In en, this message translates to:
+  /// **'Join'**
+  String get communityCoWalkJoin;
+
+  /// No description provided for @communityCoWalkEnterCode.
+  ///
+  /// In en, this message translates to:
+  /// **'code'**
+  String get communityCoWalkEnterCode;
+
   /// No description provided for @xpValue.
   ///
   /// In en, this message translates to:

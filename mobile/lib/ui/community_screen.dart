@@ -4,6 +4,7 @@
 // requests and the activity feed. Pull-to-refresh; graceful states for guest / no-handle.
 
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 
@@ -11,6 +12,7 @@ import '../accounts/accounts_config.dart';
 import '../accounts/api_client.dart';
 import '../accounts/auth_service.dart';
 import '../accounts/community_models.dart';
+import '../accounts/realtime_service.dart';
 import '../l10n/app_localizations.dart';
 import 'components.dart';
 import 'design.dart';
@@ -42,7 +44,21 @@ class _CommunityScreenState extends State<CommunityScreen> {
   @override
   void initState() {
     super.initState();
-    if (_available) _future = _load();
+    if (_available) {
+      _future = _load();
+      RealtimeService.instance.startPresence(); // ensure live status is up
+      RealtimeService.instance.addListener(_onRealtime); // live "на прогулке" + co-walk
+    }
+  }
+
+  @override
+  void dispose() {
+    RealtimeService.instance.removeListener(_onRealtime);
+    super.dispose();
+  }
+
+  void _onRealtime() {
+    if (mounted) setState(() {}); // presence changed → repaint friend statuses / co-walk
   }
 
   Future<_CommunityData> _load() async {
@@ -132,6 +148,10 @@ class _CommunityScreenState extends State<CommunityScreen> {
           _HandleSetupCard(onDone: _refresh),
           const SizedBox(height: Gap.lg),
         ],
+
+        // Co-walk (realtime): join a friend's live session, or start one.
+        _CoWalkCard(friends: d.friends),
+        const SizedBox(height: Gap.lg),
 
         if (d.feed.isNotEmpty) ...[
           _FeedTicker(items: d.feed),
@@ -583,8 +603,12 @@ class _FriendRow extends StatelessWidget {
                 style: caption(context)),
           ]),
         ),
-        if (user.walkingNow)
-          Text(l.communityWalkingNow, style: caption(context).copyWith(color: c.primary, fontWeight: FontWeight.w800))
+        if (user.walkingNow || RealtimeService.instance.walkingIds.contains(user.id))
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 7, height: 7, decoration: BoxDecoration(color: c.primary, shape: BoxShape.circle)),
+            const SizedBox(width: 5),
+            Text(l.communityWalkingNow, style: caption(context).copyWith(color: c.primary, fontWeight: FontWeight.w800)),
+          ])
         else if (user.streak > 0)
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
@@ -1022,5 +1046,166 @@ class _LeaderRow extends StatelessWidget {
         Text(progress, style: caption(context).copyWith(fontWeight: FontWeight.w800, color: c.primary)),
       ]),
     );
+  }
+}
+
+// ── co-walk (realtime) ───────────────────────────────────────────────────────
+
+String _coWalkCode() {
+  const cs = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  final r = Random();
+  return List.generate(4, (_) => cs[r.nextInt(cs.length)]).join();
+}
+
+class _CoWalkCard extends StatelessWidget {
+  const _CoWalkCard({required this.friends});
+  final List<CommunityUser> friends;
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    final c = context.colors;
+    final rt = RealtimeService.instance;
+
+    if (rt.inCoWalk) {
+      final peers = rt.coWalkPeers;
+      final label = peers.isEmpty
+          ? l.communityCoWalkWaiting
+          : peers.map((p) => p.name ?? '—').join(', ');
+      return GlassModule(
+        fill: c.primary.withValues(alpha: 0.12), sheen: false,
+        padding: const EdgeInsets.all(14),
+        child: Row(children: [
+          Container(
+            width: 42, height: 42, alignment: Alignment.center,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: c.primary.withValues(alpha: .18)),
+            child: Icon(Icons.directions_walk_rounded, color: c.primary),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('${l.communityCoWalkActive} · ${rt.coWalkCode}',
+                  style: titleS(context).copyWith(fontWeight: FontWeight.w800)),
+              const SizedBox(height: 2),
+              Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: caption(context)),
+            ]),
+          ),
+          _MiniButton(label: l.communityCoWalkLeave, onTap: () => rt.leaveCoWalk()),
+        ]),
+      );
+    }
+
+    return Pressable(
+      onTap: () => showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: Colors.transparent,
+        builder: (_) => const _CoWalkSheet(),
+      ),
+      child: GlassModule(
+        fill: c.glassFill(0.05), sheen: false,
+        padding: const EdgeInsets.all(14),
+        child: Row(children: [
+          Container(
+            width: 42, height: 42, alignment: Alignment.center,
+            decoration: BoxDecoration(shape: BoxShape.circle, gradient: LinearGradient(colors: [c.lime, c.primary])),
+            child: Icon(Icons.directions_walk_rounded, color: c.onPrimary),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(l.communityCoWalk, style: titleS(context).copyWith(fontWeight: FontWeight.w800)),
+              const SizedBox(height: 2),
+              Text(l.communityCoWalkSub, style: caption(context)),
+            ]),
+          ),
+          Icon(Icons.chevron_right_rounded, color: c.textFaint),
+        ]),
+      ),
+    );
+  }
+}
+
+class _CoWalkSheet extends StatefulWidget {
+  const _CoWalkSheet();
+  @override
+  State<_CoWalkSheet> createState() => _CoWalkSheetState();
+}
+
+class _CoWalkSheetState extends State<_CoWalkSheet> {
+  final _code = TextEditingController();
+  @override
+  void dispose() {
+    _code.dispose();
+    super.dispose();
+  }
+
+  Future<void> _create() async {
+    await RealtimeService.instance.startCoWalk(_coWalkCode());
+    if (mounted) Navigator.pop(context);
+  }
+
+  Future<void> _join() async {
+    if (_code.text.trim().isEmpty) return;
+    await RealtimeService.instance.startCoWalk(_code.text.trim());
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    final c = context.colors;
+    return RoundedSheet(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).viewInsets.bottom + 24),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Center(child: Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(color: c.textFaint.withValues(alpha: .4), borderRadius: BorderRadius.circular(2)))),
+          Text(l.communityCoWalk, style: h2(context)),
+          const SizedBox(height: 6),
+          Text(l.communityCoWalkExplain, style: caption(context).copyWith(fontSize: 13.5)),
+          const SizedBox(height: 16),
+          AppButton(l.communityCoWalkCreate, icon: Icons.add_rounded, onTap: _create),
+          const SizedBox(height: 16),
+          _OrLine(label: l.communityCoWalkOrJoin),
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(
+              child: Container(
+                height: 50, padding: const EdgeInsets.symmetric(horizontal: 14),
+                decoration: BoxDecoration(color: c.glassFill(0.05), borderRadius: BorderRadius.circular(14), border: Border.all(color: c.glassBorder)),
+                child: Center(child: TextField(
+                  controller: _code, autocorrect: false, textCapitalization: TextCapitalization.characters,
+                  cursorColor: c.primary, textAlign: TextAlign.center,
+                  style: h2(context).copyWith(fontSize: 20, letterSpacing: 4),
+                  decoration: InputDecoration(isCollapsed: true, border: InputBorder.none,
+                      hintText: l.communityCoWalkEnterCode,
+                      hintStyle: body(context).copyWith(color: c.textFaint, fontWeight: FontWeight.w600, letterSpacing: 0)),
+                )),
+              ),
+            ),
+            const SizedBox(width: 10),
+            _MiniButton(label: l.communityCoWalkJoin, filled: true, onTap: _join),
+          ]),
+        ]),
+      ),
+    );
+  }
+}
+
+class _OrLine extends StatelessWidget {
+  const _OrLine({required this.label});
+  final String label;
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    Widget line() => Expanded(child: Container(height: 1, color: c.glassBorder));
+    return Row(children: [
+      line(),
+      Padding(padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Text(label.toUpperCase(), style: caption(context).copyWith(fontWeight: FontWeight.w700, color: c.textFaint))),
+      line(),
+    ]);
   }
 }
