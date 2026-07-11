@@ -336,6 +336,24 @@ class AppLocalizationsEn extends AppLocalizations {
   String get deleteWalk => 'Delete walk';
 
   @override
+  String get walkShare => 'Share route';
+
+  @override
+  String get walkShared => 'Route shared with friends';
+
+  @override
+  String get walkSummary => 'Tour summary';
+
+  @override
+  String get walkExpand => 'Read more';
+
+  @override
+  String get walkCollapse => 'Show less';
+
+  @override
+  String get walkReplay => 'Play again';
+
+  @override
   String get deleteWalkConfirm => 'Delete this walk? This can\'t be undone.';
 
   @override

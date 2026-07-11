@@ -338,6 +338,24 @@ class AppLocalizationsRu extends AppLocalizations {
   String get deleteWalk => 'Удалить прогулку';
 
   @override
+  String get walkShare => 'Поделиться маршрутом';
+
+  @override
+  String get walkShared => 'Маршрут виден друзьям';
+
+  @override
+  String get walkSummary => 'Итоги экскурсии';
+
+  @override
+  String get walkExpand => 'Читать дальше';
+
+  @override
+  String get walkCollapse => 'Свернуть';
+
+  @override
+  String get walkReplay => 'Прослушать снова';
+
+  @override
   String get deleteWalkConfirm => 'Удалить эту прогулку? Действие необратимо.';
 
   @override

@@ -286,3 +286,59 @@ def test_group_streak_only_adds_friends():
 
     made = _run(scenario)
     assert [m["handle"] for m in made["members"]] == ["anna"]
+
+
+async def _seed_walk_with_event(uid: str) -> str:
+    async with db.session_scope() as s:
+        await repo.get_or_create_user(s, provider="supabase", provider_uid=uid, user_id=uid)
+        wid = uuid.uuid4()
+        w = await repo.start_walk(
+            s, walk_id=wid, user_id=uid, sid="s" * 20, language="ru",
+            city="Москва", title="Прогулка",
+        )
+        w.path = [[55.75, 37.62], [55.76, 37.63]]
+        await repo.append_event(
+            s, walk_id=wid, place_id="p1", name="Кремль", category="landmark",
+            lat=55.75, lon=37.62, significance="LANDMARK", narration="Это Кремль.",
+        )
+        return str(wid)
+
+
+def test_share_walk_and_friend_can_view():
+    async def scenario():
+        a, b = str(uuid.uuid4()), str(uuid.uuid4())
+        wid = await _seed_walk_with_event(a)
+        async with _client() as c:
+            await c.post("/community/profile", json={"handle": "anna"}, headers=_auth(a))
+            await c.post("/community/profile", json={"handle": "boris"}, headers=_auth(b))
+            await c.post("/community/friends/request", json={"handle": "boris"}, headers=_auth(a))
+            await c.post(f"/community/friends/{a}/accept", headers=_auth(b))
+            fw_before = await c.get("/community/friends/walks", headers=_auth(b))
+            view_before = await c.get(f"/community/walks/{wid}", headers=_auth(b))
+            sh = await c.post(f"/community/walks/{wid}/share", headers=_auth(a))
+            fw_after = await c.get("/community/friends/walks", headers=_auth(b))
+            view_after = await c.get(f"/community/walks/{wid}", headers=_auth(b))
+        return (fw_before.json(), view_before.status_code, sh.json(),
+                fw_after.json(), view_after.status_code, view_after.json())
+
+    fw_before, vb, sh, fw_after, va, detail = _run(scenario)
+    assert fw_before["walks"] == []          # not shared → invisible
+    assert vb == 404                          # friend can't view an unshared walk
+    assert sh["shared"] is True
+    assert len(fw_after["walks"]) == 1        # now visible
+    assert va == 200
+    assert detail["path"] == [[55.75, 37.62], [55.76, 37.63]]
+    assert detail["events"][0]["name"] == "Кремль"
+    assert detail["events"][0]["narration"] == "Это Кремль."
+
+
+def test_owner_views_own_walk():
+    async def scenario():
+        a = str(uuid.uuid4())
+        wid = await _seed_walk_with_event(a)
+        async with _client() as c:
+            r = await c.get(f"/community/walks/{wid}", headers=_auth(a))
+        return r.status_code, r.json()
+
+    code, d = _run(scenario)
+    assert code == 200 and len(d["events"]) == 1

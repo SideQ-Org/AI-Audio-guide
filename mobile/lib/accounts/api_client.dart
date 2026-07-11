@@ -180,6 +180,16 @@ class CommunityApi {
     return ((j['walks'] as List?) ?? []).map((e) => FriendWalk.fromJson(e as Map<String, dynamic>)).toList();
   }
 
+  /// A walk's full detail (route + narrated stops) — mine, or a friend's shared walk.
+  static Future<WalkDetail> walkDetail(String id) async =>
+      WalkDetail.fromJson(_json(await _get('/community/walks/$id')));
+
+  /// Make one of my walks visible to friends under "Маршруты друзей".
+  static Future<void> shareWalk(String id) async {
+    final r = await _post('/community/walks/$id/share');
+    if (r.statusCode != 200) throw ApiException(r.statusCode, r.body);
+  }
+
   // -- group streaks --
   static Future<List<GroupStreak>> groupStreaks() async {
     final j = _json(await _get('/community/streaks'));

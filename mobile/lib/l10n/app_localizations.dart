@@ -710,6 +710,42 @@ abstract class AppLocalizations {
   /// **'Delete walk'**
   String get deleteWalk;
 
+  /// No description provided for @walkShare.
+  ///
+  /// In en, this message translates to:
+  /// **'Share route'**
+  String get walkShare;
+
+  /// No description provided for @walkShared.
+  ///
+  /// In en, this message translates to:
+  /// **'Route shared with friends'**
+  String get walkShared;
+
+  /// No description provided for @walkSummary.
+  ///
+  /// In en, this message translates to:
+  /// **'Tour summary'**
+  String get walkSummary;
+
+  /// No description provided for @walkExpand.
+  ///
+  /// In en, this message translates to:
+  /// **'Read more'**
+  String get walkExpand;
+
+  /// No description provided for @walkCollapse.
+  ///
+  /// In en, this message translates to:
+  /// **'Show less'**
+  String get walkCollapse;
+
+  /// No description provided for @walkReplay.
+  ///
+  /// In en, this message translates to:
+  /// **'Play again'**
+  String get walkReplay;
+
   /// No description provided for @deleteWalkConfirm.
   ///
   /// In en, this message translates to:

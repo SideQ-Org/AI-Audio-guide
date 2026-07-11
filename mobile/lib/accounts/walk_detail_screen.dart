@@ -9,6 +9,8 @@ import 'package:latlong2/latlong.dart';
 
 import '../l10n/app_localizations.dart';
 import '../map_config.dart';
+import '../ui/components.dart';
+import '../ui/design.dart';
 import 'api_client.dart';
 import 'models.dart';
 
@@ -19,9 +21,25 @@ const _ttsTag = <String, String>{
 };
 
 class WalkDetailScreen extends StatefulWidget {
-  const WalkDetailScreen({super.key, required this.walkId, required this.title});
+  const WalkDetailScreen({
+    super.key,
+    required this.walkId,
+    required this.title,
+    this.owner = true,
+    this.community = false,
+    this.subtitle,
+  });
   final String walkId;
   final String title;
+
+  /// True → my own walk (can delete + share). False → a friend's shared walk.
+  final bool owner;
+
+  /// Load via the community endpoint (a friend's shared walk) instead of /walks/{id}.
+  final bool community;
+
+  /// Optional line under the title (e.g. "прошёл @anna").
+  final String? subtitle;
 
   @override
   State<WalkDetailScreen> createState() => _WalkDetailScreenState();
@@ -31,14 +49,51 @@ class _WalkDetailScreenState extends State<WalkDetailScreen> {
   final FlutterTts _tts = FlutterTts();
   late Future<WalkDetail> _future;
   int? _speakingSeq;
+  bool _shared = false;
+  bool _sharing = false;
+
+  Future<WalkDetail> _fetch() =>
+      widget.community ? CommunityApi.walkDetail(widget.walkId) : WalkApi.getWalk(widget.walkId);
 
   @override
   void initState() {
     super.initState();
-    _future = WalkApi.getWalk(widget.walkId);
+    _future = _fetch();
     _tts.setCompletionHandler(() {
       if (mounted) setState(() => _speakingSeq = null);
     });
+  }
+
+  Future<void> _share() async {
+    final l = AppLocalizations.of(context)!;
+    setState(() => _sharing = true);
+    try {
+      await CommunityApi.shareWalk(widget.walkId);
+      if (mounted) {
+        setState(() => _shared = true);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l.walkShared)));
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l.authErrorNetwork)));
+      }
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
+  /// Tapping a stop on the map opens its narration.
+  void _showEvent(WalkDetail walk, WalkEventItem e) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _EventSheet(
+        event: e,
+        onReplay: () => _speak(e, walk.language),
+      ),
+    );
   }
 
   @override
@@ -92,64 +147,113 @@ class _WalkDetailScreenState extends State<WalkDetailScreen> {
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.title),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.delete_outline),
-            tooltip: l.deleteWalk,
-            onPressed: _confirmDelete,
-          ),
-        ],
-      ),
-      body: FutureBuilder<WalkDetail>(
-        future: _future,
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snap.hasError || !snap.hasData) {
-            return _ErrorRetry(
-              message: l.historyLoadError,
-              retry: () => setState(() => _future = WalkApi.getWalk(widget.walkId)),
-            );
-          }
-          final walk = snap.data!;
-          final cs = Theme.of(context).colorScheme;
-          return ListView(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-            children: [
-              _WalkHeader(walk: walk),
-              const SizedBox(height: 8),
-              _RouteMap(walk: walk),
-              if (walk.events.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Text(l.walkHistoryEmptySubtitle,
-                      style: TextStyle(color: cs.onSurfaceVariant)),
-                ),
-              for (final e in walk.events)
-                _EventTile(
-                  event: e,
-                  speaking: _speakingSeq == e.seq,
-                  onReplay: () => _speak(e, walk.language),
-                ),
-            ],
-          );
-        },
+      backgroundColor: Colors.transparent,
+      body: GradientBackground(
+        child: SafeArea(
+          child: Column(children: [
+            _DetailHeader(
+              title: widget.title,
+              onDelete: widget.owner ? _confirmDelete : null,
+              onShare: widget.owner ? (_sharing ? null : _share) : null,
+              shared: _shared,
+            ),
+            Expanded(
+              child: FutureBuilder<WalkDetail>(
+                future: _future,
+                builder: (context, snap) {
+                  if (snap.connectionState != ConnectionState.done) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (snap.hasError || !snap.hasData) {
+                    return _ErrorRetry(
+                      message: l.historyLoadError,
+                      retry: () => setState(() => _future = _fetch()),
+                    );
+                  }
+                  final walk = snap.data!;
+                  final c = context.colors;
+                  return ListView(
+                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
+                    children: [
+                      _WalkHeader(walk: walk, subtitle: widget.subtitle),
+                      const SizedBox(height: 12),
+                      _RouteMap(walk: walk, onTapEvent: (e) => _showEvent(walk, e)),
+                      if (walk.events.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Text(l.walkHistoryEmptySubtitle,
+                              style: body(context).copyWith(color: c.textSecondary)),
+                        )
+                      else ...[
+                        const SizedBox(height: 8),
+                        _SummaryBlock(walk: walk),
+                        const SizedBox(height: 12),
+                      ],
+                      const SizedBox(height: 4),
+                      for (final e in walk.events)
+                        _EventTile(
+                          event: e,
+                          speaking: _speakingSeq == e.seq,
+                          onReplay: () => _speak(e, walk.language),
+                        ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ]),
+        ),
       ),
     );
   }
 }
 
+/// Branded detail header: back + title + share + delete (no stock AppBar).
+class _DetailHeader extends StatelessWidget {
+  const _DetailHeader({required this.title, this.onDelete, this.onShare, this.shared = false});
+  final String title;
+  final VoidCallback? onDelete; // null → hide (not my walk)
+  final VoidCallback? onShare;
+  final bool shared;
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    final c = context.colors;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 6, 6, 8),
+      child: Row(children: [
+        IconButton(
+          icon: Icon(Icons.arrow_back_rounded, color: c.textPrimary),
+          onPressed: () => Navigator.of(context).maybePop(),
+          tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+        ),
+        Expanded(child: Text(title, style: h2(context), maxLines: 1, overflow: TextOverflow.ellipsis)),
+        if (onShare != null)
+          IconButton(
+            icon: Icon(shared ? Icons.check_circle_rounded : Icons.ios_share_rounded,
+                color: shared ? c.primary : c.textPrimary),
+            tooltip: l.walkShare,
+            onPressed: shared ? null : onShare,
+          ),
+        if (onDelete != null)
+          IconButton(
+            icon: Icon(Icons.delete_outline_rounded, color: c.textFaint),
+            tooltip: l.deleteWalk,
+            onPressed: onDelete,
+          ),
+      ]),
+    );
+  }
+}
+
 class _WalkHeader extends StatelessWidget {
-  const _WalkHeader({required this.walk});
+  const _WalkHeader({required this.walk, this.subtitle});
   final WalkDetail walk;
+  final String? subtitle;
 
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
-    final cs = Theme.of(context).colorScheme;
     final locale = Localizations.localeOf(context).toString();
     final when = DateFormat.yMMMMd(locale).add_Hm().format(walk.startedAt.toLocal());
     final bits = <String>[
@@ -157,26 +261,30 @@ class _WalkHeader extends StatelessWidget {
       l.placesCount(walk.objectCount),
     ];
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(when, style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+          Text(when, style: caption(context)),
           const SizedBox(height: 4),
-          Text(bits.join('  ·  '),
-              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+          Text(bits.join('  ·  '), style: titleS(context)),
+          if (subtitle != null && subtitle!.trim().isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(subtitle!, style: caption(context).copyWith(color: context.colors.primary, fontWeight: FontWeight.w700)),
+          ],
         ],
       ),
     );
   }
 }
 
-// A small, non-interactive map of the walk: the real GPS route (polyline) with a pin at
-// each narrated stop. Falls back to a line through the stops for walks recorded before
-// the route feature; renders nothing if there are no coordinates at all.
+// Interactive map of the walk: the real GPS route (polyline) with a numbered, TAPPABLE
+// pin at each narrated stop (tap → its narration). Falls back to a line through the stops
+// for walks recorded before the route feature; renders nothing if there are no coords.
 class _RouteMap extends StatelessWidget {
-  const _RouteMap({required this.walk});
+  const _RouteMap({required this.walk, this.onTapEvent});
   final WalkDetail walk;
+  final void Function(WalkEventItem)? onTapEvent;
 
   @override
   Widget build(BuildContext context) {
@@ -199,19 +307,20 @@ class _RouteMap extends StatelessWidget {
             ? [Polyline(points: route, strokeWidth: 4, color: cs.primary)]
             : <Polyline>[]);
 
+    // Interactive: pan + pinch-zoom + double-tap (so users can explore the route). Tap a
+    // pin to read its narration.
+    const interaction = InteractionOptions(
+      flags: InteractiveFlag.pinchZoom | InteractiveFlag.drag | InteractiveFlag.doubleTapZoom,
+    );
     final options = all.length == 1
-        ? MapOptions(
-            initialCenter: all.first,
-            initialZoom: 16,
-            interactionOptions: const InteractionOptions(flags: InteractiveFlag.none),
-          )
+        ? MapOptions(initialCenter: all.first, initialZoom: 16, interactionOptions: interaction)
         : MapOptions(
             initialCameraFit: CameraFit.bounds(
               bounds: LatLngBounds.fromPoints(all),
               padding: const EdgeInsets.all(28),
               maxZoom: 17,
             ),
-            interactionOptions: const InteractionOptions(flags: InteractiveFlag.none),
+            interactionOptions: interaction,
           );
 
     return Padding(
@@ -219,7 +328,7 @@ class _RouteMap extends StatelessWidget {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(18),
         child: SizedBox(
-          height: 220,
+          height: 240,
           child: FlutterMap(
             options: options,
             children: [
@@ -231,12 +340,15 @@ class _RouteMap extends StatelessWidget {
               if (polylines.isNotEmpty) PolylineLayer(polylines: polylines),
               MarkerLayer(
                 markers: [
-                  for (final p in markers)
+                  for (int i = 0; i < walk.events.length; i++)
                     Marker(
-                      point: p,
-                      width: 26,
-                      height: 26,
-                      child: Icon(Icons.location_on, color: cs.primary, size: 26),
+                      point: LatLng(walk.events[i].lat, walk.events[i].lon),
+                      width: 30,
+                      height: 30,
+                      child: GestureDetector(
+                        onTap: onTapEvent == null ? null : () => onTapEvent!(walk.events[i]),
+                        child: _NumberedPin(n: i + 1, color: cs.primary, onPrimary: cs.onPrimary),
+                      ),
                     ),
                 ],
               ),
@@ -292,14 +404,12 @@ class _EventTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final c = context.colors;
     final hasText = (event.narration ?? '').trim().isNotEmpty;
-    return Card(
-      elevation: 0,
-      color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
-      margin: const EdgeInsets.symmetric(vertical: 6),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: GlassModule(
+        padding: const EdgeInsets.fromLTRB(16, 14, 10, 14),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -307,23 +417,22 @@ class _EventTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(event.name,
-                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-                  Text(event.category,
-                      style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                  Text(event.name, style: titleS(context)),
+                  const SizedBox(height: 2),
+                  Text(event.category, style: caption(context)),
                   if (hasText) ...[
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 8),
                     Text(event.narration!,
-                        style: TextStyle(fontSize: 13, height: 1.4, color: cs.onSurface)),
+                        style: body(context).copyWith(color: c.textSecondary, height: 1.45)),
                   ],
                 ],
               ),
             ),
             if (hasText)
               IconButton(
-                icon: Icon(speaking ? Icons.stop_circle_outlined : Icons.play_circle_outline),
+                icon: Icon(speaking ? Icons.stop_circle_rounded : Icons.play_circle_fill_rounded, size: 30),
                 onPressed: onReplay,
-                color: cs.primary,
+                color: c.primary,
               ),
           ],
         ),
@@ -341,13 +450,136 @@ class _ErrorRetry extends StatelessWidget {
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
     return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(message),
-          const SizedBox(height: 12),
-          OutlinedButton(onPressed: retry, child: Text(l.retry)),
-        ],
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 0, 24, 80),
+        child: GlassModule(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.cloud_off_rounded, size: 30, color: context.colors.primary),
+              const SizedBox(height: 12),
+              Text(message, textAlign: TextAlign.center, style: body(context)),
+              const SizedBox(height: 16),
+              SizedBox(width: double.infinity, child: AppButton(l.retry, kind: AppBtnKind.secondary, onTap: retry)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Numbered, tappable map pin for a narrated stop.
+class _NumberedPin extends StatelessWidget {
+  const _NumberedPin({required this.n, required this.color, required this.onPrimary});
+  final int n;
+  final Color color;
+  final Color onPrimary;
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white, width: 2),
+        boxShadow: [BoxShadow(color: color.withValues(alpha: .5), blurRadius: 8, spreadRadius: -2)],
+      ),
+      child: Text('$n', style: TextStyle(color: onPrimary, fontSize: 13, fontWeight: FontWeight.w800)),
+    );
+  }
+}
+
+// Expandable "tour summary": all the narrations woven into one comfortable read.
+class _SummaryBlock extends StatefulWidget {
+  const _SummaryBlock({required this.walk});
+  final WalkDetail walk;
+  @override
+  State<_SummaryBlock> createState() => _SummaryBlockState();
+}
+
+class _SummaryBlockState extends State<_SummaryBlock> {
+  bool _open = false;
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    final c = context.colors;
+    final text = widget.walk.events
+        .map((e) => (e.narration ?? '').trim())
+        .where((s) => s.isNotEmpty)
+        .join('\n\n');
+    if (text.isEmpty) return const SizedBox.shrink();
+    return GlassModule(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.menu_book_rounded, size: 18, color: c.primary),
+          const SizedBox(width: 8),
+          Text(l.walkSummary, style: titleS(context).copyWith(fontWeight: FontWeight.w800)),
+        ]),
+        const SizedBox(height: 10),
+        AnimatedSize(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: _open ? double.infinity : 110),
+            child: Text(text,
+                overflow: _open ? TextOverflow.visible : TextOverflow.fade,
+                style: body(context).copyWith(color: c.textSecondary, height: 1.5)),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            onPressed: () => setState(() => _open = !_open),
+            style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: const Size(0, 32)),
+            child: Text(_open ? l.walkCollapse : l.walkExpand,
+                style: TextStyle(color: c.primary, fontWeight: FontWeight.w800)),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+// Bottom sheet shown when a map stop is tapped: what was narrated there.
+class _EventSheet extends StatelessWidget {
+  const _EventSheet({required this.event, required this.onReplay});
+  final WalkEventItem event;
+  final VoidCallback onReplay;
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    final c = context.colors;
+    final text = (event.narration ?? '').trim();
+    return RoundedSheet(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).padding.bottom + 20),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Center(child: Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(color: c.textFaint.withValues(alpha: .4), borderRadius: BorderRadius.circular(2)))),
+          Text(event.name, style: h2(context)),
+          const SizedBox(height: 2),
+          Text(event.category, style: caption(context)),
+          const SizedBox(height: 14),
+          if (text.isNotEmpty)
+            Flexible(
+              child: SingleChildScrollView(
+                child: Text(text, style: body(context).copyWith(color: c.textSecondary, height: 1.5)),
+              ),
+            )
+          else
+            Text(l.walkHistoryEmptySubtitle, style: body(context).copyWith(color: c.textSecondary)),
+          const SizedBox(height: 16),
+          if (text.isNotEmpty)
+            AppButton(l.walkReplay, icon: Icons.play_arrow_rounded, onTap: () {
+              onReplay();
+              Navigator.pop(context);
+            }),
+        ]),
       ),
     );
   }

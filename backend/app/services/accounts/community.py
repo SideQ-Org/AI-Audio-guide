@@ -16,6 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from .models import (
     ActivityEvent,
@@ -310,11 +311,40 @@ async def list_friends_walks(
     rows = await session.execute(
         select(Walk, User)
         .join(User, User.id == Walk.user_id)
-        .where(Walk.user_id.in_(ids))
+        .where(Walk.user_id.in_(ids), Walk.shared.is_(True))
         .order_by(Walk.started_at.desc())
         .limit(limit)
     )
     return list(rows)
+
+
+async def share_walk(session: AsyncSession, *, walk_id, user_id) -> bool:
+    """Mark one of the caller's own walks as shared (visible to friends). False if not
+    theirs."""
+    w = await session.get(Walk, _as_uuid(walk_id))
+    if w is None or w.user_id != _as_uuid(user_id):
+        return False
+    w.shared = True
+    await session.flush()
+    return True
+
+
+async def get_walk_for_viewer(
+    session: AsyncSession, *, walk_id, user_id
+) -> tuple[Walk, User] | None:
+    """(Walk with events, owner) if the viewer may see it — it's theirs, or it's a
+    friend's SHARED walk. Else None."""
+    wid, uid = _as_uuid(walk_id), _as_uuid(user_id)
+    w = await session.scalar(
+        select(Walk).where(Walk.id == wid).options(selectinload(Walk.events))
+    )
+    if w is None:
+        return None
+    if w.user_id != uid:
+        if not (w.shared and w.user_id in await friend_ids(session, user_id=uid)):
+            return None
+    owner = await session.get(User, w.user_id)
+    return w, owner
 
 
 # -- challenges -------------------------------------------------------------- #

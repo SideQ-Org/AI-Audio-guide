@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from app.config import settings
 
-from .api import current_user
+from .api import WalkDetailOut, WalkEventOut, _walk_out, current_user
 
 router = APIRouter(prefix="/community", tags=["community"])
 
@@ -502,3 +502,41 @@ async def leave_group_streak(streak_id: str, user_id: str = Depends(current_user
     async with session_scope() as session:
         ok = await comm.leave_group_streak(session, streak_id=streak_id, user_id=user_id)
         return {"ok": ok}
+
+
+# -- share a walk / view a walk's detail ------------------------------------- #
+
+
+@router.post("/walks/{walk_id}/share")
+async def share_walk(walk_id: str, user_id: str = Depends(current_user)) -> dict:
+    """Make one of my walks visible to friends under "Маршруты друзей"."""
+    comm, repo, session_scope = _community()
+    async with session_scope() as session:
+        await _ensure(repo, session, user_id)
+        ok = await comm.share_walk(session, walk_id=walk_id, user_id=user_id)
+        if ok:
+            await comm.record_activity(session, user_id=user_id, kind="walk_shared", payload={})
+        return {"shared": ok}
+
+
+@router.get("/walks/{walk_id}", response_model=WalkDetailOut)
+async def walk_detail(walk_id: str, user_id: str = Depends(current_user)) -> WalkDetailOut:
+    """A walk's full detail (route + narrated stops) — mine, or a friend's SHARED walk."""
+    comm, repo, session_scope = _community()
+    async with session_scope() as session:
+        await _ensure(repo, session, user_id)
+        res = await comm.get_walk_for_viewer(session, walk_id=walk_id, user_id=user_id)
+        if res is None:
+            raise HTTPException(status_code=404, detail="walk not found")
+        walk, _owner = res
+        events = [
+            WalkEventOut(
+                seq=e.seq, place_id=e.place_id, name=e.name, category=e.category,
+                lat=e.lat, lon=e.lon, significance=e.significance,
+                narration=e.narration, said_at=e.said_at,
+            )
+            for e in walk.events
+        ]
+        detail = _walk_out(walk).model_dump()
+        path = walk.path
+    return WalkDetailOut(**detail, events=events, path=path)

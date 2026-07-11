@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     Double,
     ForeignKey,
     Integer,
@@ -130,6 +131,8 @@ class Walk(Base):
     # Downsampled GPS breadcrumb of the walk ([[lat, lon], ...]) for the history route
     # map. Nullable: old walks (and any where capture was off) simply have no path.
     path: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Community: friends see this walk under "Маршруты друзей" only once shared.
+    shared: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     user: Mapped[User] = relationship(back_populates="walks")
     events: Mapped[list[WalkEvent]] = relationship(

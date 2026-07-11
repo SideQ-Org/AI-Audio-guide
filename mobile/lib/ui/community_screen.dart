@@ -14,6 +14,7 @@ import '../accounts/api_client.dart';
 import '../accounts/auth_service.dart';
 import '../accounts/community_models.dart';
 import '../accounts/realtime_service.dart';
+import '../accounts/walk_detail_screen.dart';
 import '../l10n/app_localizations.dart';
 import 'components.dart';
 import 'design.dart';
@@ -591,14 +592,26 @@ class _RouteCard extends StatelessWidget {
             if (km != null) l.communityGoalKm(km.round()),
             if (walk.objectCount > 0) l.communityGoalPlaces(walk.objectCount),
           ].join(' · ');
-    return Container(
-      width: 220,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(Radii.lg),
-        color: _blockFill(context),
-        border: Border.all(color: c.glassBorder),
-      ),
-      child: ClipRRect(
+    return Pressable(
+      onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => WalkDetailScreen(
+          walkId: walk.id,
+          title: walk.city ?? walk.title ?? '—',
+          owner: !showUser, // my routes → owner (can share/delete); friends' → not
+          community: showUser, // friends' → community endpoint (shared walk)
+          subtitle: showUser
+              ? (walk.user.handle != null ? '@${walk.user.handle}' : walk.user.name)
+              : null,
+        ),
+      )),
+      child: Container(
+        width: 220,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(Radii.lg),
+          color: _blockFill(context),
+          border: Border.all(color: c.glassBorder),
+        ),
+        child: ClipRRect(
         borderRadius: BorderRadius.circular(Radii.lg),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Expanded(
@@ -619,6 +632,7 @@ class _RouteCard extends StatelessWidget {
             ]),
           ),
         ]),
+        ),
       ),
     );
   }
