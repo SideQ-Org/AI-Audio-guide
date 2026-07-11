@@ -512,6 +512,120 @@ abstract class AppLocalizations {
   /// **'Sign in to save your walks and revisit them.'**
   String get loginSubtitle;
 
+  /// No description provided for @loginWelcomeTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Welcome back'**
+  String get loginWelcomeTitle;
+
+  /// No description provided for @loginWelcomeSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Open the app and just walk — your guide tells you what\'s around.'**
+  String get loginWelcomeSubtitle;
+
+  /// No description provided for @loginNewHere.
+  ///
+  /// In en, this message translates to:
+  /// **'New here?'**
+  String get loginNewHere;
+
+  /// No description provided for @registerSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Create an account to save your walks and revisit them.'**
+  String get registerSubtitle;
+
+  /// No description provided for @haveAccount.
+  ///
+  /// In en, this message translates to:
+  /// **'Already have an account?'**
+  String get haveAccount;
+
+  /// No description provided for @nickLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Nickname'**
+  String get nickLabel;
+
+  /// No description provided for @birthdayLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Birthday'**
+  String get birthdayLabel;
+
+  /// No description provided for @birthdayOptional.
+  ///
+  /// In en, this message translates to:
+  /// **'Birthday · optional'**
+  String get birthdayOptional;
+
+  /// No description provided for @avatarChoose.
+  ///
+  /// In en, this message translates to:
+  /// **'Add a photo · optional'**
+  String get avatarChoose;
+
+  /// No description provided for @registerPremiumTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Get Premium right away'**
+  String get registerPremiumTitle;
+
+  /// No description provided for @registerPremiumSub.
+  ///
+  /// In en, this message translates to:
+  /// **'The whole guide, no limits.'**
+  String get registerPremiumSub;
+
+  /// No description provided for @otpTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Confirm your email'**
+  String get otpTitle;
+
+  /// No description provided for @otpSentTo.
+  ///
+  /// In en, this message translates to:
+  /// **'We sent a 6-digit code to {email}. Enter it below to finish.'**
+  String otpSentTo(String email);
+
+  /// No description provided for @otpCodeLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Code from email'**
+  String get otpCodeLabel;
+
+  /// No description provided for @otpConfirm.
+  ///
+  /// In en, this message translates to:
+  /// **'Confirm'**
+  String get otpConfirm;
+
+  /// No description provided for @otpResend.
+  ///
+  /// In en, this message translates to:
+  /// **'Send the code again'**
+  String get otpResend;
+
+  /// No description provided for @otpResent.
+  ///
+  /// In en, this message translates to:
+  /// **'Code sent again'**
+  String get otpResent;
+
+  /// No description provided for @otpInvalid.
+  ///
+  /// In en, this message translates to:
+  /// **'Wrong or expired code.'**
+  String get otpInvalid;
+
+  /// No description provided for @orWithEmail.
+  ///
+  /// In en, this message translates to:
+  /// **'or with email'**
+  String get orWithEmail;
+
   /// No description provided for @continueWithGoogle.
   ///
   /// In en, this message translates to:
@@ -835,6 +949,402 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Finish'**
   String get bgFinish;
+
+  /// No description provided for @greetMorning.
+  ///
+  /// In en, this message translates to:
+  /// **'Good morning,'**
+  String get greetMorning;
+
+  /// No description provided for @greetAfternoon.
+  ///
+  /// In en, this message translates to:
+  /// **'Good afternoon,'**
+  String get greetAfternoon;
+
+  /// No description provided for @greetEvening.
+  ///
+  /// In en, this message translates to:
+  /// **'Good evening,'**
+  String get greetEvening;
+
+  /// No description provided for @greetNight.
+  ///
+  /// In en, this message translates to:
+  /// **'Good night,'**
+  String get greetNight;
+
+  /// No description provided for @homePrompt.
+  ///
+  /// In en, this message translates to:
+  /// **'where to today?'**
+  String get homePrompt;
+
+  /// No description provided for @homeGuest.
+  ///
+  /// In en, this message translates to:
+  /// **'Traveler'**
+  String get homeGuest;
+
+  /// No description provided for @swipeToStart.
+  ///
+  /// In en, this message translates to:
+  /// **'Let’s go'**
+  String get swipeToStart;
+
+  /// No description provided for @tabHome.
+  ///
+  /// In en, this message translates to:
+  /// **'Home'**
+  String get tabHome;
+
+  /// No description provided for @tabCommunity.
+  ///
+  /// In en, this message translates to:
+  /// **'Community'**
+  String get tabCommunity;
+
+  /// No description provided for @tabProfile.
+  ///
+  /// In en, this message translates to:
+  /// **'Profile'**
+  String get tabProfile;
+
+  /// No description provided for @themeLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Theme'**
+  String get themeLabel;
+
+  /// No description provided for @focusTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'FOCUS ON'**
+  String get focusTitle;
+
+  /// No description provided for @premiumTrial.
+  ///
+  /// In en, this message translates to:
+  /// **'1 week free'**
+  String get premiumTrial;
+
+  /// No description provided for @profileLevelN.
+  ///
+  /// In en, this message translates to:
+  /// **'Level {n}'**
+  String profileLevelN(int n);
+
+  /// No description provided for @profileToNext.
+  ///
+  /// In en, this message translates to:
+  /// **'to level {level} · {xp} XP'**
+  String profileToNext(int level, int xp);
+
+  /// No description provided for @profileAtMax.
+  ///
+  /// In en, this message translates to:
+  /// **'Max level reached'**
+  String get profileAtMax;
+
+  /// No description provided for @close.
+  ///
+  /// In en, this message translates to:
+  /// **'Close'**
+  String get close;
+
+  /// No description provided for @communityGuest.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign in to see friends, routes and challenges.'**
+  String get communityGuest;
+
+  /// No description provided for @communityChallenges.
+  ///
+  /// In en, this message translates to:
+  /// **'Challenges'**
+  String get communityChallenges;
+
+  /// No description provided for @communityCreateChallenge.
+  ///
+  /// In en, this message translates to:
+  /// **'Create challenge'**
+  String get communityCreateChallenge;
+
+  /// No description provided for @communityNoChallenges.
+  ///
+  /// In en, this message translates to:
+  /// **'No active challenges yet.'**
+  String get communityNoChallenges;
+
+  /// No description provided for @communityFriendsRoutes.
+  ///
+  /// In en, this message translates to:
+  /// **'Friends\' routes'**
+  String get communityFriendsRoutes;
+
+  /// No description provided for @communityFriends.
+  ///
+  /// In en, this message translates to:
+  /// **'Friends'**
+  String get communityFriends;
+
+  /// No description provided for @communityAddFriend.
+  ///
+  /// In en, this message translates to:
+  /// **'Add'**
+  String get communityAddFriend;
+
+  /// No description provided for @communityWalkingNow.
+  ///
+  /// In en, this message translates to:
+  /// **'walking now'**
+  String get communityWalkingNow;
+
+  /// No description provided for @communityNoFriends.
+  ///
+  /// In en, this message translates to:
+  /// **'No one yet — add friends by handle.'**
+  String get communityNoFriends;
+
+  /// No description provided for @communityRequests.
+  ///
+  /// In en, this message translates to:
+  /// **'Friend requests'**
+  String get communityRequests;
+
+  /// No description provided for @communityAccept.
+  ///
+  /// In en, this message translates to:
+  /// **'Accept'**
+  String get communityAccept;
+
+  /// No description provided for @communityDecline.
+  ///
+  /// In en, this message translates to:
+  /// **'Decline'**
+  String get communityDecline;
+
+  /// No description provided for @communityJoin.
+  ///
+  /// In en, this message translates to:
+  /// **'Join'**
+  String get communityJoin;
+
+  /// No description provided for @communityPickHandleTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick a handle'**
+  String get communityPickHandleTitle;
+
+  /// No description provided for @communityPickHandleBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Friends use it to find you.'**
+  String get communityPickHandleBody;
+
+  /// No description provided for @communityHandleField.
+  ///
+  /// In en, this message translates to:
+  /// **'handle'**
+  String get communityHandleField;
+
+  /// No description provided for @communityHandleSave.
+  ///
+  /// In en, this message translates to:
+  /// **'Save'**
+  String get communityHandleSave;
+
+  /// No description provided for @communityHandleTaken.
+  ///
+  /// In en, this message translates to:
+  /// **'Handle taken or invalid'**
+  String get communityHandleTaken;
+
+  /// No description provided for @communityRequestSent.
+  ///
+  /// In en, this message translates to:
+  /// **'Request sent'**
+  String get communityRequestSent;
+
+  /// No description provided for @communitySearchHandle.
+  ///
+  /// In en, this message translates to:
+  /// **'Search by handle'**
+  String get communitySearchHandle;
+
+  /// No description provided for @communitySendRequest.
+  ///
+  /// In en, this message translates to:
+  /// **'Add'**
+  String get communitySendRequest;
+
+  /// No description provided for @communityChallengeTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Title'**
+  String get communityChallengeTitle;
+
+  /// No description provided for @communityMetric.
+  ///
+  /// In en, this message translates to:
+  /// **'Metric'**
+  String get communityMetric;
+
+  /// No description provided for @communityMetricDistance.
+  ///
+  /// In en, this message translates to:
+  /// **'Distance'**
+  String get communityMetricDistance;
+
+  /// No description provided for @communityMetricPlaces.
+  ///
+  /// In en, this message translates to:
+  /// **'Places'**
+  String get communityMetricPlaces;
+
+  /// No description provided for @communityMetricDistricts.
+  ///
+  /// In en, this message translates to:
+  /// **'Districts'**
+  String get communityMetricDistricts;
+
+  /// No description provided for @communityGoalLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Goal'**
+  String get communityGoalLabel;
+
+  /// No description provided for @communityDaysLabel.
+  ///
+  /// In en, this message translates to:
+  /// **'Days'**
+  String get communityDaysLabel;
+
+  /// No description provided for @communityLeaderboard.
+  ///
+  /// In en, this message translates to:
+  /// **'Leaderboard'**
+  String get communityLeaderboard;
+
+  /// No description provided for @communityNoParticipants.
+  ///
+  /// In en, this message translates to:
+  /// **'No participants yet.'**
+  String get communityNoParticipants;
+
+  /// No description provided for @communityRankPlace.
+  ///
+  /// In en, this message translates to:
+  /// **'#{rank}'**
+  String communityRankPlace(int rank);
+
+  /// No description provided for @communityGoalKm.
+  ///
+  /// In en, this message translates to:
+  /// **'{km} km'**
+  String communityGoalKm(int km);
+
+  /// No description provided for @communityGoalPlaces.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} places'**
+  String communityGoalPlaces(int count);
+
+  /// No description provided for @communityGoalDistricts.
+  ///
+  /// In en, this message translates to:
+  /// **'{count} districts'**
+  String communityGoalDistricts(int count);
+
+  /// No description provided for @feedWalked.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} went for a walk'**
+  String feedWalked(String name);
+
+  /// No description provided for @feedWalkedIn.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} walked in {city}'**
+  String feedWalkedIn(String name, String city);
+
+  /// No description provided for @feedStreak.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} — {days}-day streak'**
+  String feedStreak(String name, int days);
+
+  /// No description provided for @feedBadge.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} earned “{badge}”'**
+  String feedBadge(String name, String badge);
+
+  /// No description provided for @feedChallenge.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} started a challenge'**
+  String feedChallenge(String name);
+
+  /// No description provided for @xpValue.
+  ///
+  /// In en, this message translates to:
+  /// **'{n} XP'**
+  String xpValue(int n);
+
+  /// No description provided for @achievements.
+  ///
+  /// In en, this message translates to:
+  /// **'ACHIEVEMENTS'**
+  String get achievements;
+
+  /// No description provided for @friends.
+  ///
+  /// In en, this message translates to:
+  /// **'Friends'**
+  String get friends;
+
+  /// No description provided for @invite.
+  ///
+  /// In en, this message translates to:
+  /// **'Invite'**
+  String get invite;
+
+  /// No description provided for @friendsSoon.
+  ///
+  /// In en, this message translates to:
+  /// **'Friends are coming soon'**
+  String get friendsSoon;
+
+  /// No description provided for @statsSoon.
+  ///
+  /// In en, this message translates to:
+  /// **'Your stats will appear here'**
+  String get statsSoon;
+
+  /// No description provided for @communitySoonTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Community is coming soon'**
+  String get communitySoonTitle;
+
+  /// No description provided for @communitySoonBody.
+  ///
+  /// In en, this message translates to:
+  /// **'Friends, shared routes and challenges will live here.'**
+  String get communitySoonBody;
+
+  /// No description provided for @sectionAccount.
+  ///
+  /// In en, this message translates to:
+  /// **'Account'**
+  String get sectionAccount;
+
+  /// No description provided for @sectionDeveloper.
+  ///
+  /// In en, this message translates to:
+  /// **'Developer'**
+  String get sectionDeveloper;
 }
 
 class _AppLocalizationsDelegate

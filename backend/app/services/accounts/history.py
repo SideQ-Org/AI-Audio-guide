@@ -25,6 +25,7 @@ import uuid
 
 from app.config import settings
 
+from . import community as comm
 from . import repository as repo
 from .db import accounts_enabled, session_scope
 
@@ -128,5 +129,13 @@ async def _write(new_walk: bool, wid: uuid.UUID, meta: dict, event: dict) -> Non
             await repo.end_walk(session, walk_id=wid)
             # Snapshot the route breadcrumb accumulated so far onto the walk row.
             await repo.update_walk_path(session, walk_id=wid, path=meta.get("path"))
+            # Community (COMMUNITY.md): keep "на прогулке" presence fresh on every
+            # narrated object, and drop a single feed item when a new walk begins.
+            await comm.touch_active(session, user_id=meta["user_id"])
+            if new_walk:
+                await comm.record_activity(
+                    session, user_id=meta["user_id"], kind="walk",
+                    payload={"city": meta["city"], "district": meta["district"]},
+                )
     except Exception as e:  # noqa: BLE001 — history is best-effort; never break the tour
         _log.warning("history write failed (walk=%s): %r", wid, e)

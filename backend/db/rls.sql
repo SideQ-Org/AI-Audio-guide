@@ -40,3 +40,55 @@ create policy walk_events_delete_own on walk_events
       where w.id = walk_events.walk_id and w.user_id = auth.uid()
     )
   );
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Community (design/COMMUNITY.md §3.3). Reads in v1 all go through the backend
+-- (service role bypasses RLS); these policies are defence-in-depth for any direct
+-- client access. Writes stay backend-only — no insert/update/delete policies.
+
+alter table friendships enable row level security;
+alter table activity_events enable row level security;
+alter table challenges enable row level security;
+alter table challenge_participants enable row level security;
+
+-- A user sees friendships they are part of (their requests + requests to them).
+drop policy if exists friendships_select_own on friendships;
+create policy friendships_select_own on friendships
+  for select using (requester_id = auth.uid() or addressee_id = auth.uid());
+
+-- Feed: your own events + events of your accepted friends.
+drop policy if exists activity_events_select_visible on activity_events;
+create policy activity_events_select_visible on activity_events
+  for select using (
+    user_id = auth.uid()
+    or exists (
+      select 1 from friendships f
+      where f.status = 'accepted'
+        and ( (f.requester_id = auth.uid() and f.addressee_id = activity_events.user_id)
+           or (f.addressee_id = auth.uid() and f.requester_id = activity_events.user_id) )
+    )
+  );
+
+-- Challenges: global ones, ones you created, or ones you've joined.
+drop policy if exists challenges_select_visible on challenges;
+create policy challenges_select_visible on challenges
+  for select using (
+    scope = 'global'
+    or creator_id = auth.uid()
+    or exists (
+      select 1 from challenge_participants p
+      where p.challenge_id = challenges.id and p.user_id = auth.uid()
+    )
+  );
+
+-- Participants: your own rows, or co-participants of a challenge you're in.
+drop policy if exists challenge_participants_select_visible on challenge_participants;
+create policy challenge_participants_select_visible on challenge_participants
+  for select using (
+    user_id = auth.uid()
+    or exists (
+      select 1 from challenge_participants mine
+      where mine.challenge_id = challenge_participants.challenge_id
+        and mine.user_id = auth.uid()
+    )
+  );

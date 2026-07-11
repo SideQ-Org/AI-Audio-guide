@@ -222,6 +222,67 @@ class AppLocalizationsEn extends AppLocalizations {
   String get loginSubtitle => 'Sign in to save your walks and revisit them.';
 
   @override
+  String get loginWelcomeTitle => 'Welcome back';
+
+  @override
+  String get loginWelcomeSubtitle =>
+      'Open the app and just walk — your guide tells you what\'s around.';
+
+  @override
+  String get loginNewHere => 'New here?';
+
+  @override
+  String get registerSubtitle =>
+      'Create an account to save your walks and revisit them.';
+
+  @override
+  String get haveAccount => 'Already have an account?';
+
+  @override
+  String get nickLabel => 'Nickname';
+
+  @override
+  String get birthdayLabel => 'Birthday';
+
+  @override
+  String get birthdayOptional => 'Birthday · optional';
+
+  @override
+  String get avatarChoose => 'Add a photo · optional';
+
+  @override
+  String get registerPremiumTitle => 'Get Premium right away';
+
+  @override
+  String get registerPremiumSub => 'The whole guide, no limits.';
+
+  @override
+  String get otpTitle => 'Confirm your email';
+
+  @override
+  String otpSentTo(String email) {
+    return 'We sent a 6-digit code to $email. Enter it below to finish.';
+  }
+
+  @override
+  String get otpCodeLabel => 'Code from email';
+
+  @override
+  String get otpConfirm => 'Confirm';
+
+  @override
+  String get otpResend => 'Send the code again';
+
+  @override
+  String get otpResent => 'Code sent again';
+
+  @override
+  String get otpInvalid => 'Wrong or expired code.';
+
+  @override
+  String get orWithEmail => 'or with email';
+
+  @override
   String get continueWithGoogle => 'Continue with Google';
 
   @override
@@ -402,4 +463,227 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get bgFinish => 'Finish';
+
+  @override
+  String get greetMorning => 'Good morning,';
+
+  @override
+  String get greetAfternoon => 'Good afternoon,';
+
+  @override
+  String get greetEvening => 'Good evening,';
+
+  @override
+  String get greetNight => 'Good night,';
+
+  @override
+  String get homePrompt => 'where to today?';
+
+  @override
+  String get homeGuest => 'Traveler';
+
+  @override
+  String get swipeToStart => 'Let’s go';
+
+  @override
+  String get tabHome => 'Home';
+
+  @override
+  String get tabCommunity => 'Community';
+
+  @override
+  String get tabProfile => 'Profile';
+
+  @override
+  String get themeLabel => 'Theme';
+
+  @override
+  String get focusTitle => 'FOCUS ON';
+
+  @override
+  String get premiumTrial => '1 week free';
+
+  @override
+  String profileLevelN(int n) {
+    return 'Level $n';
+  }
+
+  @override
+  String profileToNext(int level, int xp) {
+    return 'to level $level · $xp XP';
+  }
+
+  @override
+  String get profileAtMax => 'Max level reached';
+
+  @override
+  String get close => 'Close';
+
+  @override
+  String get communityGuest => 'Sign in to see friends, routes and challenges.';
+
+  @override
+  String get communityChallenges => 'Challenges';
+
+  @override
+  String get communityCreateChallenge => 'Create challenge';
+
+  @override
+  String get communityNoChallenges => 'No active challenges yet.';
+
+  @override
+  String get communityFriendsRoutes => 'Friends\' routes';
+
+  @override
+  String get communityFriends => 'Friends';
+
+  @override
+  String get communityAddFriend => 'Add';
+
+  @override
+  String get communityWalkingNow => 'walking now';
+
+  @override
+  String get communityNoFriends => 'No one yet — add friends by handle.';
+
+  @override
+  String get communityRequests => 'Friend requests';
+
+  @override
+  String get communityAccept => 'Accept';
+
+  @override
+  String get communityDecline => 'Decline';
+
+  @override
+  String get communityJoin => 'Join';
+
+  @override
+  String get communityPickHandleTitle => 'Pick a handle';
+
+  @override
+  String get communityPickHandleBody => 'Friends use it to find you.';
+
+  @override
+  String get communityHandleField => 'handle';
+
+  @override
+  String get communityHandleSave => 'Save';
+
+  @override
+  String get communityHandleTaken => 'Handle taken or invalid';
+
+  @override
+  String get communityRequestSent => 'Request sent';
+
+  @override
+  String get communitySearchHandle => 'Search by handle';
+
+  @override
+  String get communitySendRequest => 'Add';
+
+  @override
+  String get communityChallengeTitle => 'Title';
+
+  @override
+  String get communityMetric => 'Metric';
+
+  @override
+  String get communityMetricDistance => 'Distance';
+
+  @override
+  String get communityMetricPlaces => 'Places';
+
+  @override
+  String get communityMetricDistricts => 'Districts';
+
+  @override
+  String get communityGoalLabel => 'Goal';
+
+  @override
+  String get communityDaysLabel => 'Days';
+
+  @override
+  String get communityLeaderboard => 'Leaderboard';
+
+  @override
+  String get communityNoParticipants => 'No participants yet.';
+
+  @override
+  String communityRankPlace(int rank) {
+    return '#$rank';
+  }
+
+  @override
+  String communityGoalKm(int km) {
+    return '$km km';
+  }
+
+  @override
+  String communityGoalPlaces(int count) {
+    return '$count places';
+  }
+
+  @override
+  String communityGoalDistricts(int count) {
+    return '$count districts';
+  }
+
+  @override
+  String feedWalked(String name) {
+    return '$name went for a walk';
+  }
+
+  @override
+  String feedWalkedIn(String name, String city) {
+    return '$name walked in $city';
+  }
+
+  @override
+  String feedStreak(String name, int days) {
+    return '$name — $days-day streak';
+  }
+
+  @override
+  String feedBadge(String name, String badge) {
+    return '$name earned “$badge”';
+  }
+
+  @override
+  String feedChallenge(String name) {
+    return '$name started a challenge';
+  }
+
+  @override
+  String xpValue(int n) {
+    return '$n XP';
+  }
+
+  @override
+  String get achievements => 'ACHIEVEMENTS';
+
+  @override
+  String get friends => 'Friends';
+
+  @override
+  String get invite => 'Invite';
+
+  @override
+  String get friendsSoon => 'Friends are coming soon';
+
+  @override
+  String get statsSoon => 'Your stats will appear here';
+
+  @override
+  String get communitySoonTitle => 'Community is coming soon';
+
+  @override
+  String get communitySoonBody =>
+      'Friends, shared routes and challenges will live here.';
+
+  @override
+  String get sectionAccount => 'Account';
+
+  @override
+  String get sectionDeveloper => 'Developer';
 }

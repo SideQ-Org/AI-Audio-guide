@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.services.accounts.api import router as accounts_router
+from app.services.accounts.community_api import router as community_router
 from app.services.accounts.auth import verify_token
 from app.services.agent.factory import build_orchestrator
 from app.services.agent.languages import normalize, stt_unclear
@@ -52,6 +53,7 @@ from app.shared.schemas import (
 app = FastAPI(title="AI Audio Guide", version="0.1.0")
 app.include_router(accounts_router)  # /me, /walks (read history under auth); §7
 app.include_router(billing_router)  # /billing/google/verify (grant paid tier); tiers
+app.include_router(community_router)  # /community/* (friends, feed, challenges); COMMUNITY.md
 _log = logging.getLogger("aiguide.ws")
 _walk = get_logger()  # shared walk logger (aiguide.agent): pause/resume/listen events
 
@@ -287,8 +289,9 @@ class _SessionRuntime:
     ``played`` signal (with a length-based fallback so older clients still flow).
 
     A question (``utterance``/``audio``) has top priority: it cancels the in-flight
-    generation (its half-built, unsaved state is discarded), answers immediately,
-    then the producer resumes — and the orchestrator weaves the answer in next.
+    generation (its half-built, unsaved state is discarded) and is answered immediately
+    by the Companion; then the producer resumes the tour where it left off. The inline
+    reply is the whole answer — it is NOT re-woven into a later area beat.
     """
 
     def __init__(self, ws: WebSocket, orch: Orchestrator, session_id: str) -> None:
@@ -332,6 +335,10 @@ class _SessionRuntime:
         self.paused_gate = asyncio.Event()  # set = running; cleared = paused (producer parks here)
         self.paused_gate.set()
         self.step_task: asyncio.Task | None = None
+        # Background pre-generation of the NEXT area beat, warmed behind the current beat's
+        # delivery so the inter-beat LLM latency isn't a silent gap. Read-only in the
+        # orchestrator (no state mutation); committed single-threaded in _step.
+        self._area_prefetch: asyncio.Task | None = None
         self.send_lock = asyncio.Lock()
         # Inbound-message token bucket (anti-flood). Starts full so a normal reconnect
         # burst (auth + language + theme + resume position) is never throttled.
@@ -501,14 +508,27 @@ class _SessionRuntime:
             await self._wait_played(frame.text)  # pace per sentence
             return
 
-        # 3) Nothing scheduled -> ask the orchestrator for the next narration, then deliver
-        #    it sentence by sentence.
-        out = await self.orch.on_position(
-            self.session_id, self.live_position, self.live_heading, self.live_pace
-        )
+        # 3) Nothing scheduled -> next narration. Prefer a ready pre-generated area beat
+        #    (its LLM latency was hidden behind the previous beat's delivery); else ask the
+        #    orchestrator live. Either way, if what we land is an area beat, start warming
+        #    the NEXT one behind this beat's delivery.
+        out = await self._take_prefetched_area()
+        if out is not None:
+            # Served a warmed beat WITHOUT a live on_position tick — so discovery didn't
+            # run. Keep the Overpass disc warm (non-blocking, refetches only if the anchor
+            # moved) so bubble weaving (peek_bubble) and the map don't starve across a
+            # monologue streak. Bubble/reach objects still take priority: peek_bubble runs
+            # every position frame, and once the outline is dry prefetch yields to on_position.
+            self.orch._warm_inventory(self.session_id, self.live_position)
+        else:
+            out = await self.orch.on_position(
+                self.session_id, self.live_position, self.live_heading, self.live_pace
+            )
         await self._maybe_send_places()
         if out.kind == "narration" and out.text:
             self.sched.set_current(out)
+            if out.place_id is None:  # an area beat (not an object) -> warm the next one
+                self._start_area_prefetch()
             frame = self.sched.next_frame()
             if frame is not None:
                 await self.send_out(frame)
@@ -517,6 +537,55 @@ class _SessionRuntime:
         await self.send_out(out)  # state / silence
         self.wake.clear()  # nothing to say -> idle until the context changes
         await self.wake.wait()
+
+    def _start_area_prefetch(self) -> None:
+        """Kick off (once) a background pre-generation of the next area beat. The task is
+        read-only in the orchestrator, so it's safe to run concurrently with delivery, a
+        weave, or a barge-in — nothing it does is persisted until _take commits it."""
+        if not settings.area_prefetch:
+            return
+        if self._area_prefetch is not None and not self._area_prefetch.done():
+            return  # one already in flight
+        self._area_prefetch = asyncio.ensure_future(self._prefetch_area())
+
+    async def _prefetch_area(self) -> tuple[str, str, str | None] | None:
+        SESSION_ID.set(self.session_id)  # attribute LLM cost to this session
+        SESSION_TIER.set(self.tier)  # tier -> model routing for the warmed beat
+        return await self.orch.prefetch_area(self.session_id, self.live_pace)
+
+    async def _take_prefetched_area(self) -> OrchestratorOutput | None:
+        """If a warmed area beat is ready (or nearly), commit it as the next narration.
+        Awaits an in-flight prefetch rather than discarding it — it started during the
+        last beat, so finishing it still beats a cold live call. Returns None (fall back
+        to a live on_position) when there's no prefetch or it went stale / empty."""
+        task = self._area_prefetch
+        if task is None:
+            return None
+        try:
+            pre = await task  # a barge-in cancels this step_task -> CancelledError re-raised
+        except asyncio.CancelledError:
+            raise  # leave the ref so the resumed step (or cleanup) can reuse/cancel it
+        except Exception:
+            self._area_prefetch = None
+            return None
+        self._area_prefetch = None
+        if pre is None:
+            return None
+        topic, text, hook = pre
+        try:
+            out = await self.orch.commit_area(
+                self.session_id, topic, text, hook, self.live_pace
+            )
+        except Exception:
+            return None
+        if out is not None:
+            _walk.info("prefetch: served warmed area beat topic=%r", topic)
+        return out
+
+    def cancel_prefetch(self) -> None:
+        if self._area_prefetch is not None and not self._area_prefetch.done():
+            self._area_prefetch.cancel()
+        self._area_prefetch = None
 
     async def _maybe_send_places(self) -> None:
         """Push the full set of nearby objects for the map when the search disc has
@@ -757,6 +826,8 @@ async def ws(websocket: WebSocket) -> None:
             heartbeat.cancel()
         if rt is not None and rt.step_task is not None:
             rt.step_task.cancel()
+        if rt is not None:
+            rt.cancel_prefetch()  # drop any in-flight background beat gen (read-only, unsaved)
         if producer is not None:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await producer

@@ -15,6 +15,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -24,16 +25,25 @@ import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'accounts/account_edit_screen.dart';
 import 'accounts/accounts_config.dart';
 import 'accounts/api_client.dart';
+import 'accounts/auth_gate.dart';
 import 'accounts/auth_service.dart';
 import 'accounts/login_screen.dart';
+import 'accounts/models.dart';
+import 'accounts/register_screen.dart';
 import 'ads/ads_service.dart';
 import 'billing/billing_service.dart';
 import 'map_config.dart';
 import 'compass.dart';
 import 'l10n/app_localizations.dart';
-import 'walk_history_screen.dart';
+import 'ui/achievements.dart' as ui;
+import 'ui/community_screen.dart' as ui;
+import 'ui/components.dart' as ui;
+import 'ui/design.dart' as ui;
+import 'ui/screens.dart' as ui;
+import 'ui/social_screens.dart' as ui;
 
 // Persisted-preference keys.
 const _kPrefTheme = 'themeMode';
@@ -129,6 +139,23 @@ String _genSessionId() {
 // with no manual setup:  flutter build ... --dart-define=WS_URL=wss://host/ws
 // The in-app Settings field overrides it. Falls back to localhost for dev/emulator.
 const kDefaultWsUrl = String.fromEnvironment('WS_URL', defaultValue: 'ws://localhost:8000/ws');
+
+// Debug-only: inject a fully-populated demo profile (nick + rich walk stats) so the
+// Profile tab can be exercised without a live backend. Off by default; enable with
+// --dart-define=DEMO_PROFILE=true.
+const kDemoProfile = bool.fromEnvironment('DEMO_PROFILE');
+
+// Debug-only: boot straight into the Profile tab (for screenshotting a signed-in
+// profile without tapping). Off by default; --dart-define=START_PROFILE=true.
+const kStartProfile = bool.fromEnvironment('START_PROFILE');
+
+// Debug-only: show the login screen at boot (to review/iterate the sign-in UI without
+// the sign-out dance). Off by default; --dart-define=START_LOGIN=true.
+const kStartLogin = bool.fromEnvironment('START_LOGIN');
+
+// Debug-only: boot straight into the create-account screen (to review the register UI).
+// Off by default; --dart-define=START_REGISTER=true.
+const kStartRegister = bool.fromEnvironment('START_REGISTER');
 // Shared access token for the /ws endpoint ('' => open). Baked in at build time.
 const kWsToken = String.fromEnvironment('WS_TOKEN', defaultValue: '');
 // Test-only: when set to a kRoutes key, the app auto-enables the simulated walk on
@@ -145,14 +172,17 @@ bool _underTest() {
 }
 
 // ── Palette ──────────────────────────────────────────────────────────────────
-// A calm, pastel identity: a soft teal accent over muted map markers. The accent
+// A calm, natural identity: a sage-green accent over muted map markers. The accent
 // and pins are theme-independent (they must read over both the light and dark map
 // tiles); the frosted "glass" chrome lives in the AppColors extension below so it
 // flips with light/dark. Low-saturation on purpose — pastel, not neon.
-const _accent = Color(0xFF5B8DEF); // soft iOS blue — the brand accent
-const _accentDeep = Color(0xFF3D6FD6); // deeper blue — CTA gradient tail
-const _onAccent = Color(0xFFFFFFFF); // white ink that reads on the blue accent
-const _accentAlt = Color(0xFFA9A0F0); // soft lavender — secondary accent / highlights
+// Kept in sync with the redesign's brand.primary (design/DESIGN_SPEC.md): a mid sage
+// that reads on both the light and dark basemaps (the theme's own primary is lighter
+// mint in dark / deeper forest in light, but map markers need one fixed colour).
+const _accent = Color(0xFF4E9E77); // sage green — the brand accent
+const _accentDeep = Color(0xFF35674E); // forest — CTA gradient tail
+const _onAccent = Color(0xFFFFFFFF); // white ink that reads on the green accent
+const _accentAlt = Color(0xFFC4E26B); // lime highlight — secondary accent (premium chip)
 const _pinCurrent = Color(0xFFF3B34A); // warm amber — the place being narrated
 const _pinPast = Color(0xFF97A0B0); // soft slate — already seen
 const _userArrow = Color(0xFF3AB6F0); // soft sky — the user's bearing
@@ -249,24 +279,18 @@ AppColors _c(BuildContext context) => Theme.of(context).extension<AppColors>()!;
 class _Frosted extends StatelessWidget {
   const _Frosted({
     required this.child,
-    this.radius = 26,
     this.circle = false,
-    this.color,
-    this.padding,
   });
 
   final Widget child;
-  final double radius;
   final bool circle;
-  final Color? color; // defaults to AppColors.glassPill
-  final EdgeInsetsGeometry? padding;
 
   @override
   Widget build(BuildContext context) {
     final c = _c(context);
-    final fill = color ?? c.glassPill;
+    final fill = c.glassPill;
     final shape = circle ? BoxShape.circle : BoxShape.rectangle;
-    final br = circle ? null : BorderRadius.circular(radius);
+    final br = circle ? null : BorderRadius.circular(26);
     return DecoratedBox(
       // Shadow lives outside the clip so it can bleed past the panel edge.
       decoration: BoxDecoration(
@@ -284,7 +308,6 @@ class _Frosted extends StatelessWidget {
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
           child: Container(
-            padding: padding,
             decoration: BoxDecoration(
               shape: shape,
               borderRadius: br,
@@ -356,28 +379,34 @@ class _GuideAppState extends State<GuideApp> {
   ThemeData _theme(Brightness brightness) {
     final dark = brightness == Brightness.dark;
     final ext = dark ? AppColors.dark : AppColors.light;
-    final scheme = ColorScheme.fromSeed(seedColor: _accent, brightness: brightness).copyWith(
-      primary: _accent,
-      onPrimary: _onAccent,
-      surface: dark ? const Color(0xFF14161B) : Colors.white,
+    // Premium redesign palette (design/DESIGN_SPEC.md): the forest/mint sage primary
+    // and warm/slate backgrounds. Carried alongside the legacy `ext` glass tokens so
+    // both the new tab screens (context.colors) and the retained map chrome (_c) work.
+    final uiC = dark ? ui.AppColors.dark : ui.AppColors.light;
+    final primary = uiC.primary;
+    final onPrimary = uiC.onPrimary;
+    final scheme = ColorScheme.fromSeed(seedColor: primary, brightness: brightness).copyWith(
+      primary: primary,
+      onPrimary: onPrimary,
+      surface: uiC.header,
       onSurface: ext.textPrimary,
       onSurfaceVariant: ext.textSecondary,
       outlineVariant: ext.hairline,
     );
-    final scaffold = dark ? const Color(0xFF0C0D10) : const Color(0xFFEDF0F4);
-    // Tighter tracking on the larger sizes gives the crisp, condensed feel of SF/One-UI
-    // headings without shipping a custom font.
-    final baseText = (dark ? Typography.material2021().white : Typography.material2021().black)
+    final scaffold = uiC.bgBottom;
+    // Manrope everywhere (approved single UI font), tightened on the larger sizes.
+    final baseText = GoogleFonts.manropeTextTheme(
+            dark ? Typography.material2021().white : Typography.material2021().black)
         .apply(bodyColor: ext.textPrimary, displayColor: ext.textPrimary);
     return ThemeData(
       colorScheme: scheme,
       useMaterial3: true,
       scaffoldBackgroundColor: scaffold,
-      extensions: [ext],
+      extensions: [ext, uiC],
       textTheme: baseText.copyWith(
-        titleLarge: baseText.titleLarge?.copyWith(fontWeight: FontWeight.w700, letterSpacing: -0.4),
-        titleMedium: baseText.titleMedium?.copyWith(fontWeight: FontWeight.w600, letterSpacing: -0.2),
-        headlineSmall: baseText.headlineSmall?.copyWith(fontWeight: FontWeight.w700, letterSpacing: -0.5),
+        titleLarge: baseText.titleLarge?.copyWith(fontWeight: FontWeight.w800, letterSpacing: -0.4),
+        titleMedium: baseText.titleMedium?.copyWith(fontWeight: FontWeight.w700, letterSpacing: -0.2),
+        headlineSmall: baseText.headlineSmall?.copyWith(fontWeight: FontWeight.w800, letterSpacing: -0.5),
       ),
       splashFactory: InkSparkle.splashFactory,
       appBarTheme: AppBarThemeData(
@@ -408,7 +437,7 @@ class _GuideAppState extends State<GuideApp> {
       ),
       textButtonTheme: TextButtonThemeData(
         style: TextButton.styleFrom(
-          foregroundColor: _accent,
+          foregroundColor: primary,
           textStyle: const TextStyle(fontWeight: FontWeight.w600),
         ),
       ),
@@ -422,14 +451,14 @@ class _GuideAppState extends State<GuideApp> {
             borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: ext.hairline)),
         focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(14),
-            borderSide: const BorderSide(color: _accent, width: 1.6)),
+            borderSide: BorderSide(color: primary, width: 1.6)),
       ),
       segmentedButtonTheme: SegmentedButtonThemeData(
         style: ButtonStyle(
           backgroundColor: WidgetStateProperty.resolveWith((s) =>
-              s.contains(WidgetState.selected) ? _accent.withValues(alpha: 0.16) : Colors.transparent),
+              s.contains(WidgetState.selected) ? primary.withValues(alpha: 0.16) : Colors.transparent),
           foregroundColor: WidgetStateProperty.resolveWith((s) =>
-              s.contains(WidgetState.selected) ? _accent : ext.textSecondary),
+              s.contains(WidgetState.selected) ? primary : ext.textSecondary),
           side: WidgetStatePropertyAll(BorderSide(color: ext.hairline)),
           shape: WidgetStatePropertyAll(
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
@@ -441,7 +470,7 @@ class _GuideAppState extends State<GuideApp> {
         thumbColor: WidgetStateProperty.resolveWith(
             (s) => s.contains(WidgetState.selected) ? Colors.white : null),
         trackColor: WidgetStateProperty.resolveWith(
-            (s) => s.contains(WidgetState.selected) ? _accent : null),
+            (s) => s.contains(WidgetState.selected) ? primary : null),
         trackOutlineColor: WidgetStateProperty.resolveWith(
             (s) => s.contains(WidgetState.selected) ? Colors.transparent : null),
       ),
@@ -478,17 +507,22 @@ class _GuideAppState extends State<GuideApp> {
       // Auth gate: when accounts are configured, sign-in is mandatory — there is no
       // guest mode. Show the login screen until a session exists, then the map. When
       // accounts are OFF (no Supabase keys) the gate is inert and the app runs as before.
+      // On sign-in the login "tears" apart along its divider to reveal the app (see
+      // [AuthGate]).
       home: AnimatedBuilder(
         animation: AuthService.instance,
         builder: (context, _) {
-          if (AccountsConfig.enabled && !AuthService.instance.isSignedIn) {
-            return const LoginScreen(isGate: true);
-          }
-          return HomePage(
-            locale: _locale,
-            onLocaleChanged: _setLocale,
-            themeMode: _themeMode,
-            onThemeModeChanged: _setThemeMode,
+          if (kStartRegister && !AuthService.instance.isSignedIn) return const RegisterScreen();
+          final showLogin =
+              (kStartLogin || AccountsConfig.enabled) && !AuthService.instance.isSignedIn;
+          return AuthGate(
+            showLogin: showLogin,
+            home: HomePage(
+              locale: _locale,
+              onLocaleChanged: _setLocale,
+              themeMode: _themeMode,
+              onThemeModeChanged: _setThemeMode,
+            ),
           );
         },
       ),
@@ -725,16 +759,6 @@ const List<({String code, IconData icon})> kThemes = [
   (code: 'легенды и тайны', icon: Icons.local_fire_department_rounded),
 ];
 
-// The visible label for a theme code, localized.
-String _themeLabel(AppLocalizations l, String code) => switch (code) {
-      'история' => l.themeHistory,
-      'архитектура' => l.themeArchitecture,
-      'люди и судьбы' => l.themePeople,
-      'культура и искусство' => l.themeCulture,
-      'легенды и тайны' => l.themeLegends,
-      _ => l.themeAuto,
-    };
-
 // Demo/test routes: real Moscow walks, waypoints joined in order (straight
 // segments). Selectable in Settings when "simulated walk" is on; played back at
 // kWalkSpeedMps (~7 km/h). R5 is the original demo route.
@@ -849,10 +873,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   List<NearbyObject> _nearby = []; // all found objects (lite pins from "places" frame)
   String? _currentPlaceId; // the place being narrated now (highlighted)
 
-  // What the bottom card shows now.
+  // What the player shows now.
   String? _curTitle; // current place name
   String? _curText; // current narration / reply text
   bool _curIsReply = false;
+
+  int _tab = (kDemoProfile || kStartProfile) ? 2 : 0; // 0 Home · 1 Community · 2 Profile · 3 Settings
+
+  ui.ProfileStats? _aggregatedStats; // real profile stats, aggregated from /walks
+  bool _statsFetched = false;
 
   bool _speaking = false; // TTS currently talking
   int _narrationsSinceAd = 0; // free-tier mid-tour ad cadence (every kMidTourAdEvery)
@@ -1108,9 +1137,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     m?.hideCurrentSnackBar();
     m?.showSnackBar(SnackBar(content: Text(text), duration: const Duration(seconds: 3)));
   }
-
-  bool get _hasDialog =>
-      _log.any((m) => m.kind == 'guide' || m.kind == 'reply' || m.kind == 'you');
 
   // Pin a narrated place on the map (dedup by id; the latest is "current").
   // Follow-up narrations about the same place accumulate into its story.
@@ -1817,31 +1843,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     };
   }
 
-  Widget _statusPill(AppLocalizations l) {
-    final s = _status(l);
-    return AnimatedContainer(
-      duration: _animFast,
-      curve: _animCurve,
-      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
-      decoration: BoxDecoration(
-        color: s.color.withValues(alpha: 0.13),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: s.color.withValues(alpha: 0.32)),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        _PulsingDot(color: s.color, active: s.active),
-        const SizedBox(width: 8),
-        AnimatedSwitcher(
-          duration: _animFast,
-          child: Text(s.label,
-              key: ValueKey(s.label),
-              style: TextStyle(
-                  fontSize: 12.5, color: s.color, fontWeight: FontWeight.w600, letterSpacing: -0.1)),
-        ),
-      ]),
-    );
-  }
-
   // Camera target that keeps the user's cursor in the visible area ABOVE the
   // bottom card: shift the centre south so the user sits ~1/3 from the top.
   LatLng _followCenter() {
@@ -2071,264 +2072,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     );
   }
 
-  // -- top bar ------------------------------------------------------------
-  Widget _iconPill(IconData icon, String tooltip, VoidCallback onTap) {
-    final c = _c(context);
-    return _Frosted(
-      circle: true,
-      child: IconButton(
-        tooltip: tooltip,
-        icon: Icon(icon, size: 20, color: c.textSecondary),
-        onPressed: onTap,
-      ),
-    );
-  }
-
-  // Shared look for the two dropdown ("popup") pills so their menus match the chrome.
-  ShapeBorder get _menuShape =>
-      RoundedRectangleBorder(borderRadius: BorderRadius.circular(18));
-
-  Widget _topBar(AppLocalizations l) {
-    final c = _c(context);
-    return Row(children: [
-      // Small reserved slot top-left for a future brand icon (logo/name removed —
-      // the controls on the right need the room).
-      const SizedBox(width: 40, height: 40),
-      const Spacer(),
-      _Frosted(
-        circle: true,
-        child: PopupMenuButton<String>(
-          tooltip: l.language,
-          icon: Icon(Icons.translate, size: 20, color: c.textSecondary),
-          initialValue: _lang,
-          color: c.sheetBg,
-          shape: _menuShape,
-          onSelected: _changeLanguage,
-          itemBuilder: (_) => [
-            for (final e in kLangs.entries)
-              PopupMenuItem(value: e.key, child: Text('${e.value.label}  ${e.key}')),
-          ],
-        ),
-      ),
-      const SizedBox(width: 8),
-      _Frosted(
-        circle: true,
-        child: PopupMenuButton<String>(
-          tooltip: l.themeTopic,
-          icon: Icon(Icons.auto_stories_rounded, size: 20, color: c.textSecondary),
-          initialValue: _theme,
-          color: c.sheetBg,
-          shape: _menuShape,
-          onSelected: _setTheme,
-          itemBuilder: (_) => [
-            for (final t in kThemes)
-              PopupMenuItem(
-                value: t.code,
-                child: Row(children: [
-                  Icon(t.icon, size: 18, color: c.textSecondary),
-                  const SizedBox(width: 10),
-                  Text(_themeLabel(l, t.code)),
-                ]),
-              ),
-          ],
-        ),
-      ),
-      const SizedBox(width: 8),
-      _iconPill(_voice ? Icons.volume_up_rounded : Icons.volume_off_rounded,
-          _voice ? l.voiceOn : l.voiceOff, _toggleVoice),
-      const SizedBox(width: 8),
-      _iconPill(Icons.route_rounded, l.walkHistory,
-          () => Navigator.of(context).push(MaterialPageRoute<void>(
-              builder: (_) => WalkHistoryScreen(onUpgrade: _showUpgrade)))),
-      const SizedBox(width: 8),
-      _iconPill(Icons.tune_rounded, l.settings, _openSettings),
-    ]);
-  }
-
-  // -- bottom card --------------------------------------------------------
-  Widget _bottomCard(AppLocalizations l) {
-    final c = _c(context);
-    final hasNarration = _curText != null && _curText!.isNotEmpty;
-    final title = _curIsReply ? l.chipAnswering : _curTitle;
-    return _Frosted(
-      radius: 30,
-      color: c.glassCard,
-      padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
-      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          _statusPill(l),
-          const Spacer(),
-          IconButton(
-            tooltip: l.history,
-            visualDensity: VisualDensity.compact,
-            icon: Icon(Icons.history_rounded, size: 20, color: c.textFaint),
-            onPressed: _hasDialog ? _openHistory : null,
-          ),
-        ]),
-        const SizedBox(height: 8),
-        // Ease the card's height as narration text appears/changes instead of jumping.
-        AnimatedSize(
-          duration: _animMed,
-          curve: _animCurve,
-          alignment: Alignment.topCenter,
-          child: _cardBody(l, c, hasNarration, title),
-        ),
-        const SizedBox(height: 16),
-        Row(children: [
-          _primaryButton(l),
-          if (_active) ...[
-            const SizedBox(width: 10),
-            _roundAction(
-              icon: _paused ? Icons.play_arrow_rounded : Icons.pause_rounded,
-              tooltip: _paused ? l.bgResume : l.bgPause,
-              fill: _paused ? _accent : null,
-              fg: _paused ? Colors.white : c.textSecondary,
-              onTap: _togglePause,
-            ),
-          ],
-          const SizedBox(width: 10),
-          _roundAction(
-            icon: _recording ? Icons.stop_rounded : Icons.mic_rounded,
-            tooltip: _recording ? l.micStop : l.micAsk,
-            fill: _recording ? _stRed : null,
-            fg: _recording ? Colors.white : c.textSecondary,
-            onTap: _connected ? _toggleMic : null,
-          ),
-          const SizedBox(width: 10),
-          _roundAction(
-            icon: Icons.keyboard_rounded,
-            tooltip: l.ask,
-            fg: c.textSecondary,
-            onTap: _connected ? _openAsk : null,
-          ),
-        ]),
-      ]),
-    );
-  }
-
-  // The changing middle of the bottom card: narration (title + scrollable body) or the
-  // idle hint. Kept as its own widget so AnimatedSize can ease the height between states.
-  Widget _cardBody(AppLocalizations l, AppColors c, bool hasNarration, String? title) {
-    if (!hasNarration) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        child: Text(l.emptyHint,
-            style: TextStyle(fontSize: 15, height: 1.45, color: c.textFaint)),
-      );
-    }
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (title != null && title.isNotEmpty) ...[
-          Text(title,
-              style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.4,
-                  height: 1.15,
-                  color: c.textPrimary)),
-          const SizedBox(height: 8),
-        ],
-        ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.26),
-          child: SingleChildScrollView(
-            child: Text(_curText!,
-                style: TextStyle(
-                    fontSize: 15, height: 1.5, letterSpacing: 0.1, color: c.textSecondary)),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // The primary call-to-action: a soft two-tone gradient (teal to start, coral to
-  // stop) with a matching glow — the one saturated element, so it reads as *the*
-  // action against the calm pastel chrome.
-  Widget _primaryButton(AppLocalizations l) {
-    final active = _active;
-    const startGrad = LinearGradient(
-        colors: [_accent, _accentDeep], begin: Alignment.topLeft, end: Alignment.bottomRight);
-    const stopGrad = LinearGradient(
-        colors: [Color(0xFFF79393), Color(0xFFEC6A6A)],
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight);
-    final glow = active ? const Color(0xFFEC6A6A) : _accent;
-    final fg = active ? Colors.white : _onAccent;
-    return Expanded(
-      child: AnimatedContainer(
-        duration: _animFast,
-        curve: _animCurve,
-        decoration: BoxDecoration(
-          gradient: active ? stopGrad : startGrad,
-          borderRadius: BorderRadius.circular(17),
-          boxShadow: [
-            BoxShadow(color: glow.withValues(alpha: 0.34), blurRadius: 20, spreadRadius: -2, offset: const Offset(0, 8)),
-          ],
-        ),
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(17),
-            onTap: _primary,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              child: AnimatedSwitcher(
-                duration: _animFast,
-                child: Row(
-                  key: ValueKey(active),
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(active ? Icons.stop_rounded : Icons.play_arrow_rounded, color: fg, size: 22),
-                    const SizedBox(width: 8),
-                    Text(active ? l.stop : l.startWalk,
-                        style: TextStyle(
-                            color: fg, fontWeight: FontWeight.w700, fontSize: 16, letterSpacing: -0.2)),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  // A circular secondary action. `fill` null => frosted glass; a colour => a solid,
-  // softly-glowing button (used for the live "recording" state).
-  Widget _roundAction({
-    required IconData icon,
-    required String tooltip,
-    required Color fg,
-    Color? fill,
-    VoidCallback? onTap,
-  }) {
-    final btn = IconButton(
-      tooltip: tooltip,
-      padding: const EdgeInsets.all(14),
-      icon: AnimatedSwitcher(
-        duration: _animFast,
-        child: Icon(icon, key: ValueKey(icon), color: fg),
-      ),
-      onPressed: onTap,
-    );
-    return Opacity(
-      opacity: onTap == null ? 0.4 : 1,
-      child: fill == null
-          ? _Frosted(circle: true, child: btn)
-          : Container(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: fill,
-                boxShadow: [
-                  BoxShadow(color: fill.withValues(alpha: 0.4), blurRadius: 14, offset: const Offset(0, 4)),
-                ],
-              ),
-              child: btn,
-            ),
-    );
-  }
-
   // Smoothly rotate the map back to north (shortest way round).
   void _resetNorth() {
     if (!_mapReady) return;
@@ -2453,85 +2196,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     );
   }
 
-  void _openHistory() {
-    final l = AppLocalizations.of(context)!;
-    // Conversation only: the guide's narration, its replies, and your questions —
-    // never system/status lines (those are transient toasts).
-    final dialog = _log.where((m) => m.kind != 'meta').toList();
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: _c(context).sheetBg,
-      shape: _sheetShape,
-      builder: (ctx) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.6,
-        maxChildSize: 0.92,
-        builder: (c, controller) => Column(children: [
-          const Padding(
-            padding: EdgeInsets.only(top: 12),
-            child: _SheetGrabber(),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 8, 4),
-            child: Row(children: [
-              Text(l.history,
-                  style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: -0.3,
-                      color: _c(context).textPrimary)),
-              const Spacer(),
-              TextButton.icon(
-                onPressed: () {
-                  setState(_log.clear);
-                  Navigator.pop(ctx);
-                },
-                icon: const Icon(Icons.delete_sweep_outlined, size: 18),
-                label: Text(l.clearFeed),
-              ),
-            ]),
-          ),
-          Expanded(
-            child: ListView.builder(
-              controller: controller,
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
-              itemCount: dialog.length,
-              itemBuilder: (_, i) => _logTile(dialog[i]),
-            ),
-          ),
-        ]),
-      ),
-    );
-  }
-
-  Widget _logTile(Msg m) {
-    final c = _c(context);
-    final mine = m.kind == 'you';
-    final (bg, fg) = switch (m.kind) {
-      'guide' => (_accent.withValues(alpha: 0.11), c.textPrimary),
-      'reply' => (_stMint.withValues(alpha: 0.16), c.textPrimary),
-      _ => (_accent.withValues(alpha: 0.20), c.textPrimary), // 'you'
-    };
-    const r = Radius.circular(18);
-    final radius = BorderRadius.only(
-      topLeft: r,
-      topRight: r,
-      bottomLeft: mine ? r : const Radius.circular(6),
-      bottomRight: mine ? const Radius.circular(6) : r,
-    );
-    return Align(
-      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.82),
-        decoration: BoxDecoration(color: bg, borderRadius: radius),
-        child: Text(m.text, style: TextStyle(color: fg, fontSize: 14.5, height: 1.4)),
-      ),
-    );
-  }
-
   // Delete the account (profile + all saved walks) after confirmation, then sign out.
   Future<void> _deleteAccount(void Function(void Function()) setSheet) async {
     final l = AppLocalizations.of(context)!;
@@ -2618,155 +2282,114 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: _c(context).sheetBg,
-      shape: _sheetShape,
+      useSafeArea: true, // keep the sheet clear of the notch / Dynamic Island
+      backgroundColor: Colors.transparent,
       builder: (ctx) => AnimatedBuilder(
         // Rebuild on billing (busy/price) AND auth (tier flips to paid on success).
         animation: Listenable.merge([billing, AuthService.instance]),
         builder: (ctx, _) {
-          final c = _c(context);
+          final uc = Theme.of(context).extension<ui.AppColors>()!;
           final paid = AuthService.instance.isPaid;
           final signedIn = AuthService.instance.isSignedIn;
+          TextStyle t(double s, FontWeight w, Color col) =>
+              GoogleFonts.manrope(fontSize: s, fontWeight: w, color: col);
           Widget benefit(IconData icon, String text) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6),
+                padding: const EdgeInsets.symmetric(vertical: 7),
                 child: Row(children: [
-                  Icon(icon, color: _accent, size: 20),
+                  Container(
+                    width: 34, height: 34, alignment: Alignment.center,
+                    decoration: BoxDecoration(shape: BoxShape.circle, color: uc.primary.withValues(alpha: 0.14)),
+                    child: Icon(icon, color: uc.primary, size: 18),
+                  ),
                   const SizedBox(width: 12),
-                  Expanded(
-                      child: Text(text, style: TextStyle(fontSize: 15, color: c.textPrimary))),
+                  Expanded(child: Text(text, style: t(14.5, FontWeight.w600, uc.textPrimary))),
                 ]),
               );
-          Widget planButton(String title, String price, VoidCallback onTap,
-                  {bool highlight = false}) =>
-              DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: highlight
-                      ? const LinearGradient(colors: [_accent, _accentDeep])
-                      : null,
-                  color: highlight ? null : _accent.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(16),
+          Widget plan(String title, String price, VoidCallback onTap, {bool highlight = false}) =>
+              ui.Pressable(
+                onTap: onTap,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+                  decoration: BoxDecoration(
+                    gradient: highlight ? LinearGradient(colors: [uc.primary, Color.lerp(uc.primary, Colors.black, .3)!]) : null,
+                    color: highlight ? null : uc.glassFill(0.06),
+                    borderRadius: BorderRadius.circular(ui.Radii.md),
+                    border: highlight ? null : Border.all(color: uc.glassBorder),
+                    boxShadow: highlight ? [BoxShadow(color: uc.primary.withValues(alpha: .4), blurRadius: 20, spreadRadius: -8, offset: const Offset(0, 10))] : null,
+                  ),
+                  child: Column(children: [
+                    Text(title, style: t(15, FontWeight.w800, highlight ? uc.onPrimary : uc.textPrimary)),
+                    const SizedBox(height: 3),
+                    Text(price, style: t(13, FontWeight.w600, highlight ? uc.onPrimary.withValues(alpha: .85) : uc.textSecondary)),
+                  ]),
                 ),
-                child: Material(
-                  color: Colors.transparent,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(16),
-                    onTap: onTap,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      child: Column(children: [
-                        Text(title,
-                            style: TextStyle(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 15,
-                                color: highlight ? _onAccent : c.textPrimary)),
-                        const SizedBox(height: 2),
-                        Text(price,
-                            style: TextStyle(
-                                fontSize: 13,
-                                color: highlight ? _onAccent : c.textSecondary)),
-                      ]),
+              );
+          return ui.RoundedSheet(
+            child: SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(22, 12, 22, MediaQuery.of(ctx).viewInsets.bottom + 28),
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                // Explicit down-arrow to dismiss — a bare grabber wasn't obvious enough.
+                Center(
+                  child: ui.Pressable(
+                    onTap: () => Navigator.pop(ctx),
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 14),
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: uc.glassFill(0.06),
+                        border: Border.all(color: uc.glassBorder),
+                      ),
+                      child: Icon(Icons.keyboard_arrow_down_rounded, color: uc.textSecondary, size: 26),
                     ),
                   ),
                 ),
-              );
-          return Padding(
-            padding:
-                EdgeInsets.fromLTRB(22, 12, 22, MediaQuery.of(ctx).viewInsets.bottom + 24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const _SheetGrabber(),
-                Row(children: [
-                  _iconChip(Icons.workspace_premium_rounded, _accentAlt),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(l.premiumTitle,
-                            style: TextStyle(
-                                fontSize: 20,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: -0.4,
-                                color: c.textPrimary)),
-                        Text(l.premiumTagline,
-                            style: TextStyle(fontSize: 13.5, color: c.textSecondary)),
-                      ],
-                    ),
-                  ),
-                ]),
-                const SizedBox(height: 16),
-                benefit(Icons.auto_awesome_rounded, l.premiumModel),
-                benefit(Icons.block_rounded, l.premiumNoAds),
-                benefit(Icons.all_inclusive_rounded, l.premiumUnlimitedTours),
-                benefit(Icons.bookmark_rounded, l.premiumUnlimitedSaves),
+                const Center(child: ui.PremiumBadge(size: 56)),
+                const SizedBox(height: 12),
+                Text(l.premiumTitle, textAlign: TextAlign.center, style: t(24, FontWeight.w800, uc.textPrimary)),
+                const SizedBox(height: 4),
+                Text(l.premiumTagline, textAlign: TextAlign.center, style: t(14, FontWeight.w500, uc.textSecondary)),
                 const SizedBox(height: 18),
-                if (paid)
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Row(children: [
-                        const Icon(Icons.check_circle_rounded, color: _accent),
-                        const SizedBox(width: 10),
-                        Text(l.premiumActive,
-                            style: TextStyle(
-                                fontWeight: FontWeight.w700,
-                                color: c.textPrimary,
-                                fontSize: 16)),
-                      ]),
-                      // Stubbed billing: let the tester drop back to the free tier.
-                      if (kStubBilling)
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: TextButton(
-                            onPressed: () => billing.cancelStub(),
-                            child: Text(l.cancelSubscription),
-                          ),
-                        ),
-                    ],
-                  )
-                else if (!signedIn)
-                  FilledButton(
-                    onPressed: () async {
-                      Navigator.pop(ctx);
-                      await Navigator.of(context).push(
-                          MaterialPageRoute<void>(builder: (_) => const LoginScreen()));
-                    },
-                    child: Text(l.signIn),
-                  )
+                ui.GlassModule(
+                  fill: uc.glassFill(0.05), sheen: false,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  child: Column(children: [
+                    benefit(Icons.auto_awesome_rounded, l.premiumModel),
+                    benefit(Icons.block_rounded, l.premiumNoAds),
+                    benefit(Icons.all_inclusive_rounded, l.premiumUnlimitedTours),
+                    benefit(Icons.bookmark_rounded, l.premiumUnlimitedSaves),
+                  ]),
+                ),
+                const SizedBox(height: 20),
+                if (paid) ...[
+                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    Icon(Icons.check_circle_rounded, color: uc.primary),
+                    const SizedBox(width: 10),
+                    Text(l.premiumActive, style: t(16, FontWeight.w800, uc.textPrimary)),
+                  ]),
+                  if (kStubBilling) ...[
+                    const SizedBox(height: 6),
+                    Center(child: TextButton(onPressed: () => billing.cancelStub(), child: Text(l.cancelSubscription))),
+                  ],
+                ] else if (!signedIn)
+                  ui.AppButton(l.signIn, onTap: () async {
+                    Navigator.pop(ctx);
+                    await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const LoginScreen()));
+                  })
                 else if (billing.busy)
-                  const Center(
-                    child: Padding(
-                        padding: EdgeInsets.all(10), child: CircularProgressIndicator()),
-                  )
+                  const Center(child: Padding(padding: EdgeInsets.all(10), child: CircularProgressIndicator()))
                 else ...[
                   Row(children: [
-                    Expanded(
-                        child: planButton(
-                            l.premiumMonthly, billing.monthly?.price ?? r'$5.99/mo',
-                            billing.buyMonthly)),
+                    Expanded(child: plan(l.premiumMonthly, billing.monthly?.price ?? r'$5.99/mo', billing.buyMonthly)),
                     const SizedBox(width: 10),
-                    Expanded(
-                        child: planButton(
-                            l.premiumYearly, billing.yearly?.price ?? r'$39.99/yr',
-                            billing.buyYearly,
-                            highlight: true)),
+                    Expanded(child: plan(l.premiumYearly, billing.yearly?.price ?? r'$39.99/yr', billing.buyYearly, highlight: true)),
                   ]),
-                  // Stub premium persists locally, so "restore" is meaningless there.
                   if (!kStubBilling) ...[
                     const SizedBox(height: 6),
-                    Center(
-                      child: TextButton(
-                        onPressed: billing.available ? billing.restore : null,
-                        child: Text(l.premiumRestore),
-                      ),
-                    ),
+                    Center(child: TextButton(onPressed: billing.available ? billing.restore : null, child: Text(l.premiumRestore))),
                   ],
                 ],
-              ],
+              ]),
             ),
           );
         },
@@ -2889,52 +2512,375 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     );
   }
 
+  // -- redesign: greeting + focus helpers ---------------------------------
+  String _greeting(AppLocalizations l) {
+    final h = DateTime.now().hour;
+    if (h < 5) return l.greetNight;
+    if (h < 12) return l.greetMorning;
+    if (h < 18) return l.greetAfternoon;
+    if (h < 23) return l.greetEvening;
+    return l.greetNight;
+  }
+
+  // The user's nickname for the header/profile: backend display_name → Supabase
+  // metadata → email local part (see AuthService.displayName), else "" (caller falls
+  // back to a generic traveler label).
+  String _nick() {
+    if (kDemoProfile) return 'Kolbasenko';
+    return AuthService.instance.displayName ?? '';
+  }
+
+  List<({String code, IconData icon})> _focusItems() =>
+      [for (final t in kThemes) (code: t.code, icon: t.icon)];
+
+  // A simple branded chooser sheet (language / route).
+  void _pickFromList(String title, List<({String value, String label})> items,
+      String selected, ValueChanged<String> onPick) {
+    final cc = _c(context);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        decoration: BoxDecoration(
+          color: cc.sheetBg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        padding: EdgeInsets.fromLTRB(12, 12, 12, MediaQuery.of(ctx).padding.bottom + 12),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const _SheetGrabber(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(title, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: cc.textPrimary)),
+            ),
+          ),
+          Flexible(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final it in items)
+                  ListTile(
+                    title: Text(it.label),
+                    trailing: it.value == selected
+                        ? Icon(Icons.check_rounded, color: cc.textPrimary)
+                        : null,
+                    onTap: () {
+                      Navigator.of(ctx).pop();
+                      onPick(it.value);
+                    },
+                  ),
+              ],
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  void _pickLanguage() => _pickFromList(
+        AppLocalizations.of(context)!.language,
+        [for (final e in kLangs.entries) (value: e.key, label: e.value.label)],
+        _lang,
+        _changeLanguage,
+      );
+
+  void _pickRoute() {
+    if (_active) return;
+    _pickFromList(
+      AppLocalizations.of(context)!.route,
+      [for (final k in kRoutes.keys) (value: k, label: kRouteLabels[k] ?? k)],
+      _routeKey,
+      (v) => setState(() => _routeKey = v),
+    );
+  }
+
+  // Home tab: the live map, blurred behind the inactive modules; status chip + player
+  // when a tour is active. Map FABs sit top-right during an active tour.
+  Widget _homeTab(AppLocalizations l) {
+    final active = _active;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final uc = Theme.of(context).extension<ui.AppColors>()!;
+    final s = _status(l);
+    final nick = _nick();
+    return Stack(children: [
+      Positioned.fill(child: _mapView()),
+      // Frosted "matte glass" over the live map behind the inactive home modules: a
+      // strong blur plus a translucent palette-tinted scrim so the map reads as frosted
+      // glass (warm in light, slate in dark), not a washed-out blank.
+      Positioned.fill(
+        child: IgnorePointer(
+          ignoring: active,
+          child: AnimatedOpacity(
+            duration: _animMed,
+            opacity: active ? 0 : 1,
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: dark ? 5 : 3, sigmaY: dark ? 5 : 3),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      uc.bgTop.withValues(alpha: dark ? 0.16 : 0.03),
+                      uc.bgBottom.withValues(alpha: dark ? 0.28 : 0.08),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+      // Map FABs — useful while actively touring (pan/zoom/recenter).
+      if (active)
+        Positioned(
+          top: 0, right: 12,
+          child: SafeArea(
+            bottom: false,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 64),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                _zoomFab(l),
+                const SizedBox(height: 10),
+                if (_mapRotation.abs() > 0.5) ...[
+                  _compassFab(l),
+                  const SizedBox(height: 10),
+                ],
+                _followFab(l),
+              ]),
+            ),
+          ),
+        ),
+      // The redesigned modules (header/premium/focus/swipe · status/player).
+      Positioned.fill(
+        child: ui.HomeModules(
+          active: active,
+          greeting: _greeting(l),
+          nick: nick.isEmpty ? l.homeGuest : nick,
+          prompt: l.homePrompt,
+          isDark: dark,
+          onToggleTheme: () => widget.onThemeModeChanged(dark ? ThemeMode.light : ThemeMode.dark),
+          onSystemTheme: () => widget.onThemeModeChanged(ThemeMode.system),
+          showPremium: !(AuthService.instance.isPaid || kDemoProfile),
+          premiumTitle: l.goPremium,
+          premiumSubtitle: l.premiumTrial,
+          onUpgrade: _showUpgrade,
+          focusTitle: l.focusTitle,
+          focusItems: _focusItems(),
+          focusSelected: _theme,
+          onFocus: _setTheme,
+          swipeLabel: l.swipeToStart,
+          onStart: _primary,
+          statusLabel: s.label,
+          statusColor: s.color,
+          statusActive: s.active,
+          title: _curIsReply ? l.chipAnswering : _curTitle,
+          text: _curText,
+          paused: _paused,
+          recording: _recording,
+          voice: _voice,
+          onStop: active ? _primary : null,
+          onPause: active ? _togglePause : null,
+          onAsk: _connected ? _openAsk : null,
+          onMic: _connected ? _toggleMic : null,
+          onToggleVoice: _toggleVoice,
+        ),
+      ),
+    ]);
+  }
+
+  Widget _settingsTab(AppLocalizations l) {
+    final signedIn = AccountsConfig.enabled && AuthService.instance.isSignedIn;
+    final email = AuthService.instance.email;
+    final tier = AuthService.instance.isPaid ? l.premiumActive : 'free';
+    return ui.SettingsTab(
+      themeMode: widget.themeMode,
+      onThemeMode: widget.onThemeModeChanged,
+      langLabel: kLangs[_lang]?.label ?? _lang,
+      onLanguage: _pickLanguage,
+      accountsEnabled: AccountsConfig.enabled,
+      accountTitle: signedIn ? '${email ?? ''} · $tier' : l.continueAsGuest,
+      onAccount: signedIn ? _openSettings : null,
+      onUpgrade: _showUpgrade,
+      isPaid: AuthService.instance.isPaid,
+      simulate: _simulate,
+      onSimulate: _active ? null : (v) => setState(() => _simulate = v),
+      routeLabel: kRouteLabels[_routeKey] ?? _routeKey,
+      onRoute: _active ? null : _pickRoute,
+    );
+  }
+
+  // Fetch the signed-in user's walks once and aggregate them into full ProfileStats
+  // (cities/distance/objects/languages/streak) for the profile. Cheap: one /walks call.
+  Future<void> _ensureProfileStats() async {
+    if (_statsFetched || !(AccountsConfig.enabled && AuthService.instance.isSignedIn)) return;
+    _statsFetched = true;
+    try {
+      final walks = await WalkApi.listWalks();
+      if (!mounted) return;
+      setState(() => _aggregatedStats = _aggregateStats(walks, isPaid: AuthService.instance.isPaid));
+    } catch (_) {/* keep the walk-count fallback */}
+  }
+
+  static ui.ProfileStats _aggregateStats(List<WalkSummary> walks, {required bool isPaid}) {
+    final cities = <String>{}, districts = <String>{}, langs = <String>{};
+    final cityOrder = <String>[]; // distinct, preserving first-seen order
+    var distance = 0, objects = 0;
+    var early = false, night = false;
+    final days = <DateTime>{};
+    for (final w in walks) {
+      if (w.city != null && w.city!.isNotEmpty) {
+        if (cities.add(w.city!)) cityOrder.add(w.city!);
+      }
+      if (w.district != null && w.district!.isNotEmpty) districts.add(w.district!);
+      langs.add(w.language);
+      distance += w.distanceM ?? 0;
+      objects += w.objectCount;
+      final t = w.startedAt.toLocal();
+      if (t.hour < 7) early = true;
+      if (t.hour >= 22) night = true;
+      days.add(DateTime(t.year, t.month, t.day));
+    }
+    // Longest run of consecutive calendar days.
+    final sorted = days.toList()..sort();
+    var streak = sorted.isEmpty ? 0 : 1, run = sorted.isEmpty ? 0 : 1;
+    for (var i = 1; i < sorted.length; i++) {
+      run = sorted[i].difference(sorted[i - 1]).inDays == 1 ? run + 1 : 1;
+      if (run > streak) streak = run;
+    }
+    return ui.ProfileStats(
+      walks: walks.length,
+      cities: cities.length,
+      cityNames: cityOrder,
+      districts: districts.length,
+      distanceM: distance,
+      objects: objects,
+      languages: langs.length,
+      streakDays: streak,
+      hasEarlyWalk: early,
+      hasNightWalk: night,
+      isPaid: isPaid,
+      signedIn: true,
+    );
+  }
+
+  // Sign out after confirmation. On success the auth gate (root build) swaps back to
+  // the login screen automatically via the AuthService listener.
+  Future<void> _confirmSignOut() async {
+    final l = AppLocalizations.of(context)!;
+    final ok = await ui.showBrandConfirm(
+      context,
+      icon: Icons.logout_rounded,
+      title: l.signOut,
+      message: 'Выйти из аккаунта? Прогулки останутся сохранёнными.',
+      confirmLabel: l.signOut,
+      cancelLabel: l.cancel,
+    );
+    if (!ok) return;
+    _disconnect(); // stop any tour/WS before the gate tears HomePage down
+    await AuthService.instance.signOut();
+    if (!mounted) return;
+    // When accounts are enabled, the root auth gate swaps to the login screen on its own
+    // (and this State is already unmounted by then). In demo / guest builds there is no
+    // gate, so take the user to the login screen explicitly — "sign out" always lands on
+    // the entry screen.
+    if (!AccountsConfig.enabled) {
+      Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+        MaterialPageRoute<void>(builder: (_) => const LoginScreen(isGate: true)),
+        (route) => false,
+      );
+    }
+  }
+
+  Widget _profileTab(AppLocalizations l) {
+    final nick = _nick();
+    final signedIn = AccountsConfig.enabled && AuthService.instance.isSignedIn;
+    // Demo: a fully-populated profile matching the seeded test account (Kolbasenko).
+    // Real: level/count come from /me; the richer per-walk stats (cities/distance/…)
+    // await a /walks fetch — a follow-up — so they read 0 until then.
+    if (!kDemoProfile) _ensureProfileStats(); // real: aggregate from /walks (once)
+    final stats = kDemoProfile
+        ? const ui.ProfileStats(
+            walks: 16, cities: 3, districts: 16, distanceM: 43600, objects: 195,
+            languages: 3, streakDays: 7, hasEarlyWalk: true, hasNightWalk: true,
+            isPaid: true, signedIn: true,
+            cityNames: ['Москва', 'Санкт-Петербург', 'Казань'],
+          )
+        : (_aggregatedStats ??
+            ui.ProfileStats(
+              walks: AuthService.instance.profile?.walkCount ?? 0,
+              isPaid: AuthService.instance.isPaid,
+              signedIn: signedIn,
+            ));
+    final friends = kDemoProfile
+        ? const [
+            (id: 'd1', nick: 'Sosiskin', walks: 3, paid: false),
+            (id: 'd2', nick: 'Аня', walks: 22, paid: true),
+            (id: 'd3', nick: 'Макс', walks: 9, paid: false),
+            (id: 'd4', nick: 'Лена', walks: 6, paid: true),
+            (id: 'd5', nick: 'Игорь', walks: 1, paid: false),
+          ]
+        : AuthService.instance.friends;
+    final myId = AuthService.instance.userId ?? 'me';
+    final inviteUrl = 'https://aiguide.app/i/$myId';
+    void openInvite() => Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => ui.InviteScreen(inviteUrl: inviteUrl, nick: nick.isEmpty ? l.homeGuest : nick)));
+    return ui.ProfileTab(
+      nick: nick.isEmpty ? l.homeGuest : nick,
+      stats: stats,
+      avatarUrl: kDemoProfile ? null : AuthService.instance.avatarUrl,
+      signedIn: signedIn || kDemoProfile,
+      onSignOut: _confirmSignOut,
+      onFriends: () => Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (_) => ui.FriendsScreen(friends: friends, onInvite: openInvite))),
+      onInvite: openInvite,
+      onEdit: (signedIn || kDemoProfile)
+          ? () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const AccountEditScreen()))
+          : null,
+      friends: friends,
+      onOpenFriend: (f) => Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => ui.FriendProfileScreen(friend: f))),
+      inviteUrl: inviteUrl,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
     _screenH = MediaQuery.of(context).size.height;
-    return Scaffold(
-      body: Stack(children: [
-        Positioned.fill(child: _mapView()),
-        // top controls
-        Positioned(
-          top: 0,
-          left: 12,
-          right: 12,
-          child: SafeArea(bottom: false, child: Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: _topBar(l),
-          )),
-        ),
-        // recenter FAB sits directly above the card (always visible).
-        Positioned(left: 12, right: 12, bottom: 0, child: SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Align(
-                alignment: Alignment.centerRight,
-                child: Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    _zoomFab(l),
-                    const SizedBox(height: 10),
-                    // Compass FAB appears when the map is rotated. Kept as a plain
-                    // conditional: wrapping it in AnimatedSwitcher forced this column to
-                    // full width and shoved all the FABs to the screen centre.
-                    if (_mapRotation.abs() > 0.5) ...[
-                      _compassFab(l),
-                      const SizedBox(height: 10),
-                    ],
-                    _followFab(l),
-                  ]),
-                ),
+    final barHidden = _tab == 0 && _active;
+    // Rebuild tabs that read AuthService (profile/settings/home premium) when it changes.
+    return AnimatedBuilder(
+      animation: AuthService.instance,
+      builder: (context, _) => Scaffold(
+        extendBody: true,
+        body: Stack(children: [
+          IndexedStack(index: _tab, children: [
+            _homeTab(l),
+            const ui.CommunityScreen(),
+            _profileTab(l),
+            _settingsTab(l),
+          ]),
+          // Floating tab bar (hidden during an active tour on Home).
+          AnimatedPositioned(
+            duration: ui.Motion.med,
+            curve: ui.Motion.emphasized,
+            left: 16,
+            right: 16,
+            bottom: barHidden ? -110 : MediaQuery.of(context).padding.bottom + 12,
+            child: AnimatedOpacity(
+              duration: ui.Motion.fast,
+              opacity: barHidden ? 0 : 1,
+              child: ui.FloatingTabBar(
+                index: _tab,
+                onChanged: (i) => setState(() => _tab = i),
               ),
-              _bottomCard(l),
-            ]),
+            ),
           ),
-        )),
-      ]),
+        ]),
+      ),
     );
   }
 }

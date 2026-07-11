@@ -223,6 +223,67 @@ class AppLocalizationsRu extends AppLocalizations {
       'Войдите, чтобы сохранять прогулки и возвращаться к ним.';
 
   @override
+  String get loginWelcomeTitle => 'С возвращением';
+
+  @override
+  String get loginWelcomeSubtitle =>
+      'Открой приложение — и просто иди. Гид расскажет о том, что вокруг.';
+
+  @override
+  String get loginNewHere => 'Впервые тут?';
+
+  @override
+  String get registerSubtitle =>
+      'Создай аккаунт, чтобы сохранять прогулки и возвращаться к ним.';
+
+  @override
+  String get haveAccount => 'Уже есть аккаунт?';
+
+  @override
+  String get nickLabel => 'Ник';
+
+  @override
+  String get birthdayLabel => 'Дата рождения';
+
+  @override
+  String get birthdayOptional => 'Дата рождения · необязательно';
+
+  @override
+  String get avatarChoose => 'Добавить фото · необязательно';
+
+  @override
+  String get registerPremiumTitle => 'Оформить Premium сразу';
+
+  @override
+  String get registerPremiumSub => 'Весь гид без ограничений.';
+
+  @override
+  String get otpTitle => 'Подтвердите почту';
+
+  @override
+  String otpSentTo(String email) {
+    return 'Мы отправили 6-значный код на $email. Введите его ниже, чтобы завершить.';
+  }
+
+  @override
+  String get otpCodeLabel => 'Код из письма';
+
+  @override
+  String get otpConfirm => 'Подтвердить';
+
+  @override
+  String get otpResend => 'Отправить код снова';
+
+  @override
+  String get otpResent => 'Код отправлен ещё раз';
+
+  @override
+  String get otpInvalid => 'Неверный или просроченный код.';
+
+  @override
+  String get orWithEmail => 'или почтой';
+
+  @override
   String get continueWithGoogle => 'Продолжить с Google';
 
   @override
@@ -404,4 +465,228 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get bgFinish => 'Завершить';
+
+  @override
+  String get greetMorning => 'Доброе утро,';
+
+  @override
+  String get greetAfternoon => 'Добрый день,';
+
+  @override
+  String get greetEvening => 'Добрый вечер,';
+
+  @override
+  String get greetNight => 'Доброй ночи,';
+
+  @override
+  String get homePrompt => 'куда сегодня?';
+
+  @override
+  String get homeGuest => 'Путешественник';
+
+  @override
+  String get swipeToStart => 'Поехали';
+
+  @override
+  String get tabHome => 'Главная';
+
+  @override
+  String get tabCommunity => 'Комьюнити';
+
+  @override
+  String get tabProfile => 'Профиль';
+
+  @override
+  String get themeLabel => 'Тема';
+
+  @override
+  String get focusTitle => 'НА ЧЁМ ДЕЛАЕМ УПОР';
+
+  @override
+  String get premiumTrial => '1 неделя бесплатно';
+
+  @override
+  String profileLevelN(int n) {
+    return 'Уровень $n';
+  }
+
+  @override
+  String profileToNext(int level, int xp) {
+    return 'до $level уровня · $xp XP';
+  }
+
+  @override
+  String get profileAtMax => 'Максимальный уровень';
+
+  @override
+  String get close => 'Закрыть';
+
+  @override
+  String get communityGuest =>
+      'Войдите, чтобы видеть друзей, маршруты и челленджи.';
+
+  @override
+  String get communityChallenges => 'Состязания';
+
+  @override
+  String get communityCreateChallenge => 'Создать состязание';
+
+  @override
+  String get communityNoChallenges => 'Пока нет активных состязаний.';
+
+  @override
+  String get communityFriendsRoutes => 'Маршруты друзей';
+
+  @override
+  String get communityFriends => 'Друзья';
+
+  @override
+  String get communityAddFriend => 'Добавить';
+
+  @override
+  String get communityWalkingNow => 'на прогулке';
+
+  @override
+  String get communityNoFriends => 'Пока никого — добавь друзей по нику.';
+
+  @override
+  String get communityRequests => 'Заявки в друзья';
+
+  @override
+  String get communityAccept => 'Принять';
+
+  @override
+  String get communityDecline => 'Отклонить';
+
+  @override
+  String get communityJoin => 'Участвовать';
+
+  @override
+  String get communityPickHandleTitle => 'Придумай ник';
+
+  @override
+  String get communityPickHandleBody => 'По нику друзья смогут тебя найти.';
+
+  @override
+  String get communityHandleField => 'ник';
+
+  @override
+  String get communityHandleSave => 'Сохранить';
+
+  @override
+  String get communityHandleTaken => 'Ник занят или некорректен';
+
+  @override
+  String get communityRequestSent => 'Заявка отправлена';
+
+  @override
+  String get communitySearchHandle => 'Поиск по нику';
+
+  @override
+  String get communitySendRequest => 'Добавить';
+
+  @override
+  String get communityChallengeTitle => 'Название';
+
+  @override
+  String get communityMetric => 'Метрика';
+
+  @override
+  String get communityMetricDistance => 'Километры';
+
+  @override
+  String get communityMetricPlaces => 'Места';
+
+  @override
+  String get communityMetricDistricts => 'Районы';
+
+  @override
+  String get communityGoalLabel => 'Цель';
+
+  @override
+  String get communityDaysLabel => 'Дней';
+
+  @override
+  String get communityLeaderboard => 'Таблица лидеров';
+
+  @override
+  String get communityNoParticipants => 'Пока нет участников.';
+
+  @override
+  String communityRankPlace(int rank) {
+    return '$rank место';
+  }
+
+  @override
+  String communityGoalKm(int km) {
+    return '$km км';
+  }
+
+  @override
+  String communityGoalPlaces(int count) {
+    return '$count мест';
+  }
+
+  @override
+  String communityGoalDistricts(int count) {
+    return '$count районов';
+  }
+
+  @override
+  String feedWalked(String name) {
+    return '$name вышел на прогулку';
+  }
+
+  @override
+  String feedWalkedIn(String name, String city) {
+    return '$name гулял по $city';
+  }
+
+  @override
+  String feedStreak(String name, int days) {
+    return '$name — стрик $days дней';
+  }
+
+  @override
+  String feedBadge(String name, String badge) {
+    return '$name получил «$badge»';
+  }
+
+  @override
+  String feedChallenge(String name) {
+    return '$name — новое состязание';
+  }
+
+  @override
+  String xpValue(int n) {
+    return '$n XP';
+  }
+
+  @override
+  String get achievements => 'ДОСТИЖЕНИЯ';
+
+  @override
+  String get friends => 'Друзья';
+
+  @override
+  String get invite => 'Пригласить';
+
+  @override
+  String get friendsSoon => 'Друзья скоро появятся';
+
+  @override
+  String get statsSoon => 'Здесь появится ваша статистика';
+
+  @override
+  String get communitySoonTitle => 'Комьюнити скоро';
+
+  @override
+  String get communitySoonBody =>
+      'Здесь появятся друзья, общие маршруты и челленджи.';
+
+  @override
+  String get sectionAccount => 'Аккаунт';
+
+  @override
+  String get sectionDeveloper => 'Разработчик';
 }
