@@ -37,10 +37,9 @@
 		reverse_proxy backend:8000
 	}
 
-	# Everything else -> the Flutter web client (SPA); fall back to index.html.
+	# The browser client was debug-only and has been removed — non-API paths just get a
+	# tiny liveness response (the product is the native app; API/WS above still serve).
 	handle {
-		root * /srv/web
-		try_files {path} /index.html
-		file_server
+		respond "AI Audio Guide" 200
 	}
 }

@@ -39,7 +39,6 @@ services:
       - "443:443"                # public HTTPS / wss
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./web:/srv/web:ro        # Flutter web build (static client), served at /
       - caddy-data:/data         # persists the issued TLS certificates
       - caddy-config:/config
 
