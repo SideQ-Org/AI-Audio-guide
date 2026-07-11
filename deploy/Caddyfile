@@ -32,7 +32,7 @@
 	# accounts REST routes (/me, /walks[...]), billing (/billing/*), and the ops
 	# dashboard (/dashboard[...]); without these they'd fall through to the static file
 	# server and 404.
-	@api path /ws /health /ready /stats /me /walks /walks/* /billing/* /dashboard /dashboard/*
+	@api path /ws /health /ready /stats /me /walks /walks/* /billing/* /community /community/* /dashboard /dashboard/*
 	handle @api {
 		reverse_proxy backend:8000
 	}
