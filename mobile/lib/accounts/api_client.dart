@@ -95,7 +95,9 @@ class WalkApi {
 /// REST client for the Community layer (backend /community/*, design/COMMUNITY.md).
 /// Shares [WalkApi]'s auth-header + URL helpers (same library/file).
 class CommunityApi {
-  static const _timeout = Duration(seconds: 12);
+  // Generous: several community endpoints fan out over the Supabase pooler and can be
+  // slow under the tab's concurrent load. The screen also loads each section resiliently.
+  static const _timeout = Duration(seconds: 25);
 
   static Map<String, dynamic> _json(http.Response r, {int ok = 200}) {
     if (r.statusCode != ok) throw ApiException(r.statusCode, r.body);

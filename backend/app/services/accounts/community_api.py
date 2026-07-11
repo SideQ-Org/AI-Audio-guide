@@ -160,6 +160,18 @@ async def _ensure(repo, session, user_id: str):
     )
 
 
+def _user_light(user) -> CommunityUser:
+    """Identity-only user (no per-user DB queries). Use where the UI shows just the
+    name/handle/avatar (feed ticker, my-routes author) — avoids the N+1 that makes the
+    heavy endpoints slow under concurrency."""
+    return CommunityUser(
+        id=str(user.id),
+        handle=user.handle,
+        display_name=user.display_name,
+        avatar_url=user.avatar_url,
+    )
+
+
 async def _user_out(comm, repo, session, user, *, walking: bool | None = None) -> CommunityUser:
     walk_count = await repo.count_walks(session, user_id=user.id)
     streak = await comm.compute_streak(session, user_id=user.id)
@@ -314,7 +326,7 @@ async def feed(
             items.append(
                 FeedItem(
                     id=str(ev.id), kind=ev.kind, payload=ev.payload, created_at=ev.created_at,
-                    user=await _user_out(comm, repo, session, u),
+                    user=_user_light(u),
                 )
             )
         return FeedOut(items=items)
@@ -433,7 +445,7 @@ async def my_walks(
                 FriendWalk(
                     id=str(w.id), started_at=w.started_at, city=w.city, district=w.district,
                     distance_m=w.distance_m, object_count=w.object_count, title=w.title,
-                    path=w.path, user=await _user_out(comm, repo, session, u),
+                    path=w.path, user=_user_light(u),
                 )
             )
         return FriendWalksOut(walks=walks)

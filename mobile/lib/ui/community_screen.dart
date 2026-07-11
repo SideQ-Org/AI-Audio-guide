@@ -72,26 +72,30 @@ class _CommunityScreenState extends State<CommunityScreen> {
   }
 
   Future<_CommunityData> _load() async {
+    // `me` is required (identifies the account); if IT fails, show the error card.
+    final me = await CommunityApi.me();
     final paid = AuthService.instance.isPaid;
-    final results = await Future.wait([
-      CommunityApi.me(),
-      CommunityApi.challenges(),
-      CommunityApi.friends(),
-      CommunityApi.friendsWalks(),
-      CommunityApi.myWalks(limit: paid ? 12 : 10),
-      CommunityApi.groupStreaks(),
-      CommunityApi.feed(limit: 20),
-      CommunityApi.requests(),
+    // Every other section loads independently — one flaky/slow endpoint must NOT blank
+    // the whole tab (it just renders that section empty).
+    Future<T> safe<T>(Future<T> f, T fallback) => f.catchError((_) => fallback);
+    final r = await Future.wait([
+      safe(CommunityApi.challenges(), <Challenge>[]),
+      safe(CommunityApi.friends(), <CommunityUser>[]),
+      safe(CommunityApi.friendsWalks(), <FriendWalk>[]),
+      safe(CommunityApi.myWalks(limit: paid ? 12 : 10), <FriendWalk>[]),
+      safe(CommunityApi.groupStreaks(), <GroupStreak>[]),
+      safe(CommunityApi.feed(limit: 20), <FeedItem>[]),
+      safe(CommunityApi.requests(), const FriendRequests()),
     ]);
     return _CommunityData(
-      results[0] as CommunityUser,
-      results[1] as List<Challenge>,
-      results[2] as List<CommunityUser>,
-      results[3] as List<FriendWalk>,
-      results[4] as List<FriendWalk>,
-      results[5] as List<GroupStreak>,
-      results[6] as List<FeedItem>,
-      results[7] as FriendRequests,
+      me,
+      r[0] as List<Challenge>,
+      r[1] as List<CommunityUser>,
+      r[2] as List<FriendWalk>,
+      r[3] as List<FriendWalk>,
+      r[4] as List<GroupStreak>,
+      r[5] as List<FeedItem>,
+      r[6] as FriendRequests,
     );
   }
 
