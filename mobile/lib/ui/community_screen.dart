@@ -7,6 +7,7 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show Ticker;
 
 import '../accounts/accounts_config.dart';
 import '../accounts/api_client.dart';
@@ -16,6 +17,13 @@ import '../accounts/realtime_service.dart';
 import '../l10n/app_localizations.dart';
 import 'components.dart';
 import 'design.dart';
+
+// Card colour — same as the Profile blocks: clean white frosted glass in light, the
+// theme glass tint in dark, no sheen (avoids the "gradient" look of the default fill).
+Color _blockFill(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark
+        ? context.colors.glass
+        : const Color(0x8CFFFFFF);
 
 class CommunityScreen extends StatefulWidget {
   const CommunityScreen({super.key});
@@ -29,10 +37,12 @@ class _CommunityData {
   final List<Challenge> challenges;
   final List<CommunityUser> friends;
   final List<FriendWalk> friendWalks;
+  final List<FriendWalk> myWalks;
+  final List<GroupStreak> groupStreaks;
   final List<FeedItem> feed;
   final FriendRequests requests;
-  const _CommunityData(this.me, this.challenges, this.friends, this.friendWalks, this.feed,
-      this.requests);
+  const _CommunityData(this.me, this.challenges, this.friends, this.friendWalks, this.myWalks,
+      this.groupStreaks, this.feed, this.requests);
 }
 
 class _CommunityScreenState extends State<CommunityScreen> {
@@ -62,11 +72,14 @@ class _CommunityScreenState extends State<CommunityScreen> {
   }
 
   Future<_CommunityData> _load() async {
+    final paid = AuthService.instance.isPaid;
     final results = await Future.wait([
       CommunityApi.me(),
       CommunityApi.challenges(),
       CommunityApi.friends(),
       CommunityApi.friendsWalks(),
+      CommunityApi.myWalks(limit: paid ? 12 : 10),
+      CommunityApi.groupStreaks(),
       CommunityApi.feed(limit: 20),
       CommunityApi.requests(),
     ]);
@@ -75,8 +88,10 @@ class _CommunityScreenState extends State<CommunityScreen> {
       results[1] as List<Challenge>,
       results[2] as List<CommunityUser>,
       results[3] as List<FriendWalk>,
-      results[4] as List<FeedItem>,
-      results[5] as FriendRequests,
+      results[4] as List<FriendWalk>,
+      results[5] as List<GroupStreak>,
+      results[6] as List<FeedItem>,
+      results[7] as FriendRequests,
     );
   }
 
@@ -134,6 +149,7 @@ class _CommunityScreenState extends State<CommunityScreen> {
 
   Widget _content(BuildContext context, _CommunityData d) {
     final l = AppLocalizations.of(context)!;
+    final c = context.colors;
     final topPad = MediaQuery.of(context).padding.top;
     final weekly = d.challenges.where((c) => c.isSystem).toList();
     final custom = d.challenges.where((c) => !c.isSystem).toList();
@@ -141,7 +157,18 @@ class _CommunityScreenState extends State<CommunityScreen> {
     return ListView(
       padding: EdgeInsets.fromLTRB(16, topPad + 16, 16, MediaQuery.of(context).padding.bottom + 110),
       children: [
-        Text(l.tabCommunity, style: h1(context)),
+        // Title + add-friend (friends are managed here + in the profile).
+        Row(children: [
+          Expanded(child: Text(l.tabCommunity, style: h1(context))),
+          Pressable(
+            onTap: _openAddFriend,
+            child: Container(
+              width: 40, height: 40, alignment: Alignment.center,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: _blockFill(context), border: Border.all(color: c.glassBorder)),
+              child: Icon(Icons.person_add_alt_1_rounded, size: 20, color: c.primary),
+            ),
+          ),
+        ]),
         const SizedBox(height: Gap.lg),
 
         if (d.me.handle == null) ...[
@@ -149,21 +176,44 @@ class _CommunityScreenState extends State<CommunityScreen> {
           const SizedBox(height: Gap.lg),
         ],
 
-        // Co-walk (realtime): join a friend's live session, or start one.
-        _CoWalkCard(friends: d.friends),
-        const SizedBox(height: Gap.lg),
-
-        if (d.feed.isNotEmpty) ...[
-          _FeedTicker(items: d.feed),
+        // 1. News marquee (friends' events + what's new).
+        if (d.feed.isNotEmpty || true) ...[
+          _NewsMarquee(items: d.feed),
           const SizedBox(height: Gap.lg),
         ],
 
+        // Incoming friend requests (kept accessible; friend LIST lives in the profile).
         if (d.requests.incoming.isNotEmpty) ...[
           _RequestsCard(incoming: d.requests.incoming, onChanged: _refresh),
           const SizedBox(height: Gap.lg),
         ],
 
-        // Weekly + custom challenges
+        // 2. My routes.
+        _SectionHeader(
+          title: l.communityMyRoutes,
+          action: d.myWalks.isNotEmpty ? l.communitySeeAll : null,
+          onAction: d.myWalks.isNotEmpty ? () => _openMyRoutes() : null,
+        ),
+        const SizedBox(height: Gap.sm),
+        if (d.myWalks.isEmpty)
+          _MutedNote(l.communityNoRoutes)
+        else
+          SizedBox(
+            height: 168,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: d.myWalks.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 12),
+              itemBuilder: (_, i) => _RouteCard(walk: d.myWalks[i], showUser: false),
+            ),
+          ),
+        const SizedBox(height: Gap.lg),
+
+        // 3. Together (joint activities).
+        _TogetherBlock(friends: d.friends, groupStreaks: d.groupStreaks, onChanged: _refresh),
+        const SizedBox(height: Gap.lg),
+
+        // 4. Competitions.
         _SectionHeader(title: l.communityChallenges, action: l.communityCreateChallenge,
             onAction: () => _openCreateChallenge()),
         const SizedBox(height: Gap.sm),
@@ -175,7 +225,7 @@ class _CommunityScreenState extends State<CommunityScreen> {
           _MutedNote(l.communityNoChallenges),
         const SizedBox(height: Gap.lg),
 
-        // Friends' routes
+        // 5. Friends' shared routes.
         if (d.friendWalks.isNotEmpty) ...[
           _SectionHeader(title: l.communityFriendsRoutes),
           const SizedBox(height: Gap.sm),
@@ -188,30 +238,13 @@ class _CommunityScreenState extends State<CommunityScreen> {
               itemBuilder: (_, i) => _RouteCard(walk: d.friendWalks[i]),
             ),
           ),
-          const SizedBox(height: Gap.lg),
         ],
-
-        // Friends
-        _SectionHeader(title: l.communityFriends, action: l.communityAddFriend,
-            onAction: () => _openAddFriend()),
-        const SizedBox(height: Gap.sm),
-        if (d.friends.isEmpty)
-          _MutedNote(l.communityNoFriends)
-        else
-          GlassModule(
-            fill: context.colors.glassFill(0.04), sheen: false,
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Column(
-              children: [
-                for (int i = 0; i < d.friends.length; i++) ...[
-                  if (i > 0) Divider(height: 1, color: context.colors.glassBorder),
-                  _FriendRow(user: d.friends[i]),
-                ],
-              ],
-            ),
-          ),
       ],
     );
+  }
+
+  void _openMyRoutes() {
+    Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MyRoutesScreen()));
   }
 
   Future<void> _openAddFriend() async {
@@ -265,7 +298,7 @@ class _MutedNote extends StatelessWidget {
   final String text;
   @override
   Widget build(BuildContext context) => GlassModule(
-        fill: context.colors.glassFill(0.04), sheen: false,
+        fill: _blockFill(context), sheen: false,
         padding: const EdgeInsets.all(16),
         child: Text(text, style: caption(context).copyWith(fontSize: 13.5)),
       );
@@ -284,6 +317,7 @@ class _CenterCard extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.all(28),
         child: GlassModule(
+          fill: _blockFill(context), sheen: false,
           padding: const EdgeInsets.all(24),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Container(
@@ -306,9 +340,39 @@ class _CenterCard extends StatelessWidget {
 TextStyle body_(BuildContext ctx) =>
     body(ctx).copyWith(fontSize: 14, fontWeight: FontWeight.w500, color: ctx.colors.textSecondary);
 
-class _FeedTicker extends StatelessWidget {
-  const _FeedTicker({required this.items});
+// One-line, seamlessly-looping news ticker: "what's new" + friends' events.
+class _NewsMarquee extends StatefulWidget {
+  const _NewsMarquee({required this.items});
   final List<FeedItem> items;
+  @override
+  State<_NewsMarquee> createState() => _NewsMarqueeState();
+}
+
+class _NewsMarqueeState extends State<_NewsMarquee> with SingleTickerProviderStateMixin {
+  final _sc = ScrollController();
+  Ticker? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _ticker = createTicker((_) {
+        if (!_sc.hasClients || !_sc.position.hasContentDimensions) return;
+        final content = (_sc.position.maxScrollExtent + _sc.position.viewportDimension) / 2;
+        if (content <= 0) return;
+        var next = _sc.offset + 0.6; // px/tick — slow, readable
+        if (next >= content) next -= content; // loop at one copy → seamless
+        _sc.jumpTo(next);
+      })..start();
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.dispose();
+    _sc.dispose();
+    super.dispose();
+  }
 
   String _text(AppLocalizations l, FeedItem it) {
     final name = it.user.name;
@@ -318,20 +382,18 @@ class _FeedTicker extends StatelessWidget {
         final city = (p['city'] as String?) ?? '';
         return city.isEmpty ? l.feedWalked(name) : l.feedWalkedIn(name, city);
       case 'streak':
+      case 'group_streak':
         return l.feedStreak(name, (p['days'] as num?)?.toInt() ?? 0);
       case 'badge':
         return l.feedBadge(name, (p['badge'] as String?) ?? '');
-      case 'challenge_join':
-      case 'challenge_win':
-        return l.feedChallenge(name);
       default:
-        return name;
+        return l.feedChallenge(name);
     }
   }
 
   String _emoji(String kind) => switch (kind) {
         'walk' => '🥾',
-        'streak' => '🔥',
+        'streak' || 'group_streak' => '🔥',
         'badge' => '🏅',
         _ => '🏆',
       };
@@ -339,24 +401,40 @@ class _FeedTicker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
-    return GlassModule(
-      fill: context.colors.glassFill(0.04), sheen: false,
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      child: Column(
-        children: [
-          for (int i = 0; i < items.length && i < 5; i++) ...[
-            if (i > 0) const SizedBox(height: 8),
-            Row(children: [
-              Text(_emoji(items[i].kind), style: const TextStyle(fontSize: 15)),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(_text(l, items[i]),
-                    maxLines: 1, overflow: TextOverflow.ellipsis,
-                    style: caption(context).copyWith(fontSize: 13, color: context.colors.textPrimary)),
+    final entries = <({String emoji, String text})>[
+      (emoji: '✨', text: l.communityWhatsNew),
+      for (final it in widget.items) (emoji: _emoji(it.kind), text: _text(l, it)),
+    ];
+    Widget strip() => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(width: 14),
+            for (final e in entries)
+              Padding(
+                padding: const EdgeInsets.only(right: 24),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Text(e.emoji, style: const TextStyle(fontSize: 14)),
+                  const SizedBox(width: 6),
+                  Text(e.text,
+                      style: caption(context).copyWith(
+                          fontSize: 13, fontWeight: FontWeight.w600, color: context.colors.textPrimary)),
+                ]),
               ),
-            ]),
           ],
-        ],
+        );
+    return GlassModule(
+      fill: _blockFill(context), sheen: false,
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: SizedBox(
+        height: 20,
+        child: ClipRect(
+          child: SingleChildScrollView(
+            controller: _sc,
+            scrollDirection: Axis.horizontal,
+            physics: const NeverScrollableScrollPhysics(),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [strip(), strip()]),
+          ),
+        ),
       ),
     );
   }
@@ -369,9 +447,8 @@ class _RequestsCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
-    final c = context.colors;
     return GlassModule(
-      fill: c.glassFill(0.05), sheen: false,
+      fill: _blockFill(context), sheen: false,
       padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(l.communityRequests, style: label(context).copyWith(fontSize: 12)),
@@ -422,7 +499,7 @@ class _ChallengeCard extends StatelessWidget {
       onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
           builder: (_) => ChallengeDetailScreen(challengeId: challenge.id))),
       child: GlassModule(
-        fill: c.glassFill(0.05), sheen: false,
+        fill: _blockFill(context), sheen: false,
         padding: const EdgeInsets.all(14),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
@@ -496,16 +573,25 @@ class _ProgressBar extends StatelessWidget {
 }
 
 class _RouteCard extends StatelessWidget {
-  const _RouteCard({required this.walk});
+  const _RouteCard({required this.walk, this.showUser = true});
   final FriendWalk walk;
+  final bool showUser; // friends' routes show @user; my routes show distance · places
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
+    final l = AppLocalizations.of(context)!;
+    final km = walk.distanceM == null ? null : (walk.distanceM! / 1000);
+    final sub = showUser
+        ? '${walk.user.handle != null ? '@${walk.user.handle}' : walk.user.name} · ${l.profileLevelN(walk.user.level)}'
+        : [
+            if (km != null) l.communityGoalKm(km.round()),
+            if (walk.objectCount > 0) l.communityGoalPlaces(walk.objectCount),
+          ].join(' · ');
     return Container(
       width: 220,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(Radii.lg),
-        color: c.glassFill(0.05),
+        color: _blockFill(context),
         border: Border.all(color: c.glassBorder),
       ),
       child: ClipRRect(
@@ -525,8 +611,7 @@ class _RouteCard extends StatelessWidget {
                   maxLines: 1, overflow: TextOverflow.ellipsis,
                   style: titleS(context).copyWith(fontWeight: FontWeight.w800)),
               const SizedBox(height: 2),
-              Text('${walk.user.handle != null ? '@${walk.user.handle}' : walk.user.name} · ${AppLocalizations.of(context)!.profileLevelN(walk.user.level)}',
-                  maxLines: 1, overflow: TextOverflow.ellipsis, style: caption(context)),
+              Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: caption(context)),
             ]),
           ),
         ]),
@@ -581,43 +666,6 @@ class _RoutePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_RoutePainter old) => old.path != path || old.color != color;
-}
-
-class _FriendRow extends StatelessWidget {
-  const _FriendRow({required this.user});
-  final CommunityUser user;
-  @override
-  Widget build(BuildContext context) {
-    final l = AppLocalizations.of(context)!;
-    final c = context.colors;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      child: Row(children: [
-        _Avatar(user: user, size: 44),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(user.name, style: titleS(context).copyWith(fontSize: 15, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 2),
-            Text('${user.handle != null ? '@${user.handle} · ' : ''}${l.profileLevelN(user.level)}',
-                style: caption(context)),
-          ]),
-        ),
-        if (user.walkingNow || RealtimeService.instance.walkingIds.contains(user.id))
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            Container(width: 7, height: 7, decoration: BoxDecoration(color: c.primary, shape: BoxShape.circle)),
-            const SizedBox(width: 5),
-            Text(l.communityWalkingNow, style: caption(context).copyWith(color: c.primary, fontWeight: FontWeight.w800)),
-          ])
-        else if (user.streak > 0)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            decoration: BoxDecoration(color: c.lime.withValues(alpha: 0.2), borderRadius: BorderRadius.circular(Radii.pill)),
-            child: Text('🔥 ${user.streak}', style: caption(context).copyWith(fontWeight: FontWeight.w800, color: c.primary)),
-          ),
-      ]),
-    );
-  }
 }
 
 class _Avatar extends StatelessWidget {
@@ -696,6 +744,7 @@ class _HandleSetupCardState extends State<_HandleSetupCard> {
     final l = AppLocalizations.of(context)!;
     final c = context.colors;
     return GlassModule(
+      fill: _blockFill(context), sheen: false,
       padding: const EdgeInsets.all(16),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(l.communityPickHandleTitle, style: h2(context).copyWith(fontSize: 18)),
@@ -1002,7 +1051,7 @@ class _ChallengeDetailScreenState extends State<ChallengeDetailScreen> {
                   Text(l.communityLeaderboard, style: label(context)),
                   const SizedBox(height: 8),
                   GlassModule(
-                    fill: c.glassFill(0.04), sheen: false,
+                    fill: _blockFill(context), sheen: false,
                     padding: const EdgeInsets.symmetric(vertical: 4),
                     child: Column(children: [
                       for (int i = 0; i < d.leaderboard.length; i++) ...[
@@ -1104,7 +1153,7 @@ class _CoWalkCard extends StatelessWidget {
         builder: (_) => const _CoWalkSheet(),
       ),
       child: GlassModule(
-        fill: c.glassFill(0.05), sheen: false,
+        fill: _blockFill(context), sheen: false,
         padding: const EdgeInsets.all(14),
         child: Row(children: [
           Container(
@@ -1207,5 +1256,253 @@ class _OrLine extends StatelessWidget {
           child: Text(label.toUpperCase(), style: caption(context).copyWith(fontWeight: FontWeight.w700, color: c.textFaint))),
       line(),
     ]);
+  }
+}
+
+// ── together (joint activities) ──────────────────────────────────────────────
+
+class _TogetherBlock extends StatelessWidget {
+  const _TogetherBlock({required this.friends, required this.groupStreaks, required this.onChanged});
+  final List<CommunityUser> friends;
+  final List<GroupStreak> groupStreaks;
+  final Future<void> Function() onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      _SectionHeader(title: l.communityTogether),
+      const SizedBox(height: Gap.sm),
+      // Co-walk (realtime): active banner or the "walk together" tile.
+      _CoWalkCard(friends: friends),
+      // Active group streaks.
+      for (final gs in groupStreaks) ...[
+        const SizedBox(height: Gap.sm),
+        _GroupStreakCard(streak: gs, onChanged: onChanged),
+      ],
+      const SizedBox(height: Gap.sm),
+      Row(children: [
+        Expanded(child: _ActionTile(
+          icon: Icons.local_fire_department_rounded,
+          title: l.communityGroupStreak,
+          sub: l.communityGroupStreakSub,
+          onTap: () async {
+            final made = await showModalBottomSheet<bool>(
+              context: context, isScrollControlled: true, useSafeArea: true,
+              backgroundColor: Colors.transparent,
+              builder: (_) => _GroupStreakSheet(friends: friends),
+            );
+            if (made == true) onChanged();
+          },
+        )),
+        const SizedBox(width: 12),
+        Expanded(child: _ActionTile(
+          icon: Icons.emoji_events_rounded,
+          title: l.communityTeamChallenge,
+          sub: l.communityTeamChallengeSub,
+          onTap: () async {
+            final made = await showModalBottomSheet<bool>(
+              context: context, isScrollControlled: true, useSafeArea: true,
+              backgroundColor: Colors.transparent,
+              builder: (_) => const _CreateChallengeSheet(),
+            );
+            if (made == true) onChanged();
+          },
+        )),
+      ]),
+    ]);
+  }
+}
+
+class _ActionTile extends StatelessWidget {
+  const _ActionTile({required this.icon, required this.title, required this.sub, required this.onTap});
+  final IconData icon;
+  final String title;
+  final String sub;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Pressable(
+      onTap: onTap,
+      child: Container(
+        height: 108,
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: _blockFill(context),
+          borderRadius: BorderRadius.circular(Radii.lg),
+          border: Border.all(color: c.glassBorder),
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+          Container(
+            width: 36, height: 36, alignment: Alignment.center,
+            decoration: BoxDecoration(shape: BoxShape.circle, gradient: LinearGradient(colors: [c.lime, c.primary])),
+            child: Icon(icon, size: 20, color: c.onPrimary),
+          ),
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: titleS(context).copyWith(fontSize: 14, fontWeight: FontWeight.w800)),
+            Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: caption(context).copyWith(fontSize: 11.5)),
+          ]),
+        ]),
+      ),
+    );
+  }
+}
+
+class _GroupStreakCard extends StatelessWidget {
+  const _GroupStreakCard({required this.streak, required this.onChanged});
+  final GroupStreak streak;
+  final Future<void> Function() onChanged;
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    final c = context.colors;
+    return GlassModule(
+      fill: c.lime.withValues(alpha: 0.14), sheen: false,
+      padding: const EdgeInsets.all(14),
+      child: Row(children: [
+        Text('🔥', style: TextStyle(fontSize: 26, color: c.primary)),
+        const SizedBox(width: 4),
+        Text('${streak.days}', style: h1(context).copyWith(fontSize: 26, color: c.primary)),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(streak.title?.trim().isNotEmpty == true ? streak.title! : l.communityGroupStreak,
+                maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: titleS(context).copyWith(fontWeight: FontWeight.w800)),
+            const SizedBox(height: 2),
+            Text(
+              '${l.communityGroupStreakDays(streak.days)} · ${streak.members.map((m) => m.handle != null ? '@${m.handle}' : m.name).join(', ')}',
+              maxLines: 1, overflow: TextOverflow.ellipsis, style: caption(context),
+            ),
+          ]),
+        ),
+        _MiniButton(label: l.communityCoWalkLeave, onTap: () async {
+          await CommunityApi.leaveGroupStreak(streak.id);
+          await onChanged();
+        }),
+      ]),
+    );
+  }
+}
+
+class _GroupStreakSheet extends StatefulWidget {
+  const _GroupStreakSheet({required this.friends});
+  final List<CommunityUser> friends;
+  @override
+  State<_GroupStreakSheet> createState() => _GroupStreakSheetState();
+}
+
+class _GroupStreakSheetState extends State<_GroupStreakSheet> {
+  final Set<String> _picked = {}; // handles
+  bool _busy = false;
+
+  Future<void> _create() async {
+    if (_picked.isEmpty) return;
+    setState(() => _busy = true);
+    try {
+      await CommunityApi.createGroupStreak(_picked.toList());
+      if (mounted) Navigator.pop(context, true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    final c = context.colors;
+    final withHandle = widget.friends.where((f) => f.handle != null).toList();
+    return RoundedSheet(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).viewInsets.bottom + 24),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Center(child: Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(color: c.textFaint.withValues(alpha: .4), borderRadius: BorderRadius.circular(2)))),
+          Text(l.communityGroupStreak, style: h2(context)),
+          const SizedBox(height: 6),
+          Text(l.communityGroupStreakPick, style: caption(context).copyWith(fontSize: 13.5)),
+          const SizedBox(height: 14),
+          if (withHandle.isEmpty)
+            _MutedNote(l.communityGroupStreakEmpty)
+          else
+            ...withHandle.map((f) {
+              final on = _picked.contains(f.handle);
+              return Pressable(
+                onTap: () => setState(() => on ? _picked.remove(f.handle) : _picked.add(f.handle!)),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(children: [
+                    _Avatar(user: f, size: 40),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text('@${f.handle}', style: titleS(context).copyWith(fontSize: 14.5))),
+                    Icon(on ? Icons.check_circle_rounded : Icons.circle_outlined,
+                        color: on ? c.primary : c.textFaint),
+                  ]),
+                ),
+              );
+            }),
+          const SizedBox(height: 16),
+          AppButton(l.communityGroupStreak,
+              icon: Icons.local_fire_department_rounded,
+              onTap: (_busy || _picked.isEmpty) ? null : _create),
+        ]),
+      ),
+    );
+  }
+}
+
+// ── my routes (full page) ────────────────────────────────────────────────────
+
+class MyRoutesScreen extends StatefulWidget {
+  const MyRoutesScreen({super.key});
+  @override
+  State<MyRoutesScreen> createState() => _MyRoutesScreenState();
+}
+
+class _MyRoutesScreenState extends State<MyRoutesScreen> {
+  late final Future<List<FriendWalk>> _future =
+      CommunityApi.myWalks(limit: AuthService.instance.isPaid ? 50 : 10);
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    final c = context.colors;
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: GradientBackground(
+        child: SafeArea(
+          child: FutureBuilder<List<FriendWalk>>(
+            future: _future,
+            builder: (context, snap) {
+              return CustomScrollView(slivers: [
+                SliverToBoxAdapter(
+                  child: Row(children: [
+                    IconButton(onPressed: () => Navigator.pop(context), icon: Icon(Icons.arrow_back_rounded, color: c.textPrimary)),
+                    Text(l.communityMyRoutes, style: h2(context)),
+                  ]),
+                ),
+                if (!snap.hasData)
+                  SliverFillRemaining(hasScrollBody: false, child: Center(child: CircularProgressIndicator(color: c.primary)))
+                else if (snap.data!.isEmpty)
+                  SliverFillRemaining(hasScrollBody: false, child: Center(child: Text(l.communityNoRoutes, style: caption(context))))
+                else
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+                    sliver: SliverGrid(
+                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 2, mainAxisSpacing: 12, crossAxisSpacing: 12, childAspectRatio: 0.82),
+                      delegate: SliverChildBuilderDelegate(
+                        (context, i) => _RouteCard(walk: snap.data![i], showUser: false),
+                        childCount: snap.data!.length,
+                      ),
+                    ),
+                  ),
+              ]);
+            },
+          ),
+        ),
+      ),
+    );
   }
 }

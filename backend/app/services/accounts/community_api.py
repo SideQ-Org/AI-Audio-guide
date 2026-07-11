@@ -13,6 +13,8 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from app.config import settings
+
 from .api import current_user
 
 router = APIRouter(prefix="/community", tags=["community"])
@@ -98,6 +100,17 @@ class ChallengeDetailOut(ChallengeOut):
     leaderboard: list[LeaderboardEntry]
 
 
+class GroupStreakOut(BaseModel):
+    id: str
+    title: str | None = None
+    days: int = 0
+    members: list[CommunityUser]
+
+
+class GroupStreaksOut(BaseModel):
+    streaks: list[GroupStreakOut]
+
+
 # -- request bodies -------------------------------------------------------- #
 
 
@@ -117,6 +130,11 @@ class ChallengeIn(BaseModel):
     goal: int = 10000
     scope: str = "friends"
     days: int = 7
+
+
+class GroupStreakIn(BaseModel):
+    handles: list[str] = []
+    title: str | None = None
 
 
 # -- helpers --------------------------------------------------------------- #
@@ -394,3 +412,81 @@ async def challenge_detail(
             ch, joined=joined, participants=len(board), my_progress=my_progress, my_rank=my_rank
         )
         return ChallengeDetailOut(**base.model_dump(), leaderboard=lb)
+
+
+# -- my walks (for "My routes") --------------------------------------------- #
+
+
+@router.get("/my/walks", response_model=FriendWalksOut)
+async def my_walks(
+    limit: int = Query(default=12, ge=1, le=50), user_id: str = Depends(current_user)
+) -> FriendWalksOut:
+    comm, repo, session_scope = _community()
+    async with session_scope() as session:
+        user = await _ensure(repo, session, user_id)
+        # Free tier retains only free_tier_walk_limit walks; paid up to `limit`.
+        cap = limit if repo.effective_tier(user) == "paid" else settings.free_tier_walk_limit
+        rows = await comm.my_walks_with_path(session, user_id=user_id, limit=min(limit, cap))
+        walks = []
+        for w, u in rows:
+            walks.append(
+                FriendWalk(
+                    id=str(w.id), started_at=w.started_at, city=w.city, district=w.district,
+                    distance_m=w.distance_m, object_count=w.object_count, title=w.title,
+                    path=w.path, user=await _user_out(comm, repo, session, u),
+                )
+            )
+        return FriendWalksOut(walks=walks)
+
+
+# -- group streaks ----------------------------------------------------------- #
+
+
+@router.get("/streaks", response_model=GroupStreaksOut)
+async def group_streaks(user_id: str = Depends(current_user)) -> GroupStreaksOut:
+    comm, repo, session_scope = _community()
+    async with session_scope() as session:
+        await _ensure(repo, session, user_id)
+        rows = await comm.list_group_streaks(session, user_id=user_id)
+        out = []
+        for r in rows:
+            members = [await _user_out(comm, repo, session, u) for u in r["members"]]
+            out.append(GroupStreakOut(
+                id=str(r["streak"].id), title=r["streak"].title, days=r["days"], members=members))
+        return GroupStreaksOut(streaks=out)
+
+
+@router.post("/streaks", response_model=GroupStreakOut)
+async def create_group_streak(
+    body: GroupStreakIn, user_id: str = Depends(current_user)
+) -> GroupStreakOut:
+    comm, repo, session_scope = _community()
+    async with session_scope() as session:
+        await _ensure(repo, session, user_id)
+        # Resolve invited handles → user ids, but only accepted friends may be added.
+        fids = await comm.friend_ids(session, user_id=user_id)
+        member_ids = []
+        for h in body.handles:
+            u = await comm.get_by_handle(session, handle=h)
+            if u is not None and u.id in fids:
+                member_ids.append(u.id)
+        gs = await comm.create_group_streak(
+            session, creator_id=user_id, member_ids=member_ids, title=body.title
+        )
+        await comm.record_activity(
+            session, user_id=user_id, kind="group_streak", payload={"title": gs.title}
+        )
+        # Build the fresh view (creator + members).
+        rows = await comm.list_group_streaks(session, user_id=user_id)
+        row = next((r for r in rows if r["streak"].id == gs.id), None)
+        members = [await _user_out(comm, repo, session, u) for u in (row["members"] if row else [])]
+        return GroupStreakOut(
+            id=str(gs.id), title=gs.title, days=row["days"] if row else 0, members=members)
+
+
+@router.post("/streaks/{streak_id}/leave", status_code=200)
+async def leave_group_streak(streak_id: str, user_id: str = Depends(current_user)) -> dict:
+    comm, repo, session_scope = _community()
+    async with session_scope() as session:
+        ok = await comm.leave_group_streak(session, streak_id=streak_id, user_id=user_id)
+        return {"ok": ok}

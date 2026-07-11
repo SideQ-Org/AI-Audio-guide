@@ -1346,6 +1346,78 @@ abstract class AppLocalizations {
   /// **'code'**
   String get communityCoWalkEnterCode;
 
+  /// No description provided for @communityMyRoutes.
+  ///
+  /// In en, this message translates to:
+  /// **'My routes'**
+  String get communityMyRoutes;
+
+  /// No description provided for @communitySeeAll.
+  ///
+  /// In en, this message translates to:
+  /// **'All'**
+  String get communitySeeAll;
+
+  /// No description provided for @communityNoRoutes.
+  ///
+  /// In en, this message translates to:
+  /// **'No walks yet.'**
+  String get communityNoRoutes;
+
+  /// No description provided for @communityWhatsNew.
+  ///
+  /// In en, this message translates to:
+  /// **'New: friends, challenges and co-walks'**
+  String get communityWhatsNew;
+
+  /// No description provided for @communityTogether.
+  ///
+  /// In en, this message translates to:
+  /// **'Together'**
+  String get communityTogether;
+
+  /// No description provided for @communityGroupStreak.
+  ///
+  /// In en, this message translates to:
+  /// **'Group streak'**
+  String get communityGroupStreak;
+
+  /// No description provided for @communityGroupStreakSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Keep a streak with friends'**
+  String get communityGroupStreakSub;
+
+  /// No description provided for @communityTeamChallenge.
+  ///
+  /// In en, this message translates to:
+  /// **'Team challenge'**
+  String get communityTeamChallenge;
+
+  /// No description provided for @communityTeamChallengeSub.
+  ///
+  /// In en, this message translates to:
+  /// **'Compete with friends'**
+  String get communityTeamChallengeSub;
+
+  /// No description provided for @communityGroupStreakPick.
+  ///
+  /// In en, this message translates to:
+  /// **'Pick friends for the shared streak'**
+  String get communityGroupStreakPick;
+
+  /// No description provided for @communityGroupStreakEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'Add friends first to start a group streak.'**
+  String get communityGroupStreakEmpty;
+
+  /// No description provided for @communityGroupStreakDays.
+  ///
+  /// In en, this message translates to:
+  /// **'{days} days together'**
+  String communityGroupStreakDays(int days);
+
   /// No description provided for @xpValue.
   ///
   /// In en, this message translates to:

@@ -92,3 +92,24 @@ create policy challenge_participants_select_visible on challenge_participants
         and mine.user_id = auth.uid()
     )
   );
+
+-- Group streaks (design/COMMUNITY.md). Reads go through the backend (service role);
+-- these are defence-in-depth. Writes stay backend-only.
+alter table group_streaks enable row level security;
+alter table group_streak_members enable row level security;
+
+drop policy if exists group_streaks_select_member on group_streaks;
+create policy group_streaks_select_member on group_streaks
+  for select using (
+    creator_id = auth.uid()
+    or exists (select 1 from group_streak_members m
+               where m.streak_id = group_streaks.id and m.user_id = auth.uid())
+  );
+
+drop policy if exists group_streak_members_select_member on group_streak_members;
+create policy group_streak_members_select_member on group_streak_members
+  for select using (
+    user_id = auth.uid()
+    or exists (select 1 from group_streak_members mine
+               where mine.streak_id = group_streak_members.streak_id and mine.user_id = auth.uid())
+  );

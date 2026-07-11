@@ -186,6 +186,23 @@ class ChallengeDetail {
       );
 }
 
+class GroupStreak {
+  final String id;
+  final String? title;
+  final int days; // consecutive days all members walked
+  final List<CommunityUser> members;
+  const GroupStreak({required this.id, this.title, this.days = 0, this.members = const []});
+
+  factory GroupStreak.fromJson(Map<String, dynamic> j) => GroupStreak(
+        id: j['id'] as String,
+        title: j['title'] as String?,
+        days: (j['days'] as num?)?.toInt() ?? 0,
+        members: ((j['members'] as List?) ?? [])
+            .map((e) => CommunityUser.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
 class FriendRequests {
   final List<CommunityUser> incoming;
   final List<CommunityUser> outgoing;

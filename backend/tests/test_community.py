@@ -66,7 +66,7 @@ async def _init_db():
     db._set_engine_for_tests(engine)
 
 
-async def _seed_walk(uid: str, *, distance_m=1000, city="Москва", district="Центр"):
+async def _seed_walk(uid: str, *, distance_m=1000, city="Москва", district="Центр", path=None):
     async with db.session_scope() as s:
         await repo.get_or_create_user(s, provider="supabase", provider_uid=uid, user_id=uid)
         w = await repo.start_walk(
@@ -75,6 +75,8 @@ async def _seed_walk(uid: str, *, distance_m=1000, city="Москва", district
         )
         w.distance_m = distance_m
         w.object_count = 5
+        if path is not None:
+            w.path = path
 
 
 def _client() -> httpx.AsyncClient:
@@ -227,3 +229,60 @@ def test_weekly_challenge_autocreated():
     data = _run(scenario)
     globals_ = [c for c in data["challenges"] if c["scope"] == "global"]
     assert globals_ and globals_[0]["creator_id"] is None
+
+
+def test_my_walks_includes_path():
+    async def scenario():
+        uid = str(uuid.uuid4())
+        await _seed_walk(uid, path=[[55.75, 37.62], [55.76, 37.63]])
+        async with _client() as c:
+            r = await c.get("/community/my/walks", headers=_auth(uid))
+        return r.json()
+
+    data = _run(scenario)
+    assert len(data["walks"]) == 1
+    assert data["walks"][0]["path"] == [[55.75, 37.62], [55.76, 37.63]]
+    assert data["walks"][0]["city"] == "Москва"
+
+
+def test_group_streak_created_and_valued():
+    async def scenario():
+        a, b = str(uuid.uuid4()), str(uuid.uuid4())
+        # both walked today → common day → streak >= 1
+        await _seed_walk(a)
+        await _seed_walk(b)
+        async with _client() as c:
+            await c.post("/community/profile", json={"handle": "anna"}, headers=_auth(a))
+            await c.post("/community/profile", json={"handle": "boris"}, headers=_auth(b))
+            # must be friends first
+            await c.post("/community/friends/request", json={"handle": "boris"}, headers=_auth(a))
+            await c.post(f"/community/friends/{a}/accept", headers=_auth(b))
+            made = await c.post(
+                "/community/streaks",
+                json={"handles": ["boris"], "title": "Вместе"},
+                headers=_auth(a),
+            )
+            listed = await c.get("/community/streaks", headers=_auth(b))
+        return made.json(), listed.json()
+
+    made, listed = _run(scenario)
+    assert made["days"] >= 1
+    assert sorted(m["handle"] for m in made["members"]) == ["anna", "boris"]
+    # b (the friend) also sees the shared streak
+    assert len(listed["streaks"]) == 1 and listed["streaks"][0]["days"] >= 1
+
+
+def test_group_streak_only_adds_friends():
+    async def scenario():
+        a, b = str(uuid.uuid4()), str(uuid.uuid4())
+        async with _client() as c:
+            await c.post("/community/profile", json={"handle": "anna"}, headers=_auth(a))
+            await c.post("/community/profile", json={"handle": "boris"}, headers=_auth(b))
+            # NOT friends → boris must be ignored, streak has only the creator
+            made = await c.post(
+                "/community/streaks", json={"handles": ["boris"]}, headers=_auth(a)
+            )
+        return made.json()
+
+    made = _run(scenario)
+    assert [m["handle"] for m in made["members"]] == ["anna"]

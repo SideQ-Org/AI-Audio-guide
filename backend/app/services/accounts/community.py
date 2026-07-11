@@ -22,6 +22,8 @@ from .models import (
     Challenge,
     ChallengeParticipant,
     Friendship,
+    GroupStreak,
+    GroupStreakMember,
     User,
     Walk,
 )
@@ -469,3 +471,113 @@ async def ensure_weekly_challenge(session: AsyncSession) -> Challenge:
     session.add(ch)
     await session.flush()
     return ch
+
+
+# -- my walks (with path) ---------------------------------------------------- #
+
+
+async def my_walks_with_path(
+    session: AsyncSession, *, user_id, limit: int = 12
+) -> list[tuple[Walk, User]]:
+    """The caller's own recent walks (incl. GPS path) for the "My routes" cards."""
+    uid = _as_uuid(user_id)
+    rows = await session.execute(
+        select(Walk, User)
+        .join(User, User.id == Walk.user_id)
+        .where(Walk.user_id == uid)
+        .order_by(Walk.started_at.desc())
+        .limit(limit)
+    )
+    return list(rows)
+
+
+# -- group streaks ----------------------------------------------------------- #
+
+
+async def group_streak_value(session: AsyncSession, *, member_ids) -> int:
+    """Consecutive days (ending today or yesterday) on which EVERY member walked."""
+    ids = [_as_uuid(m) for m in member_ids]
+    if not ids:
+        return 0
+    per_member = [set(await _walk_days(session, mid)) for mid in ids]
+    common = set.intersection(*per_member) if per_member else set()
+    if not common:
+        return 0
+    today = _now().date()
+    if today in common:
+        cursor = today
+    elif (today - timedelta(days=1)) in common:
+        cursor = today - timedelta(days=1)
+    else:
+        return 0
+    streak = 0
+    while cursor in common:
+        streak += 1
+        cursor -= timedelta(days=1)
+    return streak
+
+
+async def create_group_streak(
+    session: AsyncSession, *, creator_id, member_ids, title: str | None = None
+) -> GroupStreak:
+    cid = _as_uuid(creator_id)
+    gs = GroupStreak(creator_id=cid, title=(title.strip()[:120] if title else None))
+    session.add(gs)
+    await session.flush()
+    ids = {cid} | {_as_uuid(m) for m in member_ids}
+    for uid in ids:
+        session.add(GroupStreakMember(streak_id=gs.id, user_id=uid))
+    await session.flush()
+    return gs
+
+
+async def list_group_streaks(session: AsyncSession, *, user_id) -> list[dict]:
+    """The caller's group streaks with members and the current derived value."""
+    uid = _as_uuid(user_id)
+    streak_ids = set(
+        await session.scalars(
+            select(GroupStreakMember.streak_id).where(GroupStreakMember.user_id == uid)
+        )
+    )
+    if not streak_ids:
+        return []
+    streaks = await session.scalars(
+        select(GroupStreak)
+        .where(GroupStreak.id.in_(streak_ids))
+        .order_by(GroupStreak.created_at.desc())
+    )
+    out: list[dict] = []
+    for gs in streaks:
+        rows = await session.execute(
+            select(User)
+            .join(GroupStreakMember, GroupStreakMember.user_id == User.id)
+            .where(GroupStreakMember.streak_id == gs.id)
+        )
+        members = [u for (u,) in rows]
+        value = await group_streak_value(session, member_ids=[u.id for u in members])
+        out.append({"streak": gs, "members": members, "days": value})
+    return out
+
+
+async def leave_group_streak(session: AsyncSession, *, streak_id, user_id) -> bool:
+    sid, uid = _as_uuid(streak_id), _as_uuid(user_id)
+    m = await session.scalar(
+        select(GroupStreakMember).where(
+            GroupStreakMember.streak_id == sid, GroupStreakMember.user_id == uid
+        )
+    )
+    if m is None:
+        return False
+    await session.delete(m)
+    await session.flush()
+    remaining = await session.scalar(
+        select(func.count())
+        .select_from(GroupStreakMember)
+        .where(GroupStreakMember.streak_id == sid)
+    )
+    if not remaining:
+        gs = await session.get(GroupStreak, sid)
+        if gs is not None:
+            await session.delete(gs)
+        await session.flush()
+    return True

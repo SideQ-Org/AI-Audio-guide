@@ -689,6 +689,46 @@ class AppLocalizationsRu extends AppLocalizations {
   String get communityCoWalkEnterCode => 'код';
 
   @override
+  String get communityMyRoutes => 'Мои маршруты';
+
+  @override
+  String get communitySeeAll => 'Все';
+
+  @override
+  String get communityNoRoutes => 'Пока нет прогулок.';
+
+  @override
+  String get communityWhatsNew =>
+      'Новое: друзья, состязания и совместные прогулки';
+
+  @override
+  String get communityTogether => 'Вместе';
+
+  @override
+  String get communityGroupStreak => 'Общий стрик';
+
+  @override
+  String get communityGroupStreakSub => 'Держите огонёк с друзьями';
+
+  @override
+  String get communityTeamChallenge => 'Командный челлендж';
+
+  @override
+  String get communityTeamChallengeSub => 'Состязание с друзьями';
+
+  @override
+  String get communityGroupStreakPick => 'Выбери друзей для общего стрика';
+
+  @override
+  String get communityGroupStreakEmpty =>
+      'Сначала добавь друзей, чтобы создать общий стрик.';
+
+  @override
+  String communityGroupStreakDays(int days) {
+    return '$days дней вместе';
+  }
+
+  @override
   String xpValue(int n) {
     return '$n XP';
   }

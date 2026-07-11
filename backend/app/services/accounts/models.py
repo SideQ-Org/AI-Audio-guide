@@ -260,3 +260,41 @@ class ChallengeParticipant(Base):
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     challenge: Mapped[Challenge] = relationship(back_populates="participants")
+
+
+class GroupStreak(Base):
+    """A shared walking streak among friends. The streak value is DERIVED from walks
+    (consecutive days on which *every* member walked) — no counter to drift, no cron."""
+
+    __tablename__ = "group_streaks"
+
+    id: Mapped[uuid.UUID] = mapped_column(SAUuid, primary_key=True, default=uuid.uuid4)
+    creator_id: Mapped[uuid.UUID] = mapped_column(
+        SAUuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        SADateTime(timezone=True), default=_now, nullable=False
+    )
+
+    members: Mapped[list[GroupStreakMember]] = relationship(
+        back_populates="streak", cascade="all, delete-orphan"
+    )
+
+
+class GroupStreakMember(Base):
+    __tablename__ = "group_streak_members"
+    __table_args__ = (UniqueConstraint("streak_id", "user_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(SAUuid, primary_key=True, default=uuid.uuid4)
+    streak_id: Mapped[uuid.UUID] = mapped_column(
+        SAUuid, ForeignKey("group_streaks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        SAUuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    joined_at: Mapped[datetime] = mapped_column(
+        SADateTime(timezone=True), default=_now, nullable=False
+    )
+
+    streak: Mapped[GroupStreak] = relationship(back_populates="members")

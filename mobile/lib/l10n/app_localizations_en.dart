@@ -686,6 +686,45 @@ class AppLocalizationsEn extends AppLocalizations {
   String get communityCoWalkEnterCode => 'code';
 
   @override
+  String get communityMyRoutes => 'My routes';
+
+  @override
+  String get communitySeeAll => 'All';
+
+  @override
+  String get communityNoRoutes => 'No walks yet.';
+
+  @override
+  String get communityWhatsNew => 'New: friends, challenges and co-walks';
+
+  @override
+  String get communityTogether => 'Together';
+
+  @override
+  String get communityGroupStreak => 'Group streak';
+
+  @override
+  String get communityGroupStreakSub => 'Keep a streak with friends';
+
+  @override
+  String get communityTeamChallenge => 'Team challenge';
+
+  @override
+  String get communityTeamChallengeSub => 'Compete with friends';
+
+  @override
+  String get communityGroupStreakPick => 'Pick friends for the shared streak';
+
+  @override
+  String get communityGroupStreakEmpty =>
+      'Add friends first to start a group streak.';
+
+  @override
+  String communityGroupStreakDays(int days) {
+    return '$days days together';
+  }
+
+  @override
   String xpValue(int n) {
     return '$n XP';
   }

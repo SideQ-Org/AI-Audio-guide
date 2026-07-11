@@ -172,6 +172,28 @@ class CommunityApi {
     return ((j['walks'] as List?) ?? []).map((e) => FriendWalk.fromJson(e as Map<String, dynamic>)).toList();
   }
 
+  // -- my routes --
+  static Future<List<FriendWalk>> myWalks({int limit = 12}) async {
+    final j = _json(await _get('/community/my/walks?limit=$limit'));
+    return ((j['walks'] as List?) ?? []).map((e) => FriendWalk.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  // -- group streaks --
+  static Future<List<GroupStreak>> groupStreaks() async {
+    final j = _json(await _get('/community/streaks'));
+    return ((j['streaks'] as List?) ?? []).map((e) => GroupStreak.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  static Future<GroupStreak> createGroupStreak(List<String> handles, {String? title}) async {
+    final r = await _post('/community/streaks', {'handles': handles, if (title != null) 'title': title});
+    return GroupStreak.fromJson(_json(r));
+  }
+
+  static Future<void> leaveGroupStreak(String id) async {
+    final r = await _post('/community/streaks/$id/leave');
+    if (r.statusCode != 200) throw ApiException(r.statusCode, r.body);
+  }
+
   // -- challenges --
   static Future<List<Challenge>> challenges() async {
     final j = _json(await _get('/community/challenges'));
