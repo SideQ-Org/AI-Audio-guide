@@ -18,6 +18,7 @@ import '../accounts/walk_detail_screen.dart';
 import '../l10n/app_localizations.dart';
 import 'components.dart';
 import 'design.dart';
+import 'wheel_picker.dart';
 
 // Card colour — same as the Profile blocks: clean white frosted glass in light, the
 // theme glass tint in dark, no sheen (avoids the "gradient" look of the default fill).
@@ -865,10 +866,8 @@ class _AddFriendSheetState extends State<_AddFriendSheet> {
       child: Padding(
         padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).viewInsets.bottom + 24),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          Center(child: Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 16),
-              decoration: BoxDecoration(color: c.textFaint.withValues(alpha: .4), borderRadius: BorderRadius.circular(2)))),
-          Text(l.communityAddFriend, style: h2(context)),
-          const SizedBox(height: 12),
+          _SheetHeader(icon: Icons.person_add_alt_1_rounded, title: l.communityAddFriend, subtitle: l.communitySearchHandle),
+          const SizedBox(height: 14),
           Container(
             height: 50, padding: const EdgeInsets.symmetric(horizontal: 14),
             decoration: BoxDecoration(color: c.glassFill(0.05), borderRadius: BorderRadius.circular(14), border: Border.all(color: c.glassBorder)),
@@ -928,6 +927,15 @@ class _CreateChallengeSheetState extends State<_CreateChallengeSheet> {
     super.dispose();
   }
 
+  int get _goalMax => _metric == 'distance' ? 50 : (_metric == 'places' ? 100 : 20);
+
+  void _setMetric(String m) {
+    setState(() {
+      _metric = m;
+      if (_goal > _goalMax) _goal = _goalMax;
+    });
+  }
+
   Future<void> _create() async {
     if (_title.text.trim().isEmpty) return;
     setState(() => _busy = true);
@@ -948,7 +956,7 @@ class _CreateChallengeSheetState extends State<_CreateChallengeSheet> {
     Widget chip(String label, bool sel, VoidCallback onTap) => Pressable(
           onTap: onTap,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
             decoration: BoxDecoration(
               color: sel ? c.primary : c.glassFill(0.05),
               borderRadius: BorderRadius.circular(Radii.pill),
@@ -962,12 +970,10 @@ class _CreateChallengeSheetState extends State<_CreateChallengeSheet> {
       child: Padding(
         padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).viewInsets.bottom + 24),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          Center(child: Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 16),
-              decoration: BoxDecoration(color: c.textFaint.withValues(alpha: .4), borderRadius: BorderRadius.circular(2)))),
-          Text(l.communityCreateChallenge, style: h2(context)),
-          const SizedBox(height: 14),
+          _SheetHeader(icon: Icons.emoji_events_rounded, title: l.communityCreateChallenge, subtitle: l.communityTeamChallengeSub),
+          const SizedBox(height: 16),
           Container(
-            height: 50, padding: const EdgeInsets.symmetric(horizontal: 14),
+            height: 52, padding: const EdgeInsets.symmetric(horizontal: 14),
             decoration: BoxDecoration(color: c.glassFill(0.05), borderRadius: BorderRadius.circular(14), border: Border.all(color: c.glassBorder)),
             child: Center(child: TextField(
               controller: _title, autocorrect: false, cursorColor: c.primary,
@@ -977,50 +983,66 @@ class _CreateChallengeSheetState extends State<_CreateChallengeSheet> {
                   hintStyle: body(context).copyWith(color: c.textFaint, fontWeight: FontWeight.w600)),
             )),
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 16),
           Text(l.communityMetric, style: label(context).copyWith(fontSize: 12)),
           const SizedBox(height: 8),
           Wrap(spacing: 8, children: [
-            chip(l.communityMetricDistance, _metric == 'distance', () => setState(() => _metric = 'distance')),
-            chip(l.communityMetricPlaces, _metric == 'places', () => setState(() => _metric = 'places')),
-            chip(l.communityMetricDistricts, _metric == 'districts', () => setState(() => _metric = 'districts')),
+            chip(l.communityMetricDistance, _metric == 'distance', () => _setMetric('distance')),
+            chip(l.communityMetricPlaces, _metric == 'places', () => _setMetric('places')),
+            chip(l.communityMetricDistricts, _metric == 'districts', () => _setMetric('districts')),
           ]),
-          const SizedBox(height: 14),
-          Row(children: [
-            Expanded(child: _Stepper(label: l.communityGoalLabel, value: _goal, min: 1, step: _metric == 'distance' ? 1 : 1, onChanged: (v) => setState(() => _goal = v))),
+          const SizedBox(height: 16),
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(child: NumberWheel(label: l.communityGoalLabel, value: _goal, min: 1, max: _goalMax, onChanged: (v) => setState(() => _goal = v))),
             const SizedBox(width: 12),
-            Expanded(child: _Stepper(label: l.communityDaysLabel, value: _days, min: 1, max: 30, onChanged: (v) => setState(() => _days = v))),
+            Expanded(child: NumberWheel(label: l.communityDaysLabel, value: _days, min: 1, max: 30, onChanged: (v) => setState(() => _days = v))),
           ]),
           const SizedBox(height: 18),
-          AppButton(l.communityCreateChallenge, onTap: _busy ? null : _create),
+          AppButton(l.communityCreateChallenge, icon: Icons.check_rounded, onTap: _busy ? null : _create),
         ]),
       ),
     );
   }
 }
 
-class _Stepper extends StatelessWidget {
-  const _Stepper({required this.label, required this.value, required this.onChanged, this.min = 1, this.max = 999, this.step = 1});
-  final String label;
-  final int value;
-  final int min, max, step;
-  final ValueChanged<int> onChanged;
+/// Consistent polished header for the community bottom sheets: grabber + a gradient icon
+/// chip + title + subtitle.
+class _SheetHeader extends StatelessWidget {
+  const _SheetHeader({required this.icon, required this.title, this.subtitle});
+  final IconData icon;
+  final String title;
+  final String? subtitle;
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    Widget btn(IconData i, VoidCallback t) => Pressable(onTap: t, child: Icon(i, size: 22, color: c.primary));
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(label, style: caption(context)),
-      const SizedBox(height: 6),
-      Container(
-        height: 46, padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(color: c.glassFill(0.05), borderRadius: BorderRadius.circular(12), border: Border.all(color: c.glassBorder)),
-        child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          btn(Icons.remove_rounded, () { if (value - step >= min) onChanged(value - step); }),
-          Text('$value', style: titleS(context).copyWith(fontWeight: FontWeight.w800)),
-          btn(Icons.add_rounded, () { if (value + step <= max) onChanged(value + step); }),
-        ]),
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Center(
+        child: Container(
+          width: 40, height: 4, margin: const EdgeInsets.only(bottom: 16),
+          decoration: BoxDecoration(color: c.textFaint.withValues(alpha: .4), borderRadius: BorderRadius.circular(2)),
+        ),
       ),
+      Row(children: [
+        Container(
+          width: 46, height: 46, alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: LinearGradient(colors: [c.lime, c.primary]),
+            boxShadow: [BoxShadow(color: c.primary.withValues(alpha: .35), blurRadius: 14, spreadRadius: -4, offset: const Offset(0, 6))],
+          ),
+          child: Icon(icon, color: c.onPrimary, size: 24),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: h2(context).copyWith(fontSize: 19)),
+            if (subtitle != null) ...[
+              const SizedBox(height: 2),
+              Text(subtitle!, style: caption(context).copyWith(fontSize: 12.5)),
+            ],
+          ]),
+        ),
+      ]),
     ]);
   }
 }
@@ -1227,10 +1249,8 @@ class _CoWalkSheetState extends State<_CoWalkSheet> {
       child: Padding(
         padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).viewInsets.bottom + 24),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          Center(child: Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 16),
-              decoration: BoxDecoration(color: c.textFaint.withValues(alpha: .4), borderRadius: BorderRadius.circular(2)))),
-          Text(l.communityCoWalk, style: h2(context)),
-          const SizedBox(height: 6),
+          _SheetHeader(icon: Icons.directions_walk_rounded, title: l.communityCoWalk, subtitle: l.communityCoWalkSub),
+          const SizedBox(height: 14),
           Text(l.communityCoWalkExplain, style: caption(context).copyWith(fontSize: 13.5)),
           const SizedBox(height: 16),
           AppButton(l.communityCoWalkCreate, icon: Icons.add_rounded, onTap: _create),
@@ -1435,12 +1455,8 @@ class _GroupStreakSheetState extends State<_GroupStreakSheet> {
       child: Padding(
         padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).viewInsets.bottom + 24),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          Center(child: Container(width: 40, height: 4, margin: const EdgeInsets.only(bottom: 16),
-              decoration: BoxDecoration(color: c.textFaint.withValues(alpha: .4), borderRadius: BorderRadius.circular(2)))),
-          Text(l.communityGroupStreak, style: h2(context)),
-          const SizedBox(height: 6),
-          Text(l.communityGroupStreakPick, style: caption(context).copyWith(fontSize: 13.5)),
-          const SizedBox(height: 14),
+          _SheetHeader(icon: Icons.local_fire_department_rounded, title: l.communityGroupStreak, subtitle: l.communityGroupStreakPick),
+          const SizedBox(height: 16),
           if (withHandle.isEmpty)
             _MutedNote(l.communityGroupStreakEmpty)
           else
