@@ -1079,6 +1079,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (!kIsWeb) {
       await _audio.setReleaseMode(ReleaseMode.stop);
       if (defaultTargetPlatform == TargetPlatform.iOS) {
+        // NB: with the `.playback` category, A2DP Bluetooth output and AirPlay are ON by
+        // default — the explicit `allowBluetoothA2DP`/`allowAirPlay` options are ONLY valid
+        // for `playAndRecord`/`record`, and setting them here trips an audioplayers assert
+        // (debug-only, so release/TestFlight silently ignored it — but it crashed the sim).
         await _audio.setAudioContext(
           AudioContext(
             iOS: AudioContextIOS(
@@ -1086,8 +1090,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               options: const {
                 AVAudioSessionOptions.mixWithOthers,
                 AVAudioSessionOptions.duckOthers,
-                AVAudioSessionOptions.allowBluetoothA2DP,
-                AVAudioSessionOptions.allowAirPlay,
               },
             ),
           ),
