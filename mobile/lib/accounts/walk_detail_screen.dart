@@ -11,6 +11,7 @@ import '../l10n/app_localizations.dart';
 import '../map_config.dart';
 import '../ui/components.dart';
 import '../ui/design.dart';
+import '../ui/track_map.dart';
 import 'api_client.dart';
 import 'models.dart';
 
@@ -178,6 +179,29 @@ class _WalkDetailScreenState extends State<WalkDetailScreen> {
                       _WalkHeader(walk: walk, subtitle: widget.subtitle),
                       const SizedBox(height: 12),
                       _RouteMap(walk: walk, onTapEvent: (e) => _showEvent(walk, e)),
+                      if ((walk.summary ?? '').trim().isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+                          decoration: BoxDecoration(
+                            color: c.glassFill(0.05),
+                            borderRadius: BorderRadius.circular(Radii.md),
+                            border: Border.all(color: c.glassBorder),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(Icons.auto_awesome_rounded, size: 18, color: c.primary),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(walk.summary!.trim(),
+                                    style: body(context).copyWith(height: 1.5, color: c.textSecondary)),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                       if (walk.events.isEmpty)
                         Padding(
                           padding: const EdgeInsets.all(24),
@@ -302,7 +326,7 @@ class _RouteMap extends StatelessWidget {
     // stretches walked while the tour was PAUSED as a grey dashed line. Old walks (no
     // per-point flag) and the marker fallback render as a single solid line.
     final polylines = walk.path.length >= 2
-        ? _segmentedPolylines(walk.path, cs.primary)
+        ? trackPolylines(walk.path, liveColor: cs.primary)
         : (route.length >= 2
             ? [Polyline(points: route, strokeWidth: 4, color: cs.primary)]
             : <Polyline>[]);
@@ -359,37 +383,6 @@ class _RouteMap extends StatelessWidget {
     );
   }
 
-  // Grey dashed styling for the stretch walked while the tour was paused.
-  static const _pausedColor = Color(0xFF9AA0A6);
-
-  // Split the flagged path ([lat, lon, paused]) into contiguous runs of same paused
-  // state and emit one Polyline per run. Each edge i->i+1 takes the paused flag of its
-  // destination point; consecutive same-flag edges join into one line, and the boundary
-  // vertex is shared between runs so the route stays visually continuous.
-  static List<Polyline> _segmentedPolylines(List<List<double>> path, Color liveColor) {
-    bool pausedAt(int i) => path[i].length > 2 && path[i][2] == 1.0;
-    final out = <Polyline>[];
-    var i = 0;
-    while (i < path.length - 1) {
-      final paused = pausedAt(i + 1);
-      final pts = <LatLng>[LatLng(path[i][0], path[i][1])];
-      var j = i;
-      while (j < path.length - 1 && pausedAt(j + 1) == paused) {
-        j++;
-        pts.add(LatLng(path[j][0], path[j][1]));
-      }
-      out.add(Polyline(
-        points: pts,
-        strokeWidth: 4,
-        color: paused ? _pausedColor : liveColor,
-        pattern: paused
-            ? StrokePattern.dashed(segments: const [8, 6])
-            : const StrokePattern.solid(),
-      ));
-      i = j;
-    }
-    return out;
-  }
 }
 
 class _EventTile extends StatelessWidget {

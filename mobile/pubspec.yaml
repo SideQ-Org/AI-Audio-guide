@@ -1,7 +1,7 @@
 name: ai_audio_guide
 description: AI Audio Guide — real-time autonomous walking tour client.
 publish_to: "none"
-version: 0.0.1+1
+version: 0.1.0+2
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -14,7 +14,8 @@ dependencies:
   intl: ^0.20.2             # ICU message formatting for the generated AppLocalizations
   web_socket_channel: ^3.0.1
   geolocator: ^13.0.1
-  flutter_tts: ^4.2.0       # on-device TTS — the guide speaks the narration aloud
+  flutter_tts: ^4.2.0       # on-device TTS — free tier speaks the narration aloud
+  audioplayers: ^6.1.0      # plays server-synthesized neural voice (paid tier) from bytes
   record: ^7.0.0            # mic capture for voice barge-in (7.x: internally consistent federated set)
   path_provider: ^2.1.4     # temp dir for the recorded clip
   flutter_map: ^8.0.0       # open-source map (Leaflet-like, pure Dart, no API key)
@@ -26,6 +27,10 @@ dependencies:
   http: ^1.2.2               # REST calls to the walk-history endpoints (/me, /walks)
   in_app_purchase: ^3.2.0    # paid tier: Google Play Billing / StoreKit subscriptions
   google_mobile_ads: ^5.1.0  # free tier: rewarded/interstitial video ads (pre-roll + mid-tour)
+  google_fonts: ^6.2.1       # premium redesign: Manrope UI font (runtime-fetched + cached)
+  qr_flutter: ^4.1.0         # invite screen: referral QR code (offline render)
+  share_plus: ^10.1.1        # invite screen: native share sheet for the invite link
+  image_picker: ^1.1.2       # create-account: pick a profile avatar from the gallery
 
 dev_dependencies:
   flutter_test:
@@ -35,3 +40,10 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   generate: true            # run gen-l10n from lib/l10n/*.arb on build
+  assets:
+    # Bundled Manrope (OFL) static weights — google_fonts loads these from assets
+    # instead of fetching over the network, so the UI font works fully offline.
+    - assets/google_fonts/
+    # Default profile avatar (illustrated backpacker) shown when the user hasn't
+    # picked one of their own.
+    - assets/avatar_traveler.png

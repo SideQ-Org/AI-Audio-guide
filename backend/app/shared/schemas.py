@@ -142,7 +142,25 @@ class NarratorFlags(BaseModel):
     # higher-priority object finished). Frame it in the past ("мы прошли …"), never "проходишь
     # мимо". `passing` stays true so the never-dead-air floor still applies.
     passed: bool = False
+    # The walker RETURNED to a place told earlier this walk — acknowledge it briefly and add a
+    # FRESH detail (see the REVISIT block), never re-tell what HISTORY already covered.
+    revisit: bool = False
     preferences: ControlPatch | None = None
+
+
+class CallbackRef(BaseModel):
+    """A pointer to an earlier-narrated object worth referencing when telling a related one."""
+
+    name: str
+    category: str = ""
+
+
+class LookaheadRef(BaseModel):
+    """A notable object coming up ahead — lets the narrator tease it ('впереди — усадьба, к ней
+    вернёмся') so the tour reads as a forward-leaning story, not a stream of arrivals."""
+
+    name: str
+    category: str = ""
 
 
 class NarratorInput(BaseModel):
@@ -164,6 +182,11 @@ class NarratorInput(BaseModel):
     theme: str | None = None  # the through-line to keep the object inside
     told: list[str] = Field(default_factory=list)  # topics/places already covered (don't repeat)
     next_hook: str | None = None  # the transition the previous paragraph set up
+    # An earlier-narrated object this one relates to — lets the narrator weave a brief callback
+    # ("как та церковь, что мы видели раньше…") for a coherent story instead of disconnected blurbs.
+    callback: CallbackRef | None = None
+    # A notable object coming up ahead — the narrator may tease it so the tour leans forward.
+    lookahead: LookaheadRef | None = None
     language: str = "ru"
 
 
@@ -273,6 +296,10 @@ class SessionState(BaseModel):
     # A point walked while the tour is PAUSED carries a trailing 1.0 ([lat, lon, 1.0]) so
     # the history map can style that stretch differently; unpaused points stay 2-element.
     path: list[list[float]] = Field(default_factory=list)
+    # Cumulative distance walked along the route (metres), accumulated with the breadcrumb.
+    # Used as the revisit gate: an object is only re-narrated once the walker has covered this
+    # much route SINCE it was told, so "снова тут" never fires right after the main narration.
+    route_len_m: float = 0.0
     heading: Heading = Field(default_factory=Heading)
     pace: Pace = Pace.SLOW
     address: Address = Field(default_factory=Address)
@@ -402,16 +429,25 @@ class WSNarration(BaseModel):
     text: str
     place_id: str | None = None
     final: bool = False
-
-
-class WSAudioChunk(BaseModel):
-    type: Literal["audio"] = "audio"
-    data_b64: str
-    seq: int
+    # PAID sessions with neural TTS on: the spoken audio for `text`, base64-encoded, so the
+    # client plays it instead of speaking with its on-device voice. Absent => client speaks
+    # the text with flutter_tts (free tier / TTS off / synth failed).
+    audio_b64: str | None = None
+    audio_mime: str | None = None  # e.g. "audio/mpeg"
 
 
 class WSReply(BaseModel):
     type: Literal["reply"] = "reply"
+    text: str
+    # Same optional neural audio as WSNarration (a spoken barge-in answer).
+    audio_b64: str | None = None
+    audio_mime: str | None = None
+
+
+class WSSummary(BaseModel):
+    """Structured end-of-walk recap, pushed after `end` (kept walk) for the Stop sheet."""
+
+    type: Literal["summary"] = "summary"
     text: str
 
 

@@ -6,6 +6,7 @@
 class UserProfile {
   final String id;
   final String? email;
+  final String? displayName; // user-chosen nickname (backend `display_name`)
   final String tier; // "free" | "paid"
   final int toursToday;
   final int? dailyTourLimit; // null => unlimited
@@ -19,6 +20,7 @@ class UserProfile {
     required this.toursToday,
     required this.walkCount,
     this.email,
+    this.displayName,
     this.dailyTourLimit,
     this.walkLimit,
     this.subscriptionExpiresAt,
@@ -38,6 +40,7 @@ class UserProfile {
   factory UserProfile.fromJson(Map<String, dynamic> j) => UserProfile(
         id: j['id'] as String,
         email: j['email'] as String?,
+        displayName: j['display_name'] as String?,
         tier: j['tier'] as String? ?? 'free',
         toursToday: (j['tours_today'] as num?)?.toInt() ?? 0,
         dailyTourLimit: (j['daily_tour_limit'] as num?)?.toInt(),
@@ -48,6 +51,18 @@ class UserProfile {
             : DateTime.parse(j['subscription_expires_at'] as String),
       );
 }
+
+/// Parse a GPS route JSON `[[lat, lon(, paused)], ...]` into `[[lat, lon, paused]]` (paused=0.0
+/// on unpaused/legacy points). Shared by WalkSummary (downsampled preview) and WalkDetail (full).
+List<List<double>> _parsePath(dynamic raw) => ((raw as List?) ?? [])
+    .whereType<List>()
+    .where((p) => p.length >= 2)
+    .map((p) => [
+          (p[0] as num).toDouble(),
+          (p[1] as num).toDouble(),
+          if (p.length > 2) (p[2] as num).toDouble() else 0.0,
+        ])
+    .toList();
 
 class WalkSummary {
   final String id;
@@ -60,6 +75,10 @@ class WalkSummary {
   final int objectCount;
   final String? title;
 
+  /// Downsampled GPS route ([[lat, lon, paused]]) for the history-list track preview. Empty for
+  /// walks recorded before the route feature (the tile then falls back to a plain route icon).
+  final List<List<double>> path;
+
   WalkSummary({
     required this.id,
     required this.startedAt,
@@ -70,6 +89,7 @@ class WalkSummary {
     this.district,
     this.distanceM,
     this.title,
+    this.path = const [],
   });
 
   factory WalkSummary.fromJson(Map<String, dynamic> j) => WalkSummary(
@@ -84,6 +104,7 @@ class WalkSummary {
         distanceM: (j['distance_m'] as num?)?.toInt(),
         objectCount: (j['object_count'] as num?)?.toInt() ?? 0,
         title: j['title'] as String?,
+        path: _parsePath(j['path']),
       );
 
   /// Best-effort duration between start and last activity.
@@ -129,11 +150,10 @@ class WalkEventItem {
 class WalkDetail extends WalkSummary {
   final List<WalkEventItem> events;
 
-  /// Downsampled GPS route as [[lat, lon], ...]. A point walked while the tour was
-  /// PAUSED carries a trailing 1.0 ([lat, lon, 1.0]) so the detail map can style that
-  /// stretch; unpaused points stay 2-element. Empty for walks recorded before the route
-  /// feature (the detail screen then falls back to place markers only).
-  final List<List<double>> path;
+  // `path` (the full route here, vs the list's downsampled preview) is inherited from WalkSummary.
+
+  /// Structured end-of-walk recap (kept server-side; null for old walks / when generation failed).
+  final String? summary;
 
   WalkDetail({
     required super.id,
@@ -141,7 +161,8 @@ class WalkDetail extends WalkSummary {
     required super.language,
     required super.objectCount,
     required this.events,
-    this.path = const [],
+    this.summary,
+    super.path,
     super.endedAt,
     super.city,
     super.district,
@@ -164,15 +185,7 @@ class WalkDetail extends WalkSummary {
         events: ((j['events'] as List?) ?? [])
             .map((e) => WalkEventItem.fromJson(e as Map<String, dynamic>))
             .toList(),
-        path: ((j['path'] as List?) ?? [])
-            .whereType<List>()
-            .where((p) => p.length >= 2)
-            .map((p) => [
-                  (p[0] as num).toDouble(),
-                  (p[1] as num).toDouble(),
-                  // paused flag (3rd element); absent on unpaused/legacy points -> 0.0
-                  if (p.length > 2) (p[2] as num).toDouble() else 0.0,
-                ])
-            .toList(),
+        path: _parsePath(j['path']),
+        summary: (j['summary'] as String?)?.trim(),
       );
 }

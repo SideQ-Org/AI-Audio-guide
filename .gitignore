@@ -41,7 +41,11 @@ guide-backend.tgz
 /MEMORY_GRAPH_DESIGN.md
 /WALK_LOG_*.md
 /prod_walk_*.log
+/prod_w*.log
+/prod_weave*.log
 /simulator_screenshot_*.png
+/Gemini_Generated_Image*.png
+/Снимок экрана*.png
 /.claude/
 
 # Operational handoff docs — contain prod IP / SSH workflow / test-account creds; keep

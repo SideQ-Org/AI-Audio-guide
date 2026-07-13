@@ -5,6 +5,8 @@
 
 import 'package:flutter/material.dart';
 
+import '../ui/design.dart';
+
 /// A deeper tail for the hero gradient, derived from the accent so it works in both
 /// themes without pulling in main.dart's private brand constants.
 Color _accentDeep(ColorScheme cs) =>
@@ -35,60 +37,50 @@ class AuthScaffold extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     final canPop = !isGate && Navigator.of(context).canPop();
     // When the keyboard is up, collapse the hero so both input fields stay in view.
     final compact = MediaQuery.of(context).viewInsets.bottom > 0;
     return Scaffold(
-      body: AbsorbPointer(
-        absorbing: busy,
-        child: CustomScrollView(
-          slivers: [
-            SliverToBoxAdapter(
-              child: _Hero(
-                glyph: glyph,
-                title: title,
-                subtitle: subtitle,
-                compact: compact,
-                onBack: canPop ? () => Navigator.of(context).maybePop() : null,
+      backgroundColor: Colors.transparent,
+      body: GradientBackground(
+        child: AbsorbPointer(
+          absorbing: busy,
+          child: CustomScrollView(
+            slivers: [
+              SliverToBoxAdapter(
+                child: _Hero(
+                  glyph: glyph,
+                  title: title,
+                  subtitle: subtitle,
+                  compact: compact,
+                  onBack: canPop ? () => Navigator.of(context).maybePop() : null,
+                ),
               ),
-            ),
-            SliverFillRemaining(
-              hasScrollBody: false,
-              child: Transform.translate(
-                // Overlap the hero's rounded base for a layered, card-on-hero look.
-                offset: const Offset(0, -24),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
-                  child: Container(
-                    padding: const EdgeInsets.fromLTRB(20, 24, 20, 24),
-                    decoration: BoxDecoration(
-                      color: cs.surface,
-                      borderRadius: BorderRadius.circular(24),
-                      border: Border.all(color: cs.outlineVariant),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.10),
-                          blurRadius: 24,
-                          spreadRadius: -8,
-                          offset: const Offset(0, 12),
+              SliverFillRemaining(
+                hasScrollBody: false,
+                child: Transform.translate(
+                  // Overlap the hero's rounded base for a layered, card-on-hero look.
+                  offset: const Offset(0, -24),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+                    child: GlassModule(
+                      radius: Radii.xl,
+                      padding: const EdgeInsets.fromLTRB(20, 24, 20, 24),
+                      child: AnimatedOpacity(
+                        opacity: busy ? 0.6 : 1,
+                        duration: const Duration(milliseconds: 150),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: children,
                         ),
-                      ],
-                    ),
-                    child: AnimatedOpacity(
-                      opacity: busy ? 0.6 : 1,
-                      duration: const Duration(milliseconds: 150),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        mainAxisSize: MainAxisSize.min,
-                        children: children,
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

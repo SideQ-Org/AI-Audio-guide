@@ -25,12 +25,18 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.services.accounts.api import router as accounts_router
-from app.services.accounts.community_api import router as community_router
 from app.services.accounts.auth import verify_token
+from app.services.accounts.community_api import router as community_router
+from app.services.agent.companion import heuristic_patch
 from app.services.agent.factory import build_orchestrator
-from app.services.agent.languages import normalize, stt_unclear
+from app.services.agent.languages import normalize, stt_unclear, tour_bridge
 from app.services.agent.narration_schedule import NarrationScheduler
-from app.services.agent.orchestrator import Orchestrator, OrchestratorOutput, merge_patch
+from app.services.agent.orchestrator import (
+    Orchestrator,
+    OrchestratorOutput,
+    State,
+    merge_patch,
+)
 from app.services.agent.walklog import get_logger
 from app.services.billing.api import router as billing_router
 from app.services.llm.client import METER, SESSION_ID, SESSION_TIER
@@ -121,6 +127,33 @@ async def _load_entitlement(user_id: str) -> tuple[str, int]:
         return "free", 0
 
 
+async def _discard_walk(orch, session_id: str, user_id: str | None) -> None:
+    """Delete the walk persisted for this session (a too-short walk the client asked to
+    discard) and clear it off the SessionState so it can't be reused. Best-effort: a
+    guest, a base install, or any DB hiccup just no-ops — the tour is never affected."""
+    if not user_id:
+        return
+    try:
+        from app.services.accounts import repository as repo
+        from app.services.accounts.db import accounts_enabled, session_scope
+
+        if not accounts_enabled():
+            return
+        state = await orch.store.load(session_id)
+        walk_id = getattr(state, "walk_id", None)
+        if not walk_id:
+            return
+        async with session_scope() as session:
+            await repo.delete_walk(session, walk_id=walk_id, user_id=user_id)
+        # Clear so a resumed/continued session starts a fresh walk rather than re-using
+        # (and re-persisting) the just-deleted one.
+        state.walk_id = None
+        state.walk_last_event_at = None
+        await orch.store.save(state)
+    except Exception as e:  # noqa: BLE001 — discard is best-effort; never break the socket
+        _log.warning("discard walk failed for session %s: %r", session_id, e)
+
+
 async def get_stt() -> STTClient:
     """Build the STT client off the event loop. ``faster-whisper`` model load is a
     synchronous, multi-second (first-run: multi-minute download) operation — running
@@ -147,6 +180,38 @@ async def _warm_stt() -> None:
             pass
 
     asyncio.create_task(_load())
+
+
+@app.on_event("startup")
+async def _warm_db_pool() -> None:
+    """Keep the durable-layer connection pool warm. The Supabase pooler sits ~190 ms RTT away
+    (eu-central-1), so opening a fresh connection costs ~3.8 s — a cold pool would make the first
+    /me + /community/* load after any idle gap pay that. Pre-open the pool at boot and re-touch it
+    every 60 s (under pool_recycle) so real requests always find a warm, fresh connection; the
+    keepalive also doubles as liveness (we run without pool_pre_ping). Best-effort; never fatal."""
+    from sqlalchemy import text
+
+    try:
+        from app.services.accounts.db import accounts_enabled, session_scope
+    except Exception:  # noqa: BLE001 — durable extra not installed
+        return
+    if not accounts_enabled():
+        return
+
+    async def _ping() -> None:
+        async with session_scope() as s:
+            await s.execute(text("select 1"))
+
+    async def _keepalive() -> None:
+        # Five concurrent pings so every core pooled connection (pool_size=5) stays warm + fresh.
+        while True:
+            try:
+                await asyncio.gather(*[_ping() for _ in range(5)], return_exceptions=True)
+            except Exception:  # noqa: BLE001 — pool warming must never crash the app
+                pass
+            await asyncio.sleep(60)
+
+    asyncio.create_task(_keepalive())
 
 
 @app.on_event("startup")
@@ -262,7 +327,28 @@ async def index() -> HTMLResponse:
     return HTMLResponse("<h1>AI Audio Guide backend</h1><p>See /health</p>")
 
 
-async def _send(ws: WebSocket, out: OrchestratorOutput) -> None:
+async def _synth_audio(text: str, tier: str, language: str) -> tuple[str | None, str | None]:
+    """Neural TTS for a spoken line -> (base64, mime), or (None, None) to fall back to the
+    client's on-device voice. Off unless TTS is configured AND the tier qualifies; any error
+    inside ``synth`` already degrades to None, so this never breaks the tour. Usually a cache
+    hit — the sentence was pre-synthesized on the approach (see _prewarm_audio)."""
+    from app.services.tts.tts import get_tts, should_synth, voice_for
+
+    if not should_synth(tier):
+        return None, None
+    tts = get_tts()
+    audio = await tts.synth(text, voice=voice_for(language), language=language)
+    if not audio:
+        return None, None
+    return base64.b64encode(audio).decode("ascii"), getattr(tts, "mime", "audio/mpeg")
+
+
+async def _send(
+    ws: WebSocket,
+    out: OrchestratorOutput,
+    audio_b64: str | None = None,
+    audio_mime: str | None = None,
+) -> None:
     await ws.send_json({"type": "state", "state": out.state})
     # Defense in depth: never ship the [SILENCE] sentinel to the client TTS. The
     # narration pipeline normalizes it away (split_hook), but guard the wire too.
@@ -276,10 +362,16 @@ async def _send(ws: WebSocket, out: OrchestratorOutput) -> None:
                 "lat": out.lat,
                 "lon": out.lon,
                 "final": True,
+                # Neural audio for this sentence (PAID + TTS on); absent => client speaks
+                # the text with its on-device voice.
+                "audio_b64": audio_b64,
+                "audio_mime": audio_mime,
             }
         )
     elif out.kind == "reply" and out.text:
-        await ws.send_json({"type": "reply", "text": out.text})
+        await ws.send_json(
+            {"type": "reply", "text": out.text, "audio_b64": audio_b64, "audio_mime": audio_mime}
+        )
 
 
 class _SessionRuntime:
@@ -321,12 +413,18 @@ class _SessionRuntime:
         # the interrupted line resumes afterwards. `pending_insert` = a fresh bubble object
         # (id, significance) flagged by peek_bubble, consumed at the next boundary.
         self.sched = NarrationScheduler(settings.default_language)
+        self._presynth_tasks: set[asyncio.Task] = set()  # bg TTS pre-warm task refs
         self.language = settings.default_language
         self.pending_insert: tuple[str, object] | None = None
         self._insert_id: str | None = None  # debounce: don't re-flag the same object
         # A newcomer we deferred because the object we're narrating outranks it — covered
         # briefly ("кстати, мы прошли …") once the current object is fully told.
         self.deferred_object: str | None = None
+        # After a barge-in answer or an un-pause, speak one short "back to the tour" bridge
+        # (resume the same topic if still relevant, else lead into fresh material). `_bridge_i`
+        # rotates the phrase so it doesn't repeat.
+        self._break_bridge = False
+        self._bridge_i = 0
         self.resume = asyncio.Event()  # a barge-in finished; producer may continue
         self.barging = False
         self.listening = False  # mic open: hold the producer so it can't talk over the user
@@ -391,12 +489,55 @@ class _SessionRuntime:
         return True
 
     async def send_out(self, out: OrchestratorOutput) -> None:
+        # Synthesize neural audio BEFORE taking the send lock — an ~sub-second HTTP call must
+        # not block heartbeat pings / state frames on the same socket. No-op (returns None)
+        # for free tier or when TTS is off, so the default path is unchanged. Usually a cache
+        # hit: the sentence was pre-synthesized by _present/warm_narration on the approach.
+        audio_b64 = audio_mime = None
+        if out.kind in ("narration", "reply") and out.text and out.text.strip() != "[SILENCE]":
+            audio_b64, audio_mime = await _synth_audio(out.text, self.tier, self.language)
         async with self.send_lock:
-            await _send(self.ws, out)
+            await _send(self.ws, out, audio_b64, audio_mime)
+
+    def _present(self, out: OrchestratorOutput) -> None:
+        """Make `out` the current line AND pre-synthesize all its sentences in the background,
+        so per-sentence `send_out` hits the TTS cache instead of a fresh network round-trip.
+        This is what removes the inter-sentence gap under neural TTS: while sentence 1 is being
+        spoken, sentences 2..N are already being synthesized. No-op unless TTS+tier qualify."""
+        self.sched.set_current(out)
+        cur = self.sched.current
+        if cur is not None:
+            self._prewarm_audio(cur.sentences)
+
+    def _prewarm_audio(self, sentences: list[str]) -> None:
+        from app.services.tts.tts import get_tts, should_synth, voice_for
+
+        if not settings.tts_presynth or not should_synth(self.tier):
+            return
+        tts, voice = get_tts(), voice_for(self.language)
+        for s in sentences:
+            if not s or not s.strip():
+                continue
+            task = asyncio.ensure_future(tts.synth(s, voice=voice, language=self.language))
+            self._presynth_tasks.add(task)
+            task.add_done_callback(self._presynth_tasks.discard)
 
     async def send_json(self, obj: dict) -> None:
         async with self.send_lock:
             await self.ws.send_json(obj)
+
+    async def send_walk_summary(self) -> None:
+        """Generate the end-of-walk structured recap and push it to the client (Stop sheet)."""
+        SESSION_ID.set(self.session_id)  # attribute the summary's LLM cost to this session
+        SESSION_TIER.set(self.tier)  # tier -> model routing for the recap
+        try:
+            text = await self.orch.summarize(self.session_id)
+        except Exception as e:  # noqa: BLE001 — a failed recap must never break the end flow
+            _log.warning("summary failed (%s): %s", self.session_id, e)
+            return
+        if text:
+            with contextlib.suppress(Exception):
+                await self.send_json({"type": "summary", "text": text})
 
     async def run_heartbeat(self) -> None:
         """App-level keepalive. A periodic ping keeps mobile-carrier NAT / proxy
@@ -471,6 +612,32 @@ class _SessionRuntime:
         SESSION_ID.set(self.session_id)  # attribute LLM cost to this session
         SESSION_TIER.set(self.tier)  # tier -> model + enrichment for this turn
 
+        # 0) Just back from a question or an un-pause? Lead back into the tour with ONE short
+        #    spoken bridge. Return to the same topic if it's still relevant (we're within the
+        #    resume radius of where we paused — a narrated object goes stale fast, an area/
+        #    district line stays relevant longer), else drop it and move on to fresh material.
+        if self._break_bridge:
+            self._break_bridge = False
+            top = self.sched.top_paused()
+            radius = settings.resume_bridge_area_radius_m
+            if top is not None and top.is_object:
+                radius = settings.resume_bridge_obj_radius_m
+            relevant = top is not None and self.sched.resumable(self.live_position, radius)
+            if relevant:
+                self.sched.resume(self.live_position, radius, add_connective=False)
+            else:
+                self.sched.drop_paused()
+            mode = "continue" if relevant else "onward"
+            bridge = OrchestratorOutput(
+                state=State.NARRATING.value,
+                kind="narration",
+                text=tour_bridge(self.language, self._bridge_i, mode),
+            )
+            self._bridge_i += 1
+            await self.send_out(bridge)
+            await self._wait_played(bridge.text)
+            return
+
         # 1) A fresh bubble object to weave in at this sentence boundary?
         ins = self.pending_insert
         if ins is not None:
@@ -488,7 +655,7 @@ class _SessionRuntime:
                 self.sched.pause_current(self.live_position)
                 obj = await self.orch.narrate_object(self.session_id, obj_id)
                 if obj.kind == "narration" and obj.text:
-                    self.sched.set_current(obj)
+                    self._present(obj)
                     _walk.info("weave: inserted object %s", obj_id)
 
         # 2) Speak the next sentence of the current line (never cut — it always finishes),
@@ -501,7 +668,7 @@ class _SessionRuntime:
             dobj, self.deferred_object = self.deferred_object, None
             out = await self.orch.narrate_object(self.session_id, dobj, passed=True)
             if out.kind == "narration" and out.text:
-                self.sched.set_current(out)
+                self._present(out)
                 frame = self.sched.next_frame()
         if frame is not None:
             await self.send_out(frame)
@@ -526,7 +693,7 @@ class _SessionRuntime:
             )
         await self._maybe_send_places()
         if out.kind == "narration" and out.text:
-            self.sched.set_current(out)
+            self._present(out)
             if out.place_id is None:  # an area beat (not an object) -> warm the next one
                 self._start_area_prefetch()
             frame = self.sched.next_frame()
@@ -662,6 +829,9 @@ class _SessionRuntime:
         _walk.info("pause session=%s", self.session_id)
         if self.step_task is not None and not self.step_task.done():
             self.step_task.cancel()  # drop the in-flight step (nothing is persisted mid-step)
+        # Park the current line so an un-pause returns to it via a bridge (if still relevant).
+        if settings.resume_bridge:
+            self.sched.pause_current(self.live_position)
         with contextlib.suppress(Exception):
             await self.send_json({"type": "state", "state": "paused"})
 
@@ -671,8 +841,38 @@ class _SessionRuntime:
             return
         self.paused = False
         self.paused_gate.set()
+        if settings.resume_bridge:
+            self._break_bridge = True  # lead back into the tour with a spoken bridge
         _walk.info("resume session=%s", self.session_id)
         self.wake.set()  # re-evaluate context now that we're live again
+
+    async def _answer_streaming(self, text: str) -> bool:
+        """Stream the Companion reply, speaking each sentence as it lands — barge-in latency:
+        first audio in ~2 s instead of ~8 s for the whole answer. Returns True if it handled
+        the answer; False (having emitted nothing) so handle_question falls back to the
+        single-shot JSON path (also the route for a non-streaming backend / disabled flag).
+        A mid-stream failure after ≥1 sentence still finalizes with what was already said."""
+        companion = self.orch.companion
+        if not settings.companion_stream or not hasattr(companion, "respond_stream"):
+            return False
+        st, cinp = await self.orch.prepare_utterance(self.session_id, text)
+        sentences: list[str] = []
+        try:
+            async for sent in companion.respond_stream(cinp):
+                sentences.append(sent)
+                await self.send_out(
+                    OrchestratorOutput(state=State.ANSWERING.value, kind="reply", text=sent)
+                )
+        except Exception as e:  # noqa: BLE001 — degrade to the fallback / partial answer
+            if not sentences:
+                _log.warning("companion stream failed pre-token (%s): %r", self.session_id, e)
+                return False  # nothing spoken yet -> safe to fall back to the JSON path
+            _log.warning("companion stream cut mid-reply (%s): %r", self.session_id, e)
+        reply = " ".join(sentences).strip()
+        if not reply:
+            return False
+        await self.orch.finalize_utterance(st, text, reply, heuristic_patch(text))
+        return True
 
     async def handle_question(self, msg: dict, kind: str) -> None:
         """Top-priority barge-in: cancel the producer's current step, answer now."""
@@ -683,6 +883,10 @@ class _SessionRuntime:
         SESSION_TIER.set(self.tier)  # tier -> model + enrichment for this answer
         if self.step_task is not None and not self.step_task.done():
             self.step_task.cancel()
+        # Park whatever we were narrating so the post-answer bridge can return to it (if it's
+        # still relevant) instead of jump-cutting back into the middle of a topic.
+        if settings.resume_bridge:
+            self.sched.pause_current(self.live_position)
         try:
             if kind == "audio":
                 a = WSAudioInput.model_validate(msg)
@@ -699,8 +903,9 @@ class _SessionRuntime:
                     return
             else:
                 text = WSUserUtterance.model_validate(msg).text
-            out = await self.orch.on_utterance(self.session_id, text)
-            await self.send_out(out)
+            if not await self._answer_streaming(text):
+                out = await self.orch.on_utterance(self.session_id, text)
+                await self.send_out(out)
         except Exception as e:  # noqa: BLE001 — a failed question must not drop the session
             _counters["question_errors"] += 1
             _log.warning("question handling failed (%s): %r", self.session_id, e)
@@ -709,6 +914,8 @@ class _SessionRuntime:
                 await self.send_json({"type": "error", "message": stt_unclear(st.language)})
         finally:
             self.listening = False
+            if settings.resume_bridge:
+                self._break_bridge = True  # producer leads back in with a bridge
             self.resume.set()  # let the producer continue regardless
 
 
@@ -887,6 +1094,17 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
         await rt.pause_tour()
     elif kind == "resume":
         rt.resume_tour()
+    elif kind == "end":
+        # Client tapped Stop. Halt the tour; if it asks to discard (walk was shorter
+        # than the client's record threshold, e.g. <10 min), drop the persisted walk
+        # so short sessions aren't recorded (design: "менее 10 минут не записываем").
+        await rt.pause_tour()
+        if msg.get("discard"):
+            await _discard_walk(orch, rt.session_id, rt.user_id)
+        else:
+            # A kept walk: generate the structured recap in the background and push it to the
+            # Stop sheet when ready (the sheet shows a spinner until it arrives).
+            asyncio.ensure_future(rt.send_walk_summary())
     elif kind in ("utterance", "audio"):
         await rt.handle_question(msg, kind)
     elif kind == "auth":

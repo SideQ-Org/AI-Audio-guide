@@ -74,9 +74,13 @@ class _CommunityScreenState extends State<CommunityScreen> {
   }
 
   Future<_CommunityData> _load() async {
-    // `me` is required (identifies the account); if IT fails, show the error card.
-    final me = await CommunityApi.me();
     final paid = AuthService.instance.isPaid;
+    // `me` is required (identifies the account); if IT fails, show the error card. Fire it
+    // ALONGSIDE the rest (not in a first, separate await) so all requests open pooled DB
+    // connections in one wave — awaiting me first cost a whole extra cold round-trip to the
+    // (remote) Supabase pooler on the first load. We await its result last, so a failure still
+    // surfaces as the error card exactly as before.
+    final meF = CommunityApi.me();
     // Every other section loads independently — one flaky/slow endpoint must NOT blank
     // the whole tab (it just renders that section empty).
     Future<T> safe<T>(Future<T> f, T fallback) => f.catchError((_) => fallback);
@@ -89,6 +93,7 @@ class _CommunityScreenState extends State<CommunityScreen> {
       safe(CommunityApi.feed(limit: 20), <FeedItem>[]),
       safe(CommunityApi.requests(), const FriendRequests()),
     ]);
+    final me = await meF;  // awaited last: a failure here still shows the error card
     return _CommunityData(
       me,
       r[0] as List<Challenge>,

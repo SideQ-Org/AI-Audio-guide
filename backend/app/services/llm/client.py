@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from typing import Any, Protocol
 
@@ -87,6 +88,15 @@ class TokenMeter:
     def note_failure(self) -> None:
         self.errors += 1
         self.consecutive_failures += 1
+
+    def record_tts(self, chars: int, price_per_mchar: float) -> None:
+        """Account for neural-TTS spend (char-based) in the same running total as LLM
+        cost, so ``over_hard_cap`` gates audio synthesis too. Attributed to the session."""
+        cost = chars / 1e6 * price_per_mchar
+        self.est_cost += cost
+        sid = SESSION_ID.get()
+        if sid and sid in self.by_session:
+            self.by_session[sid]["cost"] += cost
 
     def _attribute(self, ti: int, to: int, usage: dict[str, Any]) -> None:
         sid = SESSION_ID.get()
@@ -285,9 +295,16 @@ class OpenAICompatLLM:
         )
 
     def _model_for(self, role: Role) -> str:
-        # Paid sessions use the premium model on every role (feature: account tiers).
-        # When openai_model_paid is unset, tiers are off and everyone gets the base path.
-        if SESSION_TIER.get() == "paid" and settings.openai_model_paid:
+        # Paid sessions use the premium model on every role (feature: account tiers) — EXCEPT the
+        # barge-in Companion, which stays on the fast base/override model so a voice answer comes
+        # back quickly (~3 s vs ~9 s). Its context (last narration, address, theme, conversation)
+        # is all in the prompt, so a lighter model still answers in-context. When openai_model_paid
+        # is unset, tiers are off and everyone gets the base path.
+        if (
+            SESSION_TIER.get() == "paid"
+            and settings.openai_model_paid
+            and role is not Role.COMPANION
+        ):
             return settings.openai_model_paid
         override = {
             Role.SCORER: settings.openai_model_scorer,
@@ -371,22 +388,28 @@ class OpenAICompatLLM:
         return data["choices"][0]["message"]["content"].strip()
 
     async def _post_with_retry(self, payload: dict, role: Role) -> dict:
-        """POST with one retry on a transient failure (timeout / 5xx). 4xx (e.g. a
-        region block or bad request) is not retried — that just wastes a call."""
-        for attempt in range(2):
+        """POST with retries on a transient failure (timeout / 5xx / 429). A 429 (rate limit —
+        common now that STT+TTS+LLM share one OpenRouter key) clears with backoff, so it IS
+        retried; other 4xx (region block / bad request) is not — that just wastes a call."""
+        attempts = 3
+        for attempt in range(attempts):
             try:
                 resp = await self._client.post(self._url, json=payload)
                 resp.raise_for_status()
                 return resp.json()
             except (httpx.TimeoutException, httpx.TransportError) as e:
-                if attempt == 1:
+                if attempt == attempts - 1:
                     raise
                 _log.warning("LLM %s transient error, retrying: %s", role, e)
+                await asyncio.sleep(0.6 * (attempt + 1))
             except httpx.HTTPStatusError as e:
-                if attempt == 1 or e.response.status_code < 500:
-                    raise  # 4xx won't get better on retry
-                _log.warning("LLM %s %s, retrying", role, e.response.status_code)
-            await asyncio.sleep(0.6 * (attempt + 1))
+                code = e.response.status_code
+                retryable = code >= 500 or code == 429
+                if attempt == attempts - 1 or not retryable:
+                    raise  # 4xx (except 429) won't get better on retry
+                _log.warning("LLM %s %s, retrying", role, code)
+                # 429 = rate limit; back off harder than a 5xx blip.
+                await asyncio.sleep((1.5 if code == 429 else 0.6) * (attempt + 1))
         raise RuntimeError("unreachable")
 
     @staticmethod
@@ -432,6 +455,53 @@ class OpenAICompatLLM:
             guard = f"{user}\n\nВерни строго валидный JSON по схеме, без markdown."
             text = await self._chat(role, system, guard, max_tokens, temperature=0)
             return _parse_json(text)
+
+    async def stream_text(
+        self, role: Role, system: str, user: str, *, max_tokens: int = 512
+    ) -> AsyncIterator[str]:
+        """Stream a text completion, yielding content deltas as they arrive — so the barge-in
+        Companion can speak its FIRST sentence within ~2 s instead of after the whole answer.
+        Usage is metered from the final chunk (stream_options.include_usage). Any error
+        propagates so the caller can fall back to the non-streaming path."""
+        if METER.over_hard_cap():
+            raise BudgetExceeded(f"spend cap ${settings.usd_hard_cap:.2f} reached")
+        model = self._model_for(role)
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [self._system_msg(system), {"role": "user", "content": user}],
+            "max_tokens": max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            **self._sampling_for(role),
+        }
+        reasoning = self._reasoning_for(role)
+        if reasoning:
+            payload["reasoning"] = reasoning
+        usage: dict[str, Any] | None = None
+        try:
+            async with self._client.stream("POST", self._url, json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if chunk.get("usage"):
+                        usage = chunk["usage"]
+                    choices = chunk.get("choices") or []
+                    if choices:
+                        piece = (choices[0].get("delta") or {}).get("content")
+                        if piece:
+                            yield piece
+        except Exception:
+            METER.note_failure()  # feeds /ready + error counters
+            raise
+        METER.record(role, model, usage)
 
     async def web_facts(
         self, system: str, user: str, *, max_results: int = 3, max_tokens: int = 400

@@ -176,6 +176,55 @@ class AppLocalizationsEn extends AppLocalizations {
   String get chipOffline => 'offline';
 
   @override
+  String get chipPaused => 'paused';
+
+  @override
+  String get tourLogTitle => 'Walk journal';
+
+  @override
+  String get tourLogEmpty => 'Places I tell you about will appear here.';
+
+  @override
+  String get tourAskVoice => 'Ask by voice';
+
+  @override
+  String get summaryTitle => 'Walk complete';
+
+  @override
+  String get summaryDiscardTitle => 'Walk not saved';
+
+  @override
+  String get summaryDiscardNote =>
+      'Under 10 minutes — not recorded, just reset.';
+
+  @override
+  String get summaryDuration => 'Duration';
+
+  @override
+  String get summaryDistance => 'Distance';
+
+  @override
+  String get summaryPlaces => 'Places';
+
+  @override
+  String get summaryTold => 'What we covered';
+
+  @override
+  String get summaryDone => 'Done';
+
+  @override
+  String get unitMin => 'min';
+
+  @override
+  String get unitHr => 'h';
+
+  @override
+  String get unitKm => 'km';
+
+  @override
+  String get unitM => 'm';
+
+  @override
   String metaConnectionLost(int seconds) {
     return 'Connection lost, reconnecting in ${seconds}s…';
   }

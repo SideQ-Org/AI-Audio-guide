@@ -133,6 +133,10 @@ class Walk(Base):
     path: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # Community: friends see this walk under "Маршруты друзей" only once shared.
     shared: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Structured end-of-walk recap (LLM), generated on `end` — kept so it's readable later in
+    # the walk detail, by the owner and by a friend the walk is shared with. Nullable: old walks
+    # and any where generation failed simply have none.
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped[User] = relationship(back_populates="walks")
     events: Mapped[list[WalkEvent]] = relationship(

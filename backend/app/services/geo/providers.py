@@ -67,15 +67,30 @@ _SELECTORS = (
 
 def build_query(center: GeoPoint, radius_m: float) -> str:
     r = int(radius_m)
-    body = "".join(
+    nw = "".join(
         f"{kind}(around:{r},{center.lat},{center.lon})[{sel}];"
         for sel in _SELECTORS
         for kind in ("node", "way")
     )
-    # "geom" (not "center") so linear/area features (rivers, canals, bays) report
-    # their geometry — we then snap to the point nearest the user, not the way's
-    # midpoint, which for a long canal sits kilometres away.
-    return f"[out:json][timeout:15];({body});out tags geom;"
+    # `rel` too: big parks/forests/water are often mapped as MULTIPOLYGON relations
+    # (e.g. "Городской парк Мысово" is a leisure=park relation, not a way) — without this
+    # they were never fetched and a walk along their edge never surfaced them at all. All
+    # selectors are feature tags (leisure/natural/…), never admin boundaries, so a relation
+    # query can't pull in a whole city/district outline.
+    rel = "".join(
+        f"rel(around:{r},{center.lat},{center.lon})[{sel}];" for sel in _SELECTORS
+    )
+    # Two output statements on purpose: nodes+ways get "geom" so a line/area feature reports
+    # its shape (we then snap to the point nearest the user, not a far midpoint). Relations
+    # get "center" (centroid) — the prod Overpass mirror won't combine geom+center on one
+    # `out` (it drops the geometry) and returns no member geometry for a relation, so the
+    # centroid is the robust cross-mirror point. _element_to_place still prefers a relation's
+    # member geometry (nearest edge) when a mirror DOES expand it, falling back to this center.
+    return (
+        f"[out:json][timeout:15];"
+        f"({nw})->.nw;({rel})->.r;"
+        f".nw out tags geom;.r out tags center;"
+    )
 
 
 def _nearest(origin: GeoPoint, geometry: list[dict]) -> tuple[float, float] | None:
@@ -161,7 +176,17 @@ def _element_to_place(el: dict, origin: GeoPoint) -> Place | None:
     if el.get("type") == "node":
         lat, lon = el.get("lat"), el.get("lon")
     else:
-        raw_geom = el.get("geometry") or []
+        if el.get("type") == "relation":
+            # A multipolygon relation carries geometry on its MEMBER ways (out geom), not a
+            # flat top-level array — flatten every member's points so a big park's outline
+            # feeds the same nearest-edge snap + live distance-to-shape as a way.
+            raw_geom = [
+                pt
+                for m in (el.get("members") or [])
+                for pt in (m.get("geometry") or [])
+            ]
+        else:
+            raw_geom = el.get("geometry") or []
         geometry = _downsample_geometry(raw_geom)  # full-shape distance from live pos (B1)
         near = _nearest(origin, raw_geom)
         if near is not None:

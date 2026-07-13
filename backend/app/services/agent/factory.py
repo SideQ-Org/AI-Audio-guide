@@ -13,6 +13,7 @@ from app.services.agent.orchestrator import Orchestrator
 from app.services.agent.pipeline import TextPipeline
 from app.services.agent.planner import HeuristicPlanner, LLMPlanner, Planner
 from app.services.agent.scorer import HeuristicScorer, LLMScorer, Scorer
+from app.services.agent.summarizer import LLMSummarizer, NullSummarizer, Summarizer
 from app.services.enrichment.enricher import (
     CompositeEnricher,
     Enricher,
@@ -42,6 +43,19 @@ def _roles() -> tuple[Scorer, Narrator, Companion]:
             llm = AnthropicLLM()
         return LLMScorer(llm), LLMNarrator(llm), LLMCompanion(llm)
     return HeuristicScorer(), TemplateNarrator(), HeuristicCompanion()
+
+
+def _summarizer() -> Summarizer:
+    """The end-of-walk recap LLM (its own stateless client), or a no-op offline."""
+    if settings.agent_backend == "openai":
+        from app.services.llm.client import OpenAICompatLLM
+
+        return LLMSummarizer(OpenAICompatLLM())
+    if settings.agent_backend == "anthropic":
+        from app.services.llm.client import AnthropicLLM
+
+        return LLMSummarizer(AnthropicLLM())
+    return NullSummarizer()
 
 
 def _discovery() -> Discovery:
@@ -136,5 +150,6 @@ def build_orchestrator(store: StateStore | None = None) -> Orchestrator:
         name_localizer=_name_localizer(),
     )
     return Orchestrator(
-        _discovery(), pipeline, companion, store or default_store(), geocoder=_geocoder()
+        _discovery(), pipeline, companion, store or default_store(),
+        geocoder=_geocoder(), summarizer=_summarizer(),
     )

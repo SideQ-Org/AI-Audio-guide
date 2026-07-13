@@ -51,6 +51,9 @@ class WalkOut(BaseModel):
     distance_m: int | None = None
     object_count: int
     title: str | None = None
+    # Downsampled GPS route [[lat, lon(, paused)], ...] for the history-list track preview;
+    # null/empty for walks recorded before the route feature. The detail carries the full path.
+    path: list | None = None
 
 
 class WalkEventOut(BaseModel):
@@ -67,9 +70,10 @@ class WalkEventOut(BaseModel):
 
 class WalkDetailOut(WalkOut):
     events: list[WalkEventOut]
-    # Downsampled GPS route [[lat, lon], ...]; null/empty for walks recorded before the
-    # route feature. Only on the detail payload (kept off the list to keep /walks light).
-    path: list | None = None
+    # Inherits `path` from WalkOut, but the detail overrides it with the FULL route (the list
+    # carries only a downsampled preview).
+    # Structured end-of-walk recap (readable by the owner and a shared-with friend).
+    summary: str | None = None
 
 
 class WalksPage(BaseModel):
@@ -106,6 +110,16 @@ def _accounts():
     return repo, session_scope
 
 
+def _downsample(path: list | None, max_points: int = 48) -> list | None:
+    """Thin a GPS route down to ~max_points for a light list payload — even sampling that keeps
+    the first and last point and each point's pause flag. None/[] passes through unchanged."""
+    if not path or len(path) <= max_points:
+        return path or None
+    step = len(path) / max_points
+    idx = sorted({int(i * step) for i in range(max_points)} | {0, len(path) - 1})
+    return [path[i] for i in idx]
+
+
 def _walk_out(walk) -> WalkOut:
     return WalkOut(
         id=str(walk.id),
@@ -117,6 +131,7 @@ def _walk_out(walk) -> WalkOut:
         distance_m=walk.distance_m,
         object_count=walk.object_count,
         title=walk.title,
+        path=_downsample(walk.path),
     )
 
 
@@ -182,7 +197,8 @@ async def list_walks(
         walks = await repo.list_walks(
             session, user_id=user_id, limit=limit, before=before
         )
-    out = [_walk_out(w) for w in walks]
+        # Build inside the scope: `walk.path` (like other attrs) expires once the session commits.
+        out = [_walk_out(w) for w in walks]
     next_cursor = out[-1].started_at.isoformat() if len(out) == limit else None
     return WalksPage(walks=out, next_cursor=next_cursor)
 
@@ -204,8 +220,10 @@ async def get_walk(walk_id: str, user_id: str = Depends(current_user)) -> WalkDe
             for e in walk.events
         ]
         detail = _walk_out(walk).model_dump()
+        detail.pop("path", None)  # replace the downsampled preview with the FULL route below
         path = walk.path  # read inside the session scope (attrs expire on commit)
-    return WalkDetailOut(**detail, events=events, path=path)
+        summary = walk.summary
+    return WalkDetailOut(**detail, events=events, path=path, summary=summary)
 
 
 @router.delete("/walks/{walk_id}", status_code=204)

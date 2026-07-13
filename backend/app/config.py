@@ -97,9 +97,35 @@ class Settings(BaseSettings):
     # ungrounded cascade is skipped in fact-less areas; the planned arc + reach + real objects
     # carry the tour instead. Grounded areas cascade as before.
     area_cascade_requires_facts: bool = True
+    # Pre-generate the NEXT outline area beat in the background WHILE the current one is
+    # being spoken, so its LLM latency (10-17 s cold on a field walk) is hidden behind
+    # delivery instead of opening a silent gap between beats ("медленно переключался
+    # между блоками" at session start). Read-only prefetch — it never mutates session
+    # state; the producer commits the result single-threaded and re-checks freshness, so
+    # it cannot corrupt the running narration. Safety valve: set False to disable.
+    area_prefetch: bool = True
     # Speak an instant, warm greeting the moment a walk starts (fills the load gap so the
     # tour begins immediately; the area intro follows). Off => the tour opens with the area intro.
     session_greeting: bool = True
+    # Grammatical gender the guide uses when speaking ABOUT ITSELF in first person
+    # ("я прошла" vs "я прошёл", "рада" vs "рад") — it should match the TTS voice
+    # (default voice "Ara" is female). "feminine" | "masculine" | "neutral" (no gendered
+    # self-reference — for languages/voices where it shouldn't be forced).
+    assistant_gender: str = "feminine"
+    # Stream the barge-in Companion reply sentence-by-sentence to TTS so the first sentence
+    # is spoken within ~2 s instead of after the whole (~8 s) answer. Needs an OpenAI-compatible
+    # backend (stream_text). Off => the single-shot JSON reply path. On this path tour-steering
+    # (skip shops / shorter / mute) is derived heuristically from the question, not the LLM.
+    companion_stream: bool = True
+    # After a voice question or an un-pause, speak a short "back to the tour" bridge before
+    # continuing (languages.tour_bridge) — returning to the SAME topic if it's still relevant
+    # (we're still near where we paused) or leading into fresh nearby material if we've walked
+    # past it. Off => resume silently (the old behaviour). Radii decide "still relevant": a
+    # narrated OBJECT goes stale quickly (you pass it); an AREA/district line stays relevant
+    # over a longer stretch.
+    resume_bridge: bool = True
+    resume_bridge_obj_radius_m: float = 70.0
+    resume_bridge_area_radius_m: float = 180.0
     # Activate the cross-paragraph "next_hook" baton: the Narrator emits a short
     # internal HOOK: line that we strip from speech and hand to the next paragraph,
     # so transitions are woven rather than improvised cold. Kept on the creative
@@ -129,11 +155,51 @@ class Settings(BaseSettings):
     enrich_cache_path: str = ""  # "" => memory only; a path persists facts across runs
 
     # STT (voice barge-in)
-    stt_backend: str = "mock"  # mock | faster_whisper
+    stt_backend: str = "mock"  # mock | faster_whisper (local CPU/GPU) | openrouter (cloud, fast)
     stt_mock_text: str = "А когда его построили?"
     whisper_model_size: str = "small"
     whisper_device: str = "auto"
     whisper_compute_type: str = "auto"
+    # Cloud STT (stt_backend=openrouter): OpenAI-compatible /audio/transcriptions. Reuses the LLM
+    # creds by default (your OpenRouter key). ~1-2 s vs ~8-10 s for local CPU Whisper.
+    # Mistral Voxtral: single non-OpenAI provider (no geoblock/403 risk — openai/whisper 403'd from
+    # prod), perfect Russian, ~3 s, cheap. Verify: {base}/models?output_modalities=transcription
+    stt_model: str = "mistralai/voxtral-mini-transcribe"
+    stt_api_key: str = ""  # "" => reuse openai_api_key
+    stt_base_url: str = ""  # "" => reuse openai_base_url
+    stt_timeout_s: float = 15.0
+
+    # Neural TTS (server-side). OFF by default (tts_backend="null"): the server ships text-only
+    # narration and the client speaks it with on-device flutter_tts (as the MVP did). When ON,
+    # PAID sessions get a neural voice synthesized here and attached (base64) to the narration
+    # frame; free sessions still use the on-device voice. Uses the SAME OpenAI-compatible endpoint
+    # as the LLM — OpenRouter now proxies /audio/speech — so by default it reuses openai_base_url /
+    # openai_api_key (your OpenRouter creds); set tts_base_url/tts_api_key only to override.
+    tts_backend: str = "null"  # null | openai (OpenAI-compatible, incl. OpenRouter)
+    # Default is xAI Grok Voice: it returns mp3 over OpenRouter and works from geoblocked regions
+    # where OpenAI/Google TTS are cut off (our prod). Gemini TTS works too but only emits pcm (needs
+    # WAV-wrapping client-side); OpenAI gpt-4o-mini-tts is unreachable from the prod region.
+    # List available speech models: GET {base}/models?output_modalities=speech .
+    tts_model: str = "x-ai/grok-voice-tts-1.0"
+    tts_voice: str = "Ara"  # Grok voices: Eve / Ara / Rex / Sal / Leo (OpenAI: alloy/nova/sage/…)
+    tts_voice_by_lang: dict[str, str] = {}  # {"ru": "sage", ...}; falls back to tts_voice
+    tts_format: str = "mp3"  # mp3 plays reliably on both iOS & Android (opus/ogg is flaky on iOS)
+    tts_api_key: str = ""  # "" => reuse openai_api_key (your OpenRouter key)
+    tts_base_url: str = ""  # "" => reuse openai_base_url (your OpenRouter base URL)
+    tts_timeout_s: float = 8.0  # a short phrase synthesizes in <1s; cap so a hang degrades to text
+    tts_tier_min: str = "paid"  # minimum tier that gets neural audio ("free" => everyone)
+    tts_presynth: bool = True  # pre-synthesize upcoming sentences in the background (kills the
+    #                          # inter-sentence gap + makes object arrival instant); off => synth
+    #                          # lazily per sentence at send time
+    tts_cache_path: str = ""  # "" => memory only; a path persists synthesized audio across runs
+    tts_price_per_mchar: float = 15.0  # USD per 1M input chars (~$15/1M), for the cost meter
+
+    # Revisit: when the walker RETURNS to an object told earlier this walk, add a fresh detail
+    # ("вот мы и снова у …") instead of silence. Gated by route distance walked SINCE it was told,
+    # so it never fires right after the main narration — only on a genuine loop back.
+    revisit_enabled: bool = True
+    revisit_radius_m: float = 60.0  # how close counts as "back at the object"
+    revisit_min_route_m: float = 250.0  # must have walked this far along the route since telling it
 
     # Behaviour
     default_language: str = "ru"
@@ -153,10 +219,12 @@ class Settings(BaseSettings):
     # close to it. Outside the bubble the area story spine (city/district/street)
     # carries the tour — the guide doesn't narrate objects scattered across the
     # wider search radius. Small so narration tracks where the user actually is.
-    # 45 m: tight enough that a narrated object is genuinely "right here", not several
-    # houses away. Objects between this and reach_radius_m are still reachable via the
-    # gaze-gated reach fallback (but that's now capped much tighter — see reach_radius_m).
-    narrate_radius_m: float = 45.0
+    # 55 m: "right here" for a pedestrian (an object you walk alongside across a normal
+    # street), without reaching several houses away. 45 m proved too tight on the field
+    # walk — real side-passes hovered at 50-53 m (a park, a monument) and never fired the
+    # bubble ("не отработал триггер мимо которого я прошёл"). Objects between this and
+    # reach_radius_m are still reachable via the gaze-gated reach fallback.
+    narrate_radius_m: float = 55.0
     # The reach fallback (gaze-gated) narrates an object AHEAD only within this radius —
     # much tighter than weave_radius_m so the guide doesn't announce a place 150-200 m
     # away ("triggered several houses off"). It fires only for what you're about to reach.

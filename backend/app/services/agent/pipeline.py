@@ -37,9 +37,10 @@ from app.shared.schemas import (
     Significance,
 )
 
+from .director import find_callback
 from .languages import passing_mention
 from .name_localizer import NameLocalizer
-from .narrator import Narrator, split_hook
+from .narrator import Narrator, split_hook, split_sentences
 from .scorer import Scorer
 from .significance import at_least, significance_from_weight, tags_have_wiki
 from .walklog import clip, get_logger
@@ -117,6 +118,10 @@ class TextPipeline:
         # `warm_narration` for the object you're walking toward, read+popped by `step` so
         # the blurb is spoken the INSTANT you reach it (no 5-20 s LLM wait on arrival).
         self._narr_cache: dict[tuple[str, str], tuple[str, str]] = {}
+        # Pre-generated area story arcs: area_key -> PlannerOutput. Warmed in the background at
+        # the greeting (while it's being spoken) so the first area intro is instant, not a cold
+        # planner LLM wait after the opener. Read+popped by the orchestrator's _maybe_area_intro.
+        self._plan_cache: dict[str, object] = {}
 
     def warm_ahead(
         self,
@@ -132,6 +137,8 @@ class TextPipeline:
         heading: Heading | None = None,
         pace: Pace = Pace.SLOW,
         preferences: ControlPatch | None = None,
+        recall=None,
+        lookahead=None,
     ):
         """Non-blocking: warm the fact cache for objects the user is walking TOWARD
         (in the course cone, nearest first), so facts are ready before arrival. A
@@ -162,6 +169,7 @@ class TextPipeline:
                     target, seen=seen, history=history or [], address=address,
                     heading=heading, pace=pace, preferences=preferences, language=lang,
                     theme=theme, told=told or [], next_hook=next_hook,
+                    recall=recall, lookahead=lookahead,
                 ))
                 self._warm_tasks.add(t2)
                 t2.add_done_callback(self._warm_tasks.discard)
@@ -195,7 +203,7 @@ class TextPipeline:
     async def _render_object(
         self, chosen, place, sig, *, addr, heading, pace, switching, theme, told,
         next_hook, history, preferences, passing, in_view, lang, nothing_new,
-        passed=False,
+        passed=False, callback=None, lookahead=None,
     ) -> tuple[str, str]:
         """The narrator call for one chosen object — shared by step() and
         warm_narration() so a pre-generated blurb matches what step would produce."""
@@ -205,6 +213,7 @@ class TextPipeline:
                 distance_m=chosen.distance_m, heading=heading or Heading(),
                 side=chosen.side, in_view=in_view, pace=pace, context=_context(addr),
                 theme=theme, told=told or [], next_hook=next_hook, history=history,
+                callback=callback, lookahead=lookahead,
                 flags=NarratorFlags(
                     switching=switching, nothing_new=nothing_new,
                     passing=passing, passed=passed, preferences=preferences,
@@ -216,7 +225,7 @@ class TextPipeline:
 
     async def warm_narration(
         self, chosen, *, seen, history, address, heading, pace, preferences,
-        language, theme, told, next_hook,
+        language, theme, told, next_hook, recall=None, lookahead=None,
     ) -> None:
         """Pre-render the PASSING narration for an object you're walking toward, so
         step() speaks it the instant you reach it (no LLM wait on arrival). Facts are
@@ -244,17 +253,50 @@ class TextPipeline:
         # and not-yet-visible, so the blurb uses neutral framing; the live step() re-derives
         # the true side/in_view when a fresh candidate arrives with facts already cached.
         neutral = enriched.model_copy(update={"side": None})
+        callback = find_callback(recall or [], place) if recall else None
         text, hook = await self._render_object(
             neutral, place, sig, addr=addr, heading=heading, pace=pace, switching=False,
             theme=theme, told=told, next_hook=next_hook, history=history,
             preferences=preferences, passing=True, in_view=False,
-            lang=lang, nothing_new=False,
+            lang=lang, nothing_new=False, callback=callback, lookahead=lookahead,
         )
         if text:
             self._narr_cache[key] = (text, hook)
             if len(self._narr_cache) > 32:  # bound: keep the freshest handful
                 self._narr_cache.pop(next(iter(self._narr_cache)))
             log.info("pregenerate place=%r | %s", place.name, clip(text))
+            self._presynth_audio(text, lang)
+
+    def _start_fact_warm(self, candidates: list[Candidate], ctx: str | None, lang: str) -> None:
+        """Fire-and-forget: warm a notable factless object's facts in the background (Phase 4
+        async recovery), so the enriched narration is delivered later by elaborate() / a re-open
+        WITHOUT blocking this tick on a ~9 s web search."""
+        task = asyncio.ensure_future(
+            prefetch(
+                candidates, self.enricher, self.cache,
+                top_k=1, timeout_s=self.enrich_timeout_s, context=ctx, language=lang,
+            )
+        )
+        self._warm_tasks.add(task)
+        task.add_done_callback(self._warm_tasks.discard)
+
+    def _presynth_audio(self, text: str, lang: str) -> None:
+        """Neural TTS (paid): pre-synthesize the pre-generated blurb's sentences into the shared
+        TTS cache in the background, so the object's FIRST spoken sentence is instant on arrival
+        (not just the inter-sentence gaps the producer already closes). No-op for free/TTS-off."""
+        if not settings.tts_presynth:
+            return
+        from app.services.tts.tts import get_tts, should_synth, voice_for
+
+        if not should_synth(SESSION_TIER.get()):
+            return
+        tts, voice = get_tts(), voice_for(lang)
+        for s in split_sentences(text) or [text]:
+            if not s or not s.strip():
+                continue
+            t = asyncio.ensure_future(tts.synth(s, voice=voice, language=lang))
+            self._warm_tasks.add(t)
+            t.add_done_callback(self._warm_tasks.discard)
 
     async def step(
         self,
@@ -274,6 +316,8 @@ class TextPipeline:
         passing: bool = False,
         passed: bool = False,
         reach: bool = False,
+        recall=None,
+        lookahead=None,
     ) -> StepResult:
         """Narrate the nearest weave-worthy object, woven INTO the story arc.
 
@@ -341,6 +385,9 @@ class TextPipeline:
         # Pre-generated? Speak it instantly (the whole point — no LLM wait on arrival).
         # A pre-gen blurb is present-framed ("проходишь мимо"), so DON'T reuse it on the
         # `passed` path — a passed object must be told in the past tense (regenerate).
+        # Structure hints (director): reference an earlier related object (callback) and/or tease
+        # an upcoming one (lookahead), so the object sits inside a forward-leaning story.
+        callback = find_callback(recall or [], place) if recall else None
         cached = None if passed else self._narr_cache.pop((chosen.place.id, lang), None)
         if cached is not None:
             text, hook = cached
@@ -351,6 +398,7 @@ class TextPipeline:
                 switching=switching, theme=theme, told=told, next_hook=next_hook,
                 history=history, preferences=preferences, passing=passing,
                 passed=passed, in_view=in_view, lang=lang, nothing_new=not candidates,
+                callback=callback, lookahead=lookahead,
             )
         # Guarantee a close, named object is never dead air. DeepSeek sometimes ignores
         # the "passing -> never silent" rule (especially with empty facts), and a
@@ -376,47 +424,28 @@ class TextPipeline:
             text = passing_mention(lang, place.name, chosen.side)
             floored = True
             GUIDE.floor()
-        # Silence on a genuinely notable object with no facts is the cue to spend a web
-        # search and try again. The usual cause is `chosen` sitting outside the
-        # enrich_top_k prefetch window, so its facts never warmed; an on-demand
-        # single-object enrich (wiki -> paid web, self-gated in CompositeEnricher) fills
-        # that gap. Gated to paid sessions (cost) and MEDIUM+ (don't chase shops/benches),
-        # and the enricher's per-place negative cache prevents a second spend on the same
-        # object. Mirrors elaborate()'s cache-miss dance.
+        # A genuinely notable object with no facts is the cue to spend a web search — but do it
+        # OFF the hot path (Phase 4). The old blocking retry (prefetch + a 2nd narrate) added up
+        # to ~9 s to the tick; instead we warm the object's facts in the BACKGROUND. The floor
+        # mention (if any) plays now with no dead air; once the facts land, the enriched version
+        # is delivered by elaborate() (this object becomes st.last_place, facts now cached) or,
+        # if it stayed silent, by the facts-aware fingerprint re-opening next tick (cache-warm,
+        # fast) while it's still nearby. Gated to paid + MEDIUM+; the enricher's per-place
+        # negative cache prevents a repeat spend. Mirrors elaborate()'s cache-miss dance.
         if (
-            not text
+            (floored or not text)
             and not chosen.facts_available
             and at_least(sig, Significance.MEDIUM)
             and SESSION_TIER.get() == "paid"
         ):
-            await prefetch(
-                [chosen], self.enricher, self.cache,
-                top_k=1, timeout_s=self.enrich_timeout_s, context=ctx, language=lang,
-            )
-            facts = self.cache.get(place.id, lang)
-            if facts:
-                retry_raw = await self.narrator.narrate(
-                    NarratorInput(
-                        place=place, significance=sig, facts=facts,
-                        distance_m=chosen.distance_m, heading=heading or Heading(),
-                        side=chosen.side, in_view=in_view, pace=pace,
-                        context=_context(addr), theme=theme,
-                        told=told or [], next_hook=next_hook, history=history,
-                        flags=NarratorFlags(
-                            switching=switching, nothing_new=not candidates,
-                            passing=passing, passed=passed, preferences=preferences,
-                        ),
-                        language=lang,
-                    )
-                )
-                retry_text, retry_hook = split_hook(retry_raw, lang)
-                if retry_text:
-                    text, hook = retry_text, retry_hook
-                    log.info("step websearch-retry place=%r -> recovered facts", place.name)
+            self._start_fact_warm([chosen], ctx, lang)
         log.info(
-            "step place=%r cat=%s sig=%s facts=%s side=%s passing=%s reach=%s -> %s | %s",
+            "step place=%r cat=%s sig=%s facts=%s side=%s passing=%s reach=%s"
+            " cb=%s la=%s -> %s | %s",
             place.name, place.category, sig.value, chosen.facts_available,
             chosen.side, passing, reach,
+            callback.name if callback else None,
+            lookahead.name if lookahead else None,
             "floor" if floored else ("text" if text else "silence"),
             clip(text),
         )
@@ -432,6 +461,7 @@ class TextPipeline:
         heading: Heading | None = None,
         pace: Pace = Pace.SLOW,
         language: str | None = None,
+        revisit: bool = False,
     ) -> str:
         """Tell MORE about an already-covered place (nothing new nearby). Reuses
         cached facts; the narrator adds a fresh detail, avoiding HISTORY."""
@@ -456,6 +486,11 @@ class TextPipeline:
                 language=lang,
             )
             facts = self.cache.get(place.id, lang)
+        # Anti-fabrication: with NO verified facts there's nothing new to add without inventing.
+        # Stay silent rather than let the model conjure a backstory (the factless "Театр Город"
+        # invented dates/experiments in both the step and the elaborate follow-up).
+        if not facts:
+            return ""
         raw = await self.narrator.narrate(
             NarratorInput(
                 place=place,
@@ -466,7 +501,7 @@ class TextPipeline:
                 pace=pace,
                 context=_context(addr),
                 history=history,
-                flags=NarratorFlags(elaborate=True),
+                flags=NarratorFlags(elaborate=True, revisit=revisit),
                 language=lang,
             )
         )
@@ -524,6 +559,26 @@ class TextPipeline:
                 language=language or self.language,
             )
         )
+
+    async def warm_plan(
+        self, area_key: str, address: Address, *, facts, theme_override, language
+    ) -> None:
+        """Background: pre-generate the story arc for `area_key` and cache it, so the first
+        area intro is instant. Read-only w.r.t. session state; a no-op if already warmed or the
+        planner is offline."""
+        if not area_key or area_key in self._plan_cache:
+            return
+        draft = await self.make_plan(
+            address, facts=facts, theme_override=theme_override, language=language
+        )
+        if draft is not None:
+            self._plan_cache[area_key] = draft
+            if len(self._plan_cache) > 8:  # bound: a handful of recent areas
+                self._plan_cache.pop(next(iter(self._plan_cache)))
+
+    def take_plan(self, area_key: str | None):
+        """Pop a pre-generated arc for `area_key` (or None if not warmed)."""
+        return self._plan_cache.pop(area_key, None) if area_key else None
 
     async def enrich_area(
         self,

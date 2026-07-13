@@ -199,14 +199,19 @@ def test_arc_opener_then_woven_object_then_outline_beats_no_repeats():
     assert len(beats) == len(set(beats))  # outline topics never repeat
 
 
-def test_user_question_is_queued_to_weave_into_narration():
+def test_user_question_answered_inline_without_double_weave():
+    """A voice question is answered by the Companion inline and NOT re-queued as an
+    area-beat focus topic. Re-queuing produced a second, redundant beat re-telling the
+    same fact — and a stale one — on the field walk ("повторял по два раза два несвязанных
+    факта"). The inline reply is the whole response."""
     async def run():
         orch = _orch([])
         # establish an area first
         await orch.on_position("s2", GeoPoint(lat=55.7415, lon=37.6539), Heading(), Pace.SLOW)
-        await orch.on_utterance("s2", "А кто такой Высоцкий?")
+        out = await orch.on_utterance("s2", "А кто такой Высоцкий?")
         st = await orch.store.load("s2")
-        return st.narrative_plan.pending_focus
+        return out, st.narrative_plan.pending_focus
 
-    pending = asyncio.run(run())
-    assert "А кто такой Высоцкий?" in pending  # queued as a focus topic to weave next
+    out, pending = asyncio.run(run())
+    assert out.kind == "reply"  # answered inline by the Companion
+    assert pending == []  # NOT re-queued -> no duplicate/stale area beat

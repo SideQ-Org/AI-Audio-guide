@@ -440,6 +440,102 @@ abstract class AppLocalizations {
   /// **'offline'**
   String get chipOffline;
 
+  /// No description provided for @chipPaused.
+  ///
+  /// In en, this message translates to:
+  /// **'paused'**
+  String get chipPaused;
+
+  /// No description provided for @tourLogTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Walk journal'**
+  String get tourLogTitle;
+
+  /// No description provided for @tourLogEmpty.
+  ///
+  /// In en, this message translates to:
+  /// **'Places I tell you about will appear here.'**
+  String get tourLogEmpty;
+
+  /// No description provided for @tourAskVoice.
+  ///
+  /// In en, this message translates to:
+  /// **'Ask by voice'**
+  String get tourAskVoice;
+
+  /// No description provided for @summaryTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Walk complete'**
+  String get summaryTitle;
+
+  /// No description provided for @summaryDiscardTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Walk not saved'**
+  String get summaryDiscardTitle;
+
+  /// No description provided for @summaryDiscardNote.
+  ///
+  /// In en, this message translates to:
+  /// **'Under 10 minutes — not recorded, just reset.'**
+  String get summaryDiscardNote;
+
+  /// No description provided for @summaryDuration.
+  ///
+  /// In en, this message translates to:
+  /// **'Duration'**
+  String get summaryDuration;
+
+  /// No description provided for @summaryDistance.
+  ///
+  /// In en, this message translates to:
+  /// **'Distance'**
+  String get summaryDistance;
+
+  /// No description provided for @summaryPlaces.
+  ///
+  /// In en, this message translates to:
+  /// **'Places'**
+  String get summaryPlaces;
+
+  /// No description provided for @summaryTold.
+  ///
+  /// In en, this message translates to:
+  /// **'What we covered'**
+  String get summaryTold;
+
+  /// No description provided for @summaryDone.
+  ///
+  /// In en, this message translates to:
+  /// **'Done'**
+  String get summaryDone;
+
+  /// No description provided for @unitMin.
+  ///
+  /// In en, this message translates to:
+  /// **'min'**
+  String get unitMin;
+
+  /// No description provided for @unitHr.
+  ///
+  /// In en, this message translates to:
+  /// **'h'**
+  String get unitHr;
+
+  /// No description provided for @unitKm.
+  ///
+  /// In en, this message translates to:
+  /// **'km'**
+  String get unitKm;
+
+  /// No description provided for @unitM.
+  ///
+  /// In en, this message translates to:
+  /// **'m'**
+  String get unitM;
+
   /// No description provided for @metaConnectionLost.
   ///
   /// In en, this message translates to:

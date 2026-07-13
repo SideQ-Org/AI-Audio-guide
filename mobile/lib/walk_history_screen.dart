@@ -12,6 +12,8 @@ import 'accounts/login_screen.dart';
 import 'accounts/models.dart';
 import 'accounts/walk_detail_screen.dart';
 import 'l10n/app_localizations.dart';
+import 'ui/design.dart';
+import 'ui/track_map.dart';
 
 class WalkHistoryScreen extends StatefulWidget {
   const WalkHistoryScreen({super.key, this.onUpgrade});
@@ -96,8 +98,15 @@ class _WalkHistoryScreenState extends State<WalkHistoryScreen> {
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
     return Scaffold(
-      appBar: AppBar(title: Text(l.walkHistory)),
-      body: _body(l),
+      backgroundColor: Colors.transparent,
+      body: GradientBackground(
+        child: SafeArea(
+          child: Column(children: [
+            _BrandedHeader(title: l.walkHistory),
+            Expanded(child: _body(l)),
+          ]),
+        ),
+      ),
     );
   }
 
@@ -134,6 +143,7 @@ class _WalkHistoryScreenState extends State<WalkHistoryScreen> {
         return RefreshIndicator(
           onRefresh: () async => _reload(refreshProfile: true),
           child: ListView.builder(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
             // One extra leading item for the upgrade banner when the free cap is hit.
             itemCount: walks.length + (showUpgrade ? 1 : 0),
             itemBuilder: (_, i) {
@@ -170,6 +180,28 @@ class _WalkHistoryScreenState extends State<WalkHistoryScreen> {
   }
 }
 
+/// Branded screen header: back button + title, on the mesh gradient (no stock AppBar).
+class _BrandedHeader extends StatelessWidget {
+  const _BrandedHeader({required this.title});
+  final String title;
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 6, 16, 8),
+      child: Row(children: [
+        IconButton(
+          icon: Icon(Icons.arrow_back_rounded, color: c.textPrimary),
+          onPressed: () => Navigator.of(context).maybePop(),
+          tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+        ),
+        const SizedBox(width: 4),
+        Expanded(child: Text(title, style: h1(context), maxLines: 1, overflow: TextOverflow.ellipsis)),
+      ]),
+    );
+  }
+}
+
 class _WalkTile extends StatelessWidget {
   const _WalkTile({required this.walk, required this.onTap, required this.onDelete});
   final WalkSummary walk;
@@ -179,41 +211,110 @@ class _WalkTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
-    final cs = Theme.of(context).colorScheme;
+    final c = context.colors;
     final locale = Localizations.localeOf(context).toString();
     final when = DateFormat.yMMMd(locale).add_Hm().format(walk.startedAt.toLocal());
     final title = _WalkHistoryScreenState._walkTitle(l, walk);
-    return Dismissible(
-      key: ValueKey(walk.id),
-      direction: DismissDirection.endToStart,
-      confirmDismiss: (_) async {
-        onDelete();
-        return false; // deletion + reload handled by onDelete
-      },
-      background: Container(
-        color: cs.errorContainer,
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 20),
-        child: Icon(Icons.delete_outline, color: cs.onErrorContainer),
-      ),
-      child: ListTile(
-        leading: const Icon(Icons.route_rounded),
-        title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text('$when  ·  ${l.placesCount(walk.objectCount)}'),
-        // Explicit delete button (the swipe-to-delete stays as a shortcut).
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            IconButton(
-              icon: const Icon(Icons.delete_outline),
-              color: cs.onSurfaceVariant,
-              tooltip: l.deleteWalk,
-              onPressed: onDelete,
-            ),
-            Icon(Icons.chevron_right, color: cs.onSurfaceVariant),
-          ],
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Dismissible(
+        key: ValueKey(walk.id),
+        direction: DismissDirection.endToStart,
+        confirmDismiss: (_) async {
+          onDelete();
+          return false; // deletion + reload handled by onDelete
+        },
+        background: Container(
+          alignment: Alignment.centerRight,
+          padding: const EdgeInsets.only(right: 24),
+          decoration: BoxDecoration(color: c.err.withValues(alpha: 0.18), borderRadius: BorderRadius.circular(Radii.lg)),
+          child: Icon(Icons.delete_outline_rounded, color: c.err),
         ),
-        onTap: onTap,
+        child: GlassModule(
+          child: InkWell(
+            borderRadius: BorderRadius.circular(Radii.lg),
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+              child: Row(children: [
+                // Track thumbnail (real mini-map) when the walk has a route; else the route icon.
+                if (walk.path.length >= 2)
+                  Container(
+                    width: 62, height: 62,
+                    decoration: BoxDecoration(
+                      color: c.glassFill(0.05),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: c.glassBorder),
+                    ),
+                    // A crisp tile-free route thumbnail — no map/glow to smear at this size.
+                    child: TrackThumb(path: walk.path, size: 62),
+                  )
+                else
+                  Container(
+                    width: 42, height: 42, alignment: Alignment.center,
+                    decoration: BoxDecoration(shape: BoxShape.circle, color: c.glassFill(0.06), border: Border.all(color: c.glassBorder)),
+                    child: Icon(Icons.route_rounded, size: 20, color: c.primary),
+                  ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: titleS(context)),
+                    const SizedBox(height: 2),
+                    Text('$when  ·  ${l.placesCount(walk.objectCount)}',
+                        maxLines: 1, overflow: TextOverflow.ellipsis, style: caption(context)),
+                  ]),
+                ),
+                IconButton(
+                  icon: Icon(Icons.delete_outline_rounded, color: c.textFaint),
+                  tooltip: l.deleteWalk,
+                  onPressed: onDelete,
+                ),
+                Icon(Icons.chevron_right_rounded, color: c.textFaint),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shared centred glass panel used by the empty / sign-in / error states.
+class _StatePanel extends StatelessWidget {
+  const _StatePanel({required this.icon, required this.title, this.subtitle, this.action});
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final Widget? action;
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 0, 24, 80),
+        child: GlassModule(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 64, height: 64, alignment: Alignment.center,
+                decoration: BoxDecoration(shape: BoxShape.circle, color: c.glassFill(0.06), border: Border.all(color: c.glassBorder)),
+                child: Icon(icon, size: 30, color: c.primary),
+              ),
+              const SizedBox(height: 16),
+              Text(title, textAlign: TextAlign.center, style: h2(context)),
+              if (subtitle != null) ...[
+                const SizedBox(height: 8),
+                Text(subtitle!, textAlign: TextAlign.center, style: body(context).copyWith(color: c.textSecondary, height: 1.45)),
+              ],
+              if (action != null) ...[
+                const SizedBox(height: 20),
+                action!,
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -223,30 +324,9 @@ class _EmptyState extends StatelessWidget {
   const _EmptyState({required this.title, required this.subtitle});
   final String title;
   final String subtitle;
-
   @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 36),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.route_rounded, size: 64, color: cs.onSurfaceVariant),
-            const SizedBox(height: 18),
-            Text(title,
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-                textAlign: TextAlign.center),
-            const SizedBox(height: 8),
-            Text(subtitle,
-                style: TextStyle(fontSize: 14, height: 1.5, color: cs.onSurfaceVariant),
-                textAlign: TextAlign.center),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) =>
+      _StatePanel(icon: Icons.route_rounded, title: title, subtitle: subtitle);
 }
 
 class _SignInPrompt extends StatelessWidget {
@@ -254,28 +334,12 @@ class _SignInPrompt extends StatelessWidget {
   final VoidCallback onSignIn;
   final String prompt;
   final String cta;
-
   @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 36),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.lock_outline_rounded, size: 60, color: cs.onSurfaceVariant),
-            const SizedBox(height: 18),
-            Text(prompt,
-                style: const TextStyle(fontSize: 16, height: 1.4),
-                textAlign: TextAlign.center),
-            const SizedBox(height: 20),
-            FilledButton(onPressed: onSignIn, child: Text(cta)),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => _StatePanel(
+        icon: Icons.lock_outline_rounded,
+        title: prompt,
+        action: SizedBox(width: double.infinity, child: AppButton(cta, onTap: onSignIn)),
+      );
 }
 
 class _UpgradeBanner extends StatelessWidget {
@@ -286,40 +350,29 @@ class _UpgradeBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: cs.primary.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: cs.primary.withValues(alpha: 0.25)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            Icon(Icons.workspace_premium_rounded, color: cs.primary, size: 22),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(l.historyFullTitle,
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-            ),
-          ]),
-          const SizedBox(height: 6),
-          Text(l.historyFullBody(count),
-              style: TextStyle(fontSize: 13.5, height: 1.4, color: cs.onSurfaceVariant)),
-          const SizedBox(height: 12),
-          Align(
-            alignment: Alignment.centerRight,
-            child: FilledButton(onPressed: onUpgrade, child: Text(l.goPremium)),
-          ),
-        ],
+    final c = context.colors;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: GlassModule(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Icon(Icons.workspace_premium_rounded, color: c.primary, size: 22),
+              const SizedBox(width: 10),
+              Expanded(child: Text(l.historyFullTitle, style: titleS(context))),
+            ]),
+            const SizedBox(height: 6),
+            Text(l.historyFullBody(count), style: body(context).copyWith(color: c.textSecondary, height: 1.4)),
+            const SizedBox(height: 12),
+            AppButton(l.goPremium, onTap: onUpgrade),
+          ],
+        ),
       ),
     );
   }
 }
-
 
 class _ErrorRetry extends StatelessWidget {
   const _ErrorRetry({required this.message, required this.onRetry});
@@ -329,15 +382,10 @@ class _ErrorRetry extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(message),
-          const SizedBox(height: 12),
-          OutlinedButton(onPressed: onRetry, child: Text(l.retry)),
-        ],
-      ),
+    return _StatePanel(
+      icon: Icons.cloud_off_rounded,
+      title: message,
+      action: SizedBox(width: double.infinity, child: AppButton(l.retry, kind: AppBtnKind.secondary, onTap: onRetry)),
     );
   }
 }

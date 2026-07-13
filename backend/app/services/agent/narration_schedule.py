@@ -73,10 +73,13 @@ class NarrationScheduler:
             return True
         return False
 
-    def resume(self, live_pos: GeoPoint | None, max_dist_m: float) -> bool:
+    def resume(
+        self, live_pos: GeoPoint | None, max_dist_m: float, add_connective: bool = True
+    ) -> bool:
         """Make the most-recent still-relevant paused line current again, with a spoken
         connective. Discards lines we've walked away from (a resume there would be stale).
-        Returns True if a line was resumed."""
+        `add_connective=False` suppresses the built-in weave connective — used when a
+        higher-level tour bridge already led back in. Returns True if a line was resumed."""
         while self.paused:
             item = self.paused.pop()
             if not item.has_next():
@@ -87,7 +90,7 @@ class NarrationScheduler:
                 and haversine_m(live_pos, item.pause_pos) > max_dist_m
             ):
                 continue  # walked too far — don't resume a line about somewhere behind us
-            if not item.resumed:
+            if add_connective and not item.resumed:
                 item.sentences.insert(
                     item.cursor, resume_connective(self.language, self._resume_i)
                 )
@@ -96,6 +99,29 @@ class NarrationScheduler:
             self.current = item
             return True
         return False
+
+    def top_paused(self) -> NarrItem | None:
+        """The most-recent paused line that still has sentences left (peek, no pop) — so the
+        producer can inspect it (object vs area line) to pick a resume radius/bridge mood."""
+        for item in reversed(self.paused):
+            if item.has_next():
+                return item
+        return None
+
+    def resumable(self, live_pos: GeoPoint | None, max_dist_m: float) -> bool:
+        """True if the top paused line is still close enough to be worth returning to (we
+        haven't walked past it). Same distance test `resume` applies, without popping."""
+        top = self.top_paused()
+        if top is None:
+            return False
+        if top.pause_pos is None or live_pos is None:
+            return True
+        return haversine_m(live_pos, top.pause_pos) <= max_dist_m
+
+    def drop_paused(self) -> None:
+        """Discard all parked lines — used when a tour bridge moves us on to fresh material
+        instead of returning to a now-stale topic."""
+        self.paused.clear()
 
     def current_outranks(self, new_sig: Significance) -> bool:
         """True when the object being narrated outranks the newcomer — so we finish it in

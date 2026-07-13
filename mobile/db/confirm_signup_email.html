@@ -1,0 +1,23 @@
+<!--
+  Supabase → Authentication → Emails → Templates → "Confirm signup".
+  Paste this as the message body and set the Subject to:  Ваш код подтверждения: {{ .Token }}
+
+  IMPORTANT: the app now verifies a 6-digit CODE (not a magic link), so the template MUST
+  contain {{ .Token }} (it renders the code). The default template only has a link and will
+  NOT work with the in-app code field.
+-->
+<div style="font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:#f6f2ea;padding:32px;color:#20241c;">
+  <div style="max-width:440px;margin:0 auto;background:#ffffff;border-radius:20px;padding:32px;box-shadow:0 12px 34px -14px rgba(45,60,50,.25);">
+    <div style="font-size:22px;font-weight:800;letter-spacing:-.5px;margin-bottom:8px;">Подтверждение почты</div>
+    <div style="font-size:15px;color:#5c6157;line-height:1.5;margin-bottom:24px;">
+      Введите этот код в приложении AI Audio Guide, чтобы завершить создание аккаунта.
+    </div>
+    <div style="font-size:38px;font-weight:800;letter-spacing:10px;text-align:center;color:#35674e;background:#eef3ec;border-radius:14px;padding:18px 0;font-variant-numeric:tabular-nums;">
+      {{ .Token }}
+    </div>
+    <div style="font-size:13px;color:#98a091;margin-top:20px;line-height:1.5;">
+      Код действует ограниченное время. Если вы не создавали аккаунт — просто проигнорируйте это письмо.
+    </div>
+  </div>
+  <div style="text-align:center;color:#98a091;font-size:12px;margin-top:16px;">AI Audio Guide</div>
+</div>

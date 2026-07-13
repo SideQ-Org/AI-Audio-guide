@@ -25,6 +25,7 @@ from enum import StrEnum
 from app.config import settings
 from app.services.agent import languages as lang
 from app.services.agent.companion import Companion
+from app.services.agent.director import atomize_facts, find_lookahead, find_revisit
 from app.services.agent.narrator import split_hook
 from app.services.agent.pipeline import TextPipeline
 from app.services.agent.significance import significance_from_weight, tags_have_wiki
@@ -41,6 +42,7 @@ from app.services.geo.ranking import build_candidates
 from app.services.metrics import GUIDE
 from app.services.state.store import StateStore
 from app.shared.geo_math import haversine_m
+from app.shared.memory import ObjectMemo
 from app.shared.schemas import (
     Candidate,
     CompanionInput,
@@ -49,6 +51,7 @@ from app.shared.schemas import (
     Heading,
     NarrativePlan,
     Pace,
+    Place,
     SessionState,
     Significance,
 )
@@ -158,12 +161,15 @@ class Orchestrator:
         companion: Companion,
         store: StateStore,
         geocoder: Geocoder | None = None,
+        summarizer=None,
     ) -> None:
         self.discovery = discovery
         self.pipeline = pipeline
         self.companion = companion
         self.store = store
         self.geocoder = geocoder
+        self.summarizer = summarizer
+        self._bg: set[asyncio.Task] = set()  # hold refs to fire-and-forget warm tasks
 
     # Ranking of in-bubble candidates: distance, with a bonus for objects in the gaze
     # cone (visible ahead). 0.6 => a 70 m object ahead ranks like ~42 m, so it beats a
@@ -182,9 +188,12 @@ class Orchestrator:
         bounded in memory and in the persisted payload. A point walked while the tour is
         paused carries a trailing `1.0` flag (`[lat, lon, 1.0]`) so the history map can
         draw that stretch differently; normal points stay 2-element `[lat, lon]`."""
-        if not st.path or haversine_m(
+        if not st.path or (seg := haversine_m(
             GeoPoint(lat=st.path[-1][0], lon=st.path[-1][1]), position
-        ) >= _PATH_STEP_M:
+        )) >= _PATH_STEP_M:
+            # Odometer for the revisit gate: only count real walking (not paused stretches).
+            if st.path and not paused:
+                st.route_len_m += seg
             point = [round(position.lat, 6), round(position.lon, 6)]
             if paused:
                 point.append(1.0)
@@ -243,6 +252,31 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — a warm failure must never disturb the greeting
             pass
 
+    def _warm_area_intro(
+        self, position: GeoPoint, language: str, theme_override: str | None
+    ) -> None:
+        """Non-blocking: geocode + pre-generate the area story arc during greeting delivery,
+        cached by area_key, so _maybe_area_intro on the next tick serves it instantly instead
+        of a cold planner LLM wait. Read-only — never touches session state; matches the live
+        area_key (district|city) so the next tick's resolve finds it."""
+        if self.geocoder is None:
+            return
+
+        async def _run() -> None:
+            try:
+                addr = await self.geocoder.reverse(position, language)
+                key = addr.district or addr.city
+                if key:
+                    await self.pipeline.warm_plan(
+                        key, addr, facts=None, theme_override=theme_override, language=language
+                    )
+            except Exception:  # noqa: BLE001 — a warm failure must never disturb the tour
+                pass
+
+        task = asyncio.ensure_future(_run())
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
     async def narrate_object(
         self, session_id: str, place_id: str, *, passed: bool = False
     ) -> OrchestratorOutput:
@@ -273,6 +307,7 @@ class Orchestrator:
                 preferences=st.control_patch, language=st.language,
                 theme=plan.active_theme() or None, told=plan.told,
                 next_hook=plan.next_hook, passing=True, passed=passed,
+                recall=st.memory.objects,
             )
         except Exception:
             return await self._finish(st, State.ERROR, "error")
@@ -346,6 +381,9 @@ class Orchestrator:
         if settings.session_greeting and not st.control_patch.mute and not st.greeted:
             st.greeted = True
             self._warm_inventory(session_id, position)
+            # Pre-generate the area story arc while the greeting is being spoken, so the first
+            # area intro (next tick) is instant instead of a cold planner LLM wait.
+            self._warm_area_intro(position, st.language, st.narrative_plan.theme_override)
             text = lang.greeting(st.language, None, _local_hour(position.lon))
             log.info("greeting | %s", clip(text))
             return await self._finish(st, State.NARRATING, "narration", text)
@@ -393,11 +431,16 @@ class Orchestrator:
         # instant you reach it, not 5-20 s later. The arc context is passed so the
         # pre-generated line fits the running story.
         plan = st.narrative_plan
+        # A notable object coming up ahead, to let narration lean forward ("впереди — усадьба").
+        lookahead = find_lookahead(
+            result.candidates, seen=st.seen_place_ids, min_ahead_m=settings.narrate_radius_m
+        )
         self.pipeline.warm_ahead(
             result.candidates, address=st.address, language=st.language,
             seen=st.seen_place_ids, history=st.narration_history,
             theme=plan.active_theme() or None, told=plan.told, next_hook=plan.next_hook,
             heading=heading, pace=pace, preferences=st.control_patch,
+            recall=st.memory.objects, lookahead=lookahead,
         )
 
         # Narrate an object ONLY when the user is passing close to it ("проходишь
@@ -487,6 +530,8 @@ class Orchestrator:
                 told=plan.told,
                 next_hook=plan.next_hook,
                 passing=True,  # the user is right beside this object — introduce it, don't skip
+                recall=st.memory.objects,  # callbacks: reference an earlier related object
+                lookahead=lookahead,  # foreshadow: tease a notable object coming up ahead
             )
         except Exception:
             return await self._finish(st, State.ERROR, "error")
@@ -584,17 +629,20 @@ class Orchestrator:
             return None
         st.area_intro_done = True  # one opener per area, even if it comes back empty
         plan = st.narrative_plan
-        try:
-            # fast: the planner forms theme+outline+opener from general knowledge;
-            # web area facts are fetched lazily for the later beats.
-            draft = await self.pipeline.make_plan(
-                st.address,
-                facts=st.area_facts,
-                theme_override=plan.theme_override,
-                language=st.language,
-            )
-        except Exception:
-            draft = None
+        # Prefer an arc pre-generated during the greeting (instant); else form it now (blocking).
+        draft = self.pipeline.take_plan(st.area_key)
+        if draft is None:
+            try:
+                # fast: the planner forms theme+outline+opener from general knowledge;
+                # web area facts are fetched lazily for the later beats.
+                draft = await self.pipeline.make_plan(
+                    st.address,
+                    facts=st.area_facts,
+                    theme_override=plan.theme_override,
+                    language=st.language,
+                )
+            except Exception:
+                draft = None
         if draft is None:
             return None
         plan.area_key = st.area_key
@@ -654,6 +702,18 @@ class Orchestrator:
             if text:
                 return await self._finish(st, State.NARRATING, "narration", text)
 
+        # 1.5) revisit: the walker looped back to an object told earlier (and has since walked
+        #      far enough along the route) -> acknowledge it and add ONE fresh detail.
+        if settings.revisit_enabled and st.position is not None:
+            memo = find_revisit(
+                st.memory.objects, st.position, st.route_len_m,
+                radius_m=settings.revisit_radius_m, min_route_m=settings.revisit_min_route_m,
+            )
+            if memo is not None:
+                out = await self._revisit(st, memo, heading, pace)
+                if out is not None:
+                    return out
+
         # 2) fall back to telling MORE about the last object (bounded tightly)
         if st.last_place is not None and st.elaboration_count < _MAX_ELABORATE:
             try:
@@ -706,6 +766,7 @@ class Orchestrator:
                     next_hook=plan.next_hook,
                     passing=False,  # not right beside it — it's visible up ahead
                     reach=True,  # frame as "виднеется впереди"; never dead air
+                    recall=st.memory.objects,
                 )
             except Exception:
                 out = None
@@ -774,13 +835,21 @@ class Orchestrator:
 
         # (3) cascade: try the current level; if it has no NEW fact (silence), descend
         # and try the next — bounded per tick so a fully-dry area doesn't burn calls.
-        # Anti-fabrication gate: the cascade asks the model for an "atypical fact про
-        # <area>", which it INVENTS when there are no verified facts (the "метеоритный
-        # кратер" fabrication from the field walk). Skip it in fact-less areas — the
-        # planned arc + reach + real objects carry the tour instead of ungrounded prose.
+        # Anti-fabrication is LEVEL-AWARE: with no web-verified facts the model INVENTS
+        # obscure street/district detail (the "метеоритный кратер" fabrication) — but it
+        # reliably knows a *named city*. So keep talking about the CITY (grounded, [SILENCE]
+        # if unsure) instead of going quiet, and just don't descend into the finer levels
+        # it would make up. This is the "лучше бы про город дальше говорил" fix.
         if settings.area_cascade_requires_facts and not st.area_facts:
-            log.info("skip cascade: no verified area facts (anti-fabrication)")
-            return ""
+            city = st.address.city
+            if not city:
+                log.info("skip cascade: no verified facts and no city to fall back on")
+                return ""
+            city_l, _, _ = lang.level_labels(st.language)
+            topic = lang.area_topic_grounded(st.language, city_l, city)
+            # repeat-suppression in _emit_area_beat self-limits this: once the well-known
+            # city facts are spent it returns "" and the caller bridges + goes quiet.
+            return await self._emit_area_beat(st, topic, focus=None, pace=pace)
         levels = self._area_levels(st)
         attempts = 0
         while st.area_level < len(levels) and attempts < _LEVEL_ATTEMPTS_PER_TICK:
@@ -799,6 +868,35 @@ class Orchestrator:
             st.area_level_beats = 0
         return ""
 
+    async def _revisit(self, st, memo, heading: Heading, pace: Pace) -> OrchestratorOutput | None:
+        """Narrate a short 'снова у X' + one fresh detail for a returned-to object (via elaborate,
+        which reuses cached facts and avoids HISTORY). Re-arms the gate afterwards so it can't
+        re-fire until the walker leaves and comes back again — even when nothing new was found."""
+        place = Place(
+            id=memo.id, name=memo.name, category=memo.category,
+            location=GeoPoint(lat=memo.lat or 0.0, lon=memo.lon or 0.0), tags={},
+        )
+        sig = Significance(memo.significance) if memo.significance else Significance.MEDIUM
+        try:
+            text = await self.pipeline.elaborate(
+                place, sig, history=st.narration_history, address=st.address,
+                heading=heading, pace=pace, language=st.language, revisit=True,
+            )
+        except Exception:
+            text = ""
+        # Re-arm regardless of outcome: don't retry every tick while lingering near it.
+        for o in st.memory.objects:
+            if o.id == memo.id:
+                o.said_route_m = st.route_len_m
+                break
+        if text and st.memory.is_repeat(text):
+            text = ""
+        if not text:
+            return None
+        st.narration_history = (st.narration_history + [text])[-_HISTORY_CAP:]
+        log.info("revisit place=%r route=%.0f | %s", memo.name, st.route_len_m, clip(text))
+        return await self._finish(st, State.NARRATING, "narration", text, place, sig)
+
     def _area_levels(self, st) -> list[tuple[str, str]]:
         """The (label, name) levels to descend through, broadest first. Labels are in
         the session language so the cascade topic reads naturally to the LLM."""
@@ -813,24 +911,37 @@ class Orchestrator:
             levels.append((street_l, a.street))
         return levels
 
-    async def _emit_area_beat(self, st, topic: str, *, focus: str | None, pace: Pace) -> str:
+    async def _emit_area_beat(
+        self, st, topic: str, *, focus: str | None, pace: Pace,
+        pregen: tuple[str, str | None] | None = None,
+    ) -> str:
+        """Generate (or accept a pre-generated) area beat and commit it into session
+        state. `pregen=(text, hook)` skips the LLM call — used by commit_area to land a
+        beat that prefetch_area already produced in the background."""
         plan = st.narrative_plan
-        try:
-            text, hook = await self.pipeline.narrate_area(
-                st.address,
-                facts=st.area_facts or None,
-                theme=plan.active_theme() or None,
-                topic=topic,
-                told=plan.told,
-                next_hook=plan.next_hook,
-                last_place_name=st.last_place.name if st.last_place else None,
-                history=st.narration_history,
-                pace=pace,
-                language=st.language,
-                beat_mode=lang.beat_mode(st.area_beats),  # rotate the rhetorical angle (A1)
-            )
-        except Exception:
-            return ""
+        # Fact-level dedup: feed the beat ONLY the area facts not yet told this walk (even if an
+        # old one is reworded). Once they're exhausted -> None -> the beat has no verified facts,
+        # so it descends the cascade / stays factual instead of re-telling ("опять про берёзы").
+        new = st.memory.new_facts(atomize_facts(st.area_facts))
+        if pregen is not None:
+            text, hook = pregen
+        else:
+            try:
+                text, hook = await self.pipeline.narrate_area(
+                    st.address,
+                    facts=" ".join(new) or None,
+                    theme=plan.active_theme() or None,
+                    topic=topic,
+                    told=plan.told,
+                    next_hook=plan.next_hook,
+                    last_place_name=st.last_place.name if st.last_place else None,
+                    history=st.narration_history,
+                    pace=pace,
+                    language=st.language,
+                    beat_mode=lang.beat_mode(st.area_beats),  # rotate the rhetorical angle (A1)
+                )
+            except Exception:
+                return ""
         if text and st.memory.is_repeat(text):
             # The street/district beat repeated an earlier one verbatim — the dominant
             # "повторял факты про улицы" symptom. Drop it; the cascade descends a level.
@@ -838,6 +949,7 @@ class Orchestrator:
             GUIDE.suppress_repeat()
             return ""
         if text:
+            st.memory.mark_facts_told(new)  # these facts are now spoken — don't reuse them
             GUIDE.area_beat()
             st.area_beats += 1
             st.area_bridge_said = False  # real content flowed -> allow a later bridge
@@ -847,38 +959,137 @@ class Orchestrator:
             plan.next_hook = hook  # baton for the next paragraph
             st.narration_history = (st.narration_history + [text])[-_HISTORY_CAP:]
             log.info(
-                "area beat level=%d topic=%r%s | %s",
-                st.area_level, topic, " focus" if focus else "", clip(text),
+                "area beat level=%d topic=%r%s newfacts=%d | %s",
+                st.area_level, topic, " focus" if focus else "", len(new), clip(text),
             )
         return text
 
+    # -- background pre-generation (hide inter-beat LLM latency) -------------- #
+    async def prefetch_area(
+        self, session_id: str, pace: Pace
+    ) -> tuple[str, str, str | None] | None:
+        """READ-ONLY pre-generation of the NEXT planned (outline) area beat, run in the
+        background while the current beat is still being spoken. Mutates NOTHING — it does
+        not save the session, so it can run concurrently with delivery / a barge-in / a
+        weave without corrupting the running narration. The producer lands the result via
+        commit_area (single-threaded, freshness-rechecked). Returns (topic, text, hook),
+        or None when there's nothing safe to pre-generate this beat.
+
+        Scope is deliberately narrow: only the outline spine (where the field-walk gaps
+        were). The area-facts fetch and the city/district/street cascade are stateful, so
+        they're left to the live path — prefetch bails out for both."""
+        st = await self.store.load(session_id)
+        if not self._has_area(st):
+            return None
+        # Don't trigger the (state-mutating) area-facts fetch from a read-only prefetch:
+        # if facts aren't resolved yet, let the live path fetch them first.
+        if settings.area_enrich and st.area_facts is None:
+            return None
+        plan = st.narrative_plan
+        topic = plan.next_topic()  # pure peek; the outline advances only on commit
+        if topic is None:
+            return None  # outline exhausted -> cascade (stateful), not prefetched
+        try:
+            # Read-only: filter to not-yet-told facts (same as the live path); the actual
+            # told-marking happens single-threaded in _emit_area_beat when commit_area lands this.
+            text, hook = await self.pipeline.narrate_area(
+                st.address,
+                facts=" ".join(st.memory.new_facts(atomize_facts(st.area_facts))) or None,
+                theme=plan.active_theme() or None,
+                topic=topic,
+                told=plan.told,
+                next_hook=plan.next_hook,
+                last_place_name=st.last_place.name if st.last_place else None,
+                history=st.narration_history,
+                pace=pace,
+                language=st.language,
+                beat_mode=lang.beat_mode(st.area_beats),
+            )
+        except Exception:
+            return None
+        if not text:
+            return None
+        return topic, text, hook
+
+    async def commit_area(
+        self, session_id: str, topic: str, text: str, hook: str | None, pace: Pace
+    ) -> OrchestratorOutput | None:
+        """Land a pre-generated area beat as the next narration, re-checking freshness
+        against the live state. Returns the narration output, or None if the beat went
+        stale between prefetch and now (the topic was already covered, or it's a near-
+        repeat) so the caller falls back to generating live."""
+        st = await self.store.load(session_id)
+        plan = st.narrative_plan
+        # Freshness: the beat is only valid if it's STILL exactly the next outline topic
+        # the live path would pick. If it was covered meanwhile, or a barge-in theme-switch
+        # rebuilt the outline, next_topic() differs -> discard and let the live path run.
+        if topic != plan.next_topic():
+            return None
+        emitted = await self._emit_area_beat(
+            st, topic, focus=None, pace=pace, pregen=(text, hook)
+        )
+        if not emitted:
+            return None  # is_repeat dropped it
+        return await self._finish(st, State.NARRATING, "narration", emitted)
+
+    async def summarize(self, session_id: str) -> str:
+        """A short structured recap of the whole walk from everything narrated — for the Stop
+        sheet. Off the hot path (fired once on end); '' when the summarizer is off / too little
+        was said."""
+        if self.summarizer is None:
+            return ""
+        st = await self.store.load(session_id)
+        text = await self.summarizer.summarize(
+            st.memory.narrations, address=st.address,
+            theme=st.narrative_plan.theme or None, language=st.language,
+        )
+        # Persist onto the durable walk (best-effort) so it's readable later in the detail —
+        # by the owner and by a friend it's shared with. Guest / no-DB is a no-op.
+        if text and st.user_id and settings.database_url:
+            try:
+                from app.services.accounts import history
+
+                history.record_summary(st, text)
+            except Exception:  # noqa: BLE001 — persistence must never break the recap
+                pass
+        return text
+
     # -- barge-in ----------------------------------------------------------- #
-    async def on_utterance(self, session_id: str, text: str) -> OrchestratorOutput:
+    async def prepare_utterance(self, session_id: str, text: str):
+        """Load state, enter LISTENING and build the CompanionInput for a barge-in. Shared
+        by the non-streaming on_utterance and main.py's streaming path (which drives the
+        companion itself, then calls finalize_utterance)."""
         CURRENT_SID.set(session_id)  # stamp the barge-in Q/A lines with the session
         st = await self.store.load(session_id)
         st.state = State.LISTENING
         last = st.narration_history[-1] if st.narration_history else None
         log.info("companion Q | %s", clip(text))
-
-        comp = await self.companion.respond(
-            CompanionInput(
-                user_message=text,
-                last_narration=last,
-                address=st.address,
-                history=st.conversation[-6:],
-                language=st.language,
-            )
+        cinp = CompanionInput(
+            user_message=text,
+            last_narration=last,
+            address=st.address,
+            history=st.conversation[-6:],
+            language=st.language,
         )
-        if comp.control_patch is not None:
-            st.control_patch = merge_patch(st.control_patch, comp.control_patch)
-        st.conversation = (st.conversation + [f"U: {text}", f"G: {comp.reply}"])[-_CONVO_CAP:]
-        # weave the answer back into the tour: queue the user's topic so the next
-        # area beat picks it up ("кстати, ты спрашивал про…"). Highest priority.
-        plan = st.narrative_plan
-        if text.strip() and text.strip() not in plan.pending_focus:
-            plan.pending_focus.append(text.strip())
-        log.info("companion A | %s", clip(comp.reply))
-        return await self._finish(st, State.ANSWERING, "reply", comp.reply)
+        return st, cinp
+
+    async def finalize_utterance(
+        self, st, user_text: str, reply: str, control_patch=None
+    ) -> OrchestratorOutput:
+        """Apply steering, record the Q/A into conversation, persist, enter ANSWERING.
+        The Companion's reply is the WHOLE answer — we deliberately do NOT re-queue it as an
+        area-beat focus topic: on a field walk that produced a second, redundant/stale beat
+        re-telling the same fact ("повторял по два раза"). Shared by both barge-in paths."""
+        if control_patch is not None:
+            st.control_patch = merge_patch(st.control_patch, control_patch)
+        st.conversation = (st.conversation + [f"U: {user_text}", f"G: {reply}"])[-_CONVO_CAP:]
+        log.info("companion A | %s", clip(reply))
+        return await self._finish(st, State.ANSWERING, "reply", reply)
+
+    async def on_utterance(self, session_id: str, text: str) -> OrchestratorOutput:
+        st, cinp = await self.prepare_utterance(session_id, text)
+        comp = await self.companion.respond(cinp)
+        return await self.finalize_utterance(st, text, comp.reply, comp.control_patch)
 
     # -- theme switching (user picks/voices a topic to revolve around) ------- #
     async def set_theme(self, session_id: str, theme: str) -> None:
@@ -928,7 +1139,19 @@ class Orchestrator:
         if kind == "narration" and text:
             st.memory.record_narration(text)
             if place is not None:
-                st.memory.record_object(place.id)
+                st.memory.record_object_node(
+                    ObjectMemo(
+                        id=place.id,
+                        name=place.name or "",
+                        category=place.category or "",
+                        wikidata=(place.tags or {}).get("wikidata"),
+                        theme=st.narrative_plan.theme or None,
+                        significance=significance.value if significance is not None else None,
+                        lat=place.location.lat,
+                        lon=place.location.lon,
+                        said_route_m=st.route_len_m,
+                    )
+                )
         st.state = state
         await self.store.save(st)
         sig = significance.value if significance is not None else None

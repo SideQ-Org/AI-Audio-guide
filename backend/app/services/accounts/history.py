@@ -35,6 +35,28 @@ _log = logging.getLogger("aiguide.history")
 _tasks: set[asyncio.Task] = set()
 
 
+def record_summary(state, summary: str) -> None:
+    """Persist the end-of-walk recap onto the current walk (best-effort, detached) so it's
+    readable later in the walk detail — by the owner and by a friend it's shared with."""
+    if not accounts_enabled() or not state.user_id or not state.walk_id or not summary:
+        return
+    task = asyncio.create_task(
+        _write_summary(str(state.walk_id), str(state.user_id), summary)
+    )
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+async def _write_summary(walk_id: str, user_id: str, summary: str) -> None:
+    try:
+        async with session_scope() as session:
+            await repo.set_walk_summary(
+                session, walk_id=walk_id, user_id=user_id, summary=summary
+            )
+    except Exception as e:  # noqa: BLE001 — best-effort; never break the end flow
+        _log.warning("record_summary failed: %s", e)
+
+
 def record_object(state, place, significance, narration: str) -> None:
     """Record a just-narrated object into the current walk (creating/rotating the walk
     as needed). Safe to call on every narration; returns immediately."""
@@ -124,8 +146,10 @@ async def _write(new_walk: bool, wid: uuid.UUID, meta: dict, event: dict) -> Non
                         if not await repo.delete_oldest_walk(session, user_id=meta["user_id"]):
                             break
             await repo.append_event(session, walk_id=wid, **event)
-            # ended_at trails the last narrated object (MVP: no explicit stop signal),
-            # giving the list view a sensible "last activity" time + duration.
+            # ended_at trails the last narrated object, giving the list view a sensible
+            # "last activity" time + duration. The client sends an explicit `end` on Stop;
+            # a walk shorter than its 10-min record threshold is pruned there (see
+            # `_discard_walk` in main.py), so this row is created eagerly but may be deleted.
             await repo.end_walk(session, walk_id=wid)
             # Snapshot the route breadcrumb accumulated so far onto the walk row.
             await repo.update_walk_path(session, walk_id=wid, path=meta.get("path"))

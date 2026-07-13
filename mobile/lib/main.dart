@@ -15,6 +15,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -45,6 +46,7 @@ import 'ui/components.dart' as ui;
 import 'ui/design.dart' as ui;
 import 'ui/screens.dart' as ui;
 import 'ui/social_screens.dart' as ui;
+import 'ui/track_map.dart';
 
 // Persisted-preference keys.
 const _kPrefTheme = 'themeMode';
@@ -546,6 +548,23 @@ class PlaceMark {
   PlaceMark(this.id, this.point, this.name, this.text);
 }
 
+// A narrated-place map pin: a colored `location_on` with a CRISP white halo behind it
+// (a slightly larger white pin), not a blurred drop-shadow. Blurred shadows on markers
+// smear/ghost when the map pans under Impeller (iOS sim); a solid halo doesn't.
+class _MapPin extends StatelessWidget {
+  const _MapPin({required this.size, required this.color});
+  final double size;
+  final Color color;
+  @override
+  Widget build(BuildContext context) => Stack(
+        alignment: Alignment.center,
+        children: [
+          Icon(Icons.location_on, size: size + 3, color: Colors.white),
+          Icon(Icons.location_on, size: size, color: color),
+        ],
+      );
+}
+
 // A found-but-not-yet-narrated object from the search disc (lite: name + type),
 // pinned faintly on the map so the user sees everything around them, not only the
 // place currently being narrated. Server pushes these in a "places" frame.
@@ -718,11 +737,11 @@ class _CoWalkPin extends StatelessWidget {
         width: 34,
         height: 34,
         alignment: Alignment.center,
+        // White border for separation; no blurred shadow (smears on map pan / Impeller).
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           color: uc.primary,
           border: Border.all(color: Colors.white, width: 2),
-          boxShadow: [BoxShadow(color: uc.primary.withValues(alpha: .5), blurRadius: 10, spreadRadius: -2)],
         ),
         child: Text(initial,
             style: TextStyle(color: uc.onPrimary, fontWeight: FontWeight.w800, fontSize: 15)),
@@ -750,13 +769,12 @@ class _CategoryPin extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = _c(context);
     return Container(
+      // No blurred shadow: it smears when the map pans (Impeller). The filled pill +
+      // hairline border give enough separation on the map.
       decoration: BoxDecoration(
         color: c.glassPill,
         shape: BoxShape.circle,
         border: Border.all(color: c.hairline),
-        boxShadow: [
-          BoxShadow(color: c.shadow, blurRadius: 5, spreadRadius: -1, offset: const Offset(0, 2)),
-        ],
       ),
       alignment: Alignment.center,
       child: Icon(style.icon, size: 17, color: style.color),
@@ -784,7 +802,17 @@ double _bearingSpread(List<double> xs) {
 class _Speech {
   final String text;
   final bool isNarration;
-  _Speech(this.text, this.isNarration);
+  // Status-card title (place name) + reply styling to show WHILE this sentence is spoken —
+  // so the bottom card tracks the sentence being read aloud, not the next one the server
+  // already streamed ahead for gapless pacing.
+  final String? title;
+  final bool isReply;
+  // Server-synthesized neural audio (paid tier). When present it's played via the
+  // AudioPlayer; when null the text is spoken by the on-device flutter_tts voice.
+  final Uint8List? audio;
+  final String? mime;
+  _Speech(this.text, this.isNarration,
+      {this.title, this.isReply = false, this.audio, this.mime});
 }
 
 // Tour themes the user can switch to ("" = let the guide choose automatically).
@@ -886,8 +914,14 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   CompassReading? _compassReading;
   final List<double> _recentCourses = []; // recent GPS courses, for a steady-walk check
 
-  // On-device TTS — the guide speaks the narration aloud.
+  // On-device TTS — the free tier speaks the narration aloud.
   final FlutterTts _tts = FlutterTts();
+  // Plays server-synthesized neural audio (paid tier). One reused instance; barge-in and
+  // pause stop it just like _tts.stop().
+  final AudioPlayer _audio = AudioPlayer();
+  // Completed when the current neural clip finishes OR is stopped (barge-in/pause/mute),
+  // so _speakNext's await never hangs when playback is cut short.
+  Completer<void>? _audioDone;
   bool _voice = true; // speaker on/off
   final List<_Speech> _speakQueue = []; // paragraphs/replies awaiting TTS (in order)
   String _theme = ''; // current tour theme code ("" = auto)
@@ -923,6 +957,18 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   ui.ProfileStats? _aggregatedStats; // real profile stats, aggregated from /walks
   bool _statsFetched = false;
 
+  // Session tracking for the end-of-walk summary + the "record only if ≥10 min" rule.
+  DateTime? _sessionStart; // when the current tour started (null when not touring)
+  double _sessionMeters = 0; // distance walked this session (haversine accumulator)
+  // Live GPS breadcrumb of the current walk ([[lat, lon(, 1.0 if paused)], ...]) — drawn as a
+  // growing track on the map and shown in the end-of-walk summary. Reset when a session starts.
+  final List<List<double>> _track = [];
+  // The structured end-of-walk recap (arrives async over the WS after Stop); the summary sheet
+  // shows a spinner until it lands. null = not ready.
+  final ValueNotifier<String?> _walkSummary = ValueNotifier<String?>(null);
+  Timer? _summaryTimer; // keeps the socket open briefly after Stop so the recap can arrive
+  static const _kMinRecord = Duration(minutes: 10); // shorter walks are discarded, not saved
+
   bool _speaking = false; // TTS currently talking
   int _narrationsSinceAd = 0; // free-tier mid-tour ad cadence (every kMidTourAdEvery)
   bool _paused = false; // tour paused from the notification's Pause button
@@ -935,9 +981,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   Timer? _watchdog; // liveness watchdog: force-reconnect if the socket goes silent
   DateTime _lastRxAt = DateTime.now(); // last inbound frame (any type) — resets the watchdog
   Map<String, dynamic>? _lastPositionMsg; // last position sent — replayed on reconnect
-  final String _sid = _genSessionId(); // stable id for resume-on-reconnect
+  // Stable id for resume-on-reconnect DURING a walk; regenerated when a NEW tour starts
+  // (_startWithGate) so Stop→start never resumes the finished session on the backend.
+  String _sid = _genSessionId();
 
-  bool get _active => _walkTimer != null || _gpsSub != null;
+  // `_touring` flips synchronously the instant a tour starts (before the async GPS
+  // setup assigns `_gpsSub`), so the activation choreography renders immediately —
+  // otherwise, in GPS mode with no fix yet, nothing would rebuild and the animation
+  // (and the tour-UI slide-in) would never fire.
+  bool _touring = false;
+  bool get _active => _touring || _walkTimer != null || _gpsSub != null;
 
   @override
   void initState() {
@@ -1019,6 +1072,28 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         IosTextToSpeechAudioMode.spokenAudio,
       );
     }
+    // Neural-audio player: mirror the flutter_tts session so paid-tier playback also keeps
+    // going with the screen locked, ducks music, and routes to a Bluetooth earbud. Both
+    // engines use the SAME .playback category so switching between them (per sentence,
+    // paid vs. fallback) never re-negotiates a conflicting session.
+    if (!kIsWeb) {
+      await _audio.setReleaseMode(ReleaseMode.stop);
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        await _audio.setAudioContext(
+          AudioContext(
+            iOS: AudioContextIOS(
+              category: AVAudioSessionCategory.playback,
+              options: const {
+                AVAudioSessionOptions.mixWithOthers,
+                AVAudioSessionOptions.duckOthers,
+                AVAudioSessionOptions.allowBluetoothA2DP,
+                AVAudioSessionOptions.allowAirPlay,
+              },
+            ),
+          ),
+        );
+      }
+    }
     // The queue is driven by awaiting speak() in _speakNext (reliable across
     // platforms). On web the browser's SpeechSynthesis 'end' event is sometimes
     // dropped mid-utterance (a known Chrome bug, easy to hit when an overlay opens),
@@ -1032,18 +1107,45 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     });
   }
 
+  // Decode the optional neural-audio payload on a narration/reply frame (paid tier).
+  // Returns null when absent (free tier / TTS off / synth failed) => on-device voice.
+  Uint8List? _decodeAudio(Map<String, dynamic> m) {
+    final b64 = m['audio_b64'];
+    if (b64 is! String || b64.isEmpty) return null;
+    try {
+      return base64Decode(b64);
+    } catch (_) {
+      return null; // malformed payload — fall back to on-device TTS
+    }
+  }
+
   // Queue a paragraph/reply for TTS (never cut a line mid-sentence). Narration
   // paragraphs are paced by the server via the `played` signal; with the voice
   // muted we still ack narration so the story keeps flowing on screen.
-  void _enqueueSpeech(String text, {required bool isNarration}) {
+  void _enqueueSpeech(
+    String text, {
+    required bool isNarration,
+    String? title,
+    bool isReply = false,
+    Uint8List? audio,
+    String? mime,
+  }) {
     // Mic open: never speak a narration over the user. The server is already
     // paused, so don't ack `played` either — just drop this stray paragraph.
     if (_recording && isNarration) return;
     if (!_voice) {
+      // Muted: nothing will play, so reflect the text on the card NOW so the story still
+      // flows on screen (there's no speak-start moment to sync to).
+      setState(() {
+        _curText = text;
+        _curTitle = title;
+        _curIsReply = isReply;
+      });
       if (isNarration) _send({'type': 'played'});
       return;
     }
-    _speakQueue.add(_Speech(text, isNarration));
+    _speakQueue.add(
+        _Speech(text, isNarration, title: title, isReply: isReply, audio: audio, mime: mime));
     // Paused: narration paragraphs stay queued and un-acked so the server's paced
     // producer waits — BUT a reply (barge-in answer) may speak, so the user who
     // stopped to ask actually HEARS the answer (pause-and-ask, A6). Tour stays paused.
@@ -1053,9 +1155,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   // A narration about an object you're passing RIGHT NOW (server `interrupt` flag): cut
   // the line currently playing and drop the queue, then speak this one immediately — so
   // "прямо перед тобой" lands while you're still there, not after you've walked on.
-  Future<void> _speakInterrupting(String text) async {
+  Future<void> _speakInterrupting(String text,
+      {String? title, Uint8List? audio, String? mime}) async {
     if (_voice && !_recording) await _hush();  // cut current + clear queue
-    _enqueueSpeech(text, isNarration: true);    // then speak it now (or ack if muted)
+    _enqueueSpeech(text, isNarration: true, title: title, audio: audio, mime: mime);
   }
 
   Future<void> _speakNext() async {
@@ -1068,34 +1171,88 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       if (idx < 0) return; // only narration queued -> stay silent while paused
     }
     final s = _speakQueue.removeAt(idx);
-    setState(() => _speaking = true); // claim synchronously to avoid overlap
-    // Chrome's SpeechSynthesis clips an utterance at ~15s, cutting long lines off
-    // mid-phrase. Speak in sentence-sized chunks so each stays well under that.
-    final chunks = kIsWeb ? _chunkForTts(s.text) : [s.text];
-    for (final c in chunks) {
-      if (!mounted || !_voice) break; // unmounted or muted mid-line
-      try {
-        if (kIsWeb) {
-          // Per-chunk watchdog: release if the browser drops the 'end' event so the
-          // queue can never get stuck (generous vs. a ~140-char chunk's real length).
-          final estMs = (c.length / 9.0 * 1000).clamp(2500, 14000).toInt();
-          await Future.any([
-            _tts.speak(c),
-            Future<void>.delayed(Duration(milliseconds: estMs + 4000)),
-          ]);
-        } else {
-          await _tts.speak(c); // mobile: awaitSpeakCompletion is reliable
-        }
-      } catch (_) {/* keep the queue moving even if one chunk fails */}
+    // Claim synchronously to avoid overlap AND move the status card to THIS sentence — the one
+    // now starting to play — so the user reads what they're hearing, not the look-ahead frame.
+    setState(() {
+      _speaking = true;
+      _curText = s.text;
+      _curTitle = s.title;
+      _curIsReply = s.isReply;
+    });
+    // Pace the server on START, not completion: ack `played` the moment this sentence begins
+    // so the server delivers the NEXT one WHILE this is still playing. The client queues it
+    // (1-sentence buffer) and plays it back-to-back — this is what kills the inter-phrase gap
+    // (the client<->server round-trip used to fall between every sentence). A pause keeps the
+    // next frame queued (not played) until resume; a voice barge-in drops it via `_recording`.
+    if (s.isNarration && mounted && !_paused) _send({'type': 'played'});
+    if (s.audio != null && !kIsWeb) {
+      // Paid tier: play the server-synthesized neural voice. Await completion so the queue
+      // advances only when this clip really ends. _stopAudio (barge-in/pause/mute) completes
+      // _audioDone so this can't hang when the clip is cut short.
+      await _playNeural(s);
+    } else {
+      // Chrome's SpeechSynthesis clips an utterance at ~15s, cutting long lines off
+      // mid-phrase. Speak in sentence-sized chunks so each stays well under that.
+      final chunks = kIsWeb ? _chunkForTts(s.text) : [s.text];
+      for (final c in chunks) {
+        if (!mounted || !_voice) break; // unmounted or muted mid-line
+        try {
+          if (kIsWeb) {
+            // Per-chunk watchdog: release if the browser drops the 'end' event so the
+            // queue can never get stuck (generous vs. a ~140-char chunk's real length).
+            final estMs = (c.length / 9.0 * 1000).clamp(2500, 14000).toInt();
+            await Future.any([
+              _tts.speak(c),
+              Future<void>.delayed(Duration(milliseconds: estMs + 4000)),
+            ]);
+          } else {
+            await _tts.speak(c); // mobile: awaitSpeakCompletion is reliable
+          }
+        } catch (_) {/* keep the queue moving even if one chunk fails */}
+      }
     }
-    // Pace the server on COMPLETION (not start): it releases the NEXT sentence the moment
-    // this one finishes — tight, no queue pile-up, no length-estimate guessing. Sent after
-    // the loop (whose per-chunk web watchdog guarantees it resolves) so a dropped 'end'
-    // event can't stall the story.
-    if (s.isNarration && mounted) _send({'type': 'played'});
+    // `played` was already acked on START (above) so the next sentence streams in during this
+    // one's playback and plays gaplessly. Nothing to ack here.
     if (!mounted) return;
     setState(() => _speaking = false);
     _speakNext(); // drive the next paragraph ourselves (don't depend on callbacks)
+  }
+
+  // Play one neural clip and await its end. Resolves on natural completion OR when
+  // _stopAudio cuts it (barge-in/pause/mute), so the caller's pacing never stalls. On any
+  // playback error, fall back to speaking the text so the line is never silently lost.
+  Future<void> _playNeural(_Speech s) async {
+    final done = Completer<void>();
+    _audioDone = done;
+    late final StreamSubscription<void> sub;
+    sub = _audio.onPlayerComplete.listen((_) {
+      if (!done.isCompleted) done.complete();
+    });
+    try {
+      await _audio.stop(); // ensure idle before a fresh source
+      await _audio.play(BytesSource(s.audio!, mimeType: s.mime));
+      // Watchdog: if the completion event is ever dropped, don't hang the queue forever.
+      await done.future.timeout(const Duration(seconds: 30), onTimeout: () {});
+    } catch (_) {
+      if (mounted && _voice) {
+        try {
+          await _tts.speak(s.text); // engine failed — speak the text instead
+        } catch (_) {/* give up on this line, keep the queue moving */}
+      }
+    } finally {
+      await sub.cancel();
+      if (identical(_audioDone, done)) _audioDone = null;
+    }
+  }
+
+  // Stop neural playback and release any await in _playNeural. Paired with _tts.stop()
+  // everywhere the guide must go quiet (barge-in, pause, mute, dispose).
+  Future<void> _stopAudio() async {
+    final d = _audioDone;
+    if (d != null && !d.isCompleted) d.complete();
+    try {
+      await _audio.stop();
+    } catch (_) {/* already idle */}
   }
 
   // Split a paragraph into <=~140-char chunks at sentence boundaries (then spaces
@@ -1132,9 +1289,55 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   // Point the TTS voice at the given language (best-effort; unknown tags are no-ops).
   Future<void> _applyTtsLanguage(String code) async {
+    final tag = kLangs[code]!.tts;
     try {
-      await _tts.setLanguage(kLangs[code]!.tts);
+      await _tts.setLanguage(tag);
+      // Free tier only: the default on-device voice is the robotic "compact" one. Upgrade
+      // to the best installed voice for this language (iOS enhanced/premium, Android's
+      // higher-fidelity network voices). Paid tier gets server neural audio and ignores this.
+      if (!kIsWeb) await _selectBestVoice(tag);
     } catch (_) {/* some platforms lack the voice — the card still shows the text */}
+  }
+
+  // Pick the highest-quality installed voice matching `tag` (e.g. "ru-RU"). Best-effort:
+  // leaves the default untouched if nothing better is found or the API isn't supported.
+  Future<void> _selectBestVoice(String tag) async {
+    final base = tag.split(RegExp('[-_]')).first.toLowerCase(); // "ru-RU" -> "ru"
+    List<dynamic> voices;
+    try {
+      voices = (await _tts.getVoices) as List<dynamic>;
+    } catch (_) {
+      return; // platform doesn't expose voices (e.g. some web engines)
+    }
+    Map<dynamic, dynamic>? best;
+    var bestScore = 0; // only switch when we find something better than the default
+    for (final v in voices) {
+      if (v is! Map) continue;
+      final locale = (v['locale'] ?? '').toString().toLowerCase();
+      final name = (v['name'] ?? '').toString();
+      if (name.isEmpty || !locale.startsWith(base)) continue;
+      final quality = (v['quality'] ?? '').toString().toLowerCase();
+      final lname = name.toLowerCase();
+      var score = 0;
+      if (quality.contains('premium')) {
+        score += 40; // iOS quality tiers
+      } else if (quality.contains('enhanced')) {
+        score += 30;
+      }
+      if (lname.contains('network')) score += 20; // Android network voices (higher fidelity)
+      if (locale == tag.toLowerCase()) score += 3; // exact region match
+      if (score > bestScore) {
+        bestScore = score;
+        best = v;
+      }
+    }
+    if (best != null) {
+      try {
+        await _tts.setVoice(
+          {'name': best['name'].toString(), 'locale': best['locale'].toString()},
+        );
+      } catch (_) {/* voice vanished between listing and setting — keep the default */}
+    }
   }
 
   // User picked a language: swap UI strings + TTS voice + tell the backend.
@@ -1156,6 +1359,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   Future<void> _hush() async {
     _speakQueue.clear();
     await _tts.stop();
+    await _stopAudio(); // cut neural playback too (paid tier)
     // Reset explicitly: on web stop() maps to onComplete, not onCancel, so the
     // cancel handler may not fire — leaving _speaking stuck and the queue frozen.
     if (mounted) setState(() => _speaking = false);
@@ -1256,33 +1460,41 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               break;
             }
             _addPlace(m); // pin it on the map
-            setState(() {
-              _curTitle = m['place_name'] as String?;
-              _curText = t;
-              _curIsReply = false;
-            });
             _add('guide', t);
+            // The status card is set when this sentence STARTS being spoken (in _speakNext),
+            // not now — because with ack-on-start pacing the next sentence arrives while the
+            // current one is still playing. Carry the title so the card matches what's read.
+            final title = m['place_name'] as String?;
+            final audio = _decodeAudio(m); // paid tier: neural voice bytes (else null)
+            final mime = m['audio_mime'] as String?;
             if (m['interrupt'] == true) {
-              _speakInterrupting(t); // object you're passing now — cut current, speak it
+              _speakInterrupting(t, title: title, audio: audio, mime: mime); // passing now — cut
             } else {
-              _enqueueSpeech(t, isNarration: true); // queued; paced by `played`
+              _enqueueSpeech(t, isNarration: true, title: title, audio: audio, mime: mime);
             }
             _maybeShowMidAd(); // free tier: an ad break every few narrations
             break;
           case 'reply':
             final t = m['text'] as String;
-            setState(() {
-              _curText = t;
-              _curIsReply = true;
-            });
             _add('reply', t);
-            _enqueueSpeech(t, isNarration: false); // answer; doesn't pace the story
+            // Card is set at speak-start (in _speakNext) so it tracks the reply sentence
+            // being read, matching the narration behaviour.
+            _enqueueSpeech(t,
+                isNarration: false,
+                isReply: true,
+                audio: _decodeAudio(m),
+                mime: m['audio_mime'] as String?); // answer
             break;
           case 'places':
             _setNearby(m); // pin everything the search disc found (lite)
             break;
           case 'transcript':
             _add('you', m['text'] as String);
+            break;
+          case 'summary':
+            // Structured end-of-walk recap — fills the Stop sheet (which shows a spinner
+            // until it lands).
+            _walkSummary.value = (m['text'] as String?)?.trim();
             break;
           case 'quota':
             // Free tier hit a server cap (daily tours) — surface the upgrade sheet
@@ -1396,6 +1608,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     if (_active) {
       _stopWalk();
       _disconnect();
+      _clearWalkArtifacts(); // hard end here too — leave nothing on the home map
       // A tour just ended — refresh counts (tours_today / saved-walk count changed).
       if (AccountsConfig.enabled) AuthService.instance.refreshEntitlement();
     } else {
@@ -1415,7 +1628,20 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     await AdsService.instance.showPreroll(); // no-op for paid / web / no ad loaded
     if (!mounted) return;
     _narrationsSinceAd = 0;
-    if (!_connected) _connect();
+    // A brand-new tour: mint a FRESH session id so the backend starts clean instead of
+    // resuming the just-finished walk, and wipe the previous walk's residue off the map.
+    _summaryTimer?.cancel(); // a prior Stop's recap window must not disconnect THIS new tour
+    _sid = _genSessionId();
+    _clearWalkArtifacts();
+    // Flip active + rebuild NOW so the activation choreography plays right after the
+    // swipe, independent of when the first GPS fix / backend state arrives.
+    _sessionStart = DateTime.now();
+    _sessionMeters = 0;
+    _walkSummary.value = null; // drop any recap from a previous walk
+    setState(() => _touring = true);
+    // Always (re)connect: _connect() tears down any lingering socket (e.g. the post-Stop
+    // recap window) and dials with the new sid, so we never ride the old session.
+    _connect();
     _start();
   }
 
@@ -1501,6 +1727,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     _send(msg);
     // Publish live presence (coarse) so friends see "на прогулке" + co-walk dots.
     RealtimeService.instance.updateSelf(walking: _active, lat: lat, lon: lon);
+    // Accumulate walked distance for the session summary (ignore GPS jitter jumps).
+    if (_sessionStart != null) {
+      final step = _dist([_here.latitude, _here.longitude], [lat, lon]);
+      if (step >= 1 && step < 200) _sessionMeters += step;
+      // Grow the live track, distance-gated (~12 m, like the backend breadcrumb) so jitter and
+      // standing still don't spam it; a point walked while PAUSED carries a trailing 1.0 flag.
+      if (_track.isEmpty || _dist(_track.last, [lat, lon]) >= 12) {
+        _track.add(_paused ? [lat, lon, 1.0] : [lat, lon]);
+      }
+    }
     setState(() {
       _here = LatLng(lat, lon);
       _heading = dir;
@@ -1599,6 +1835,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   }
 
   void _stopWalk() {
+    _touring = false;
+    _sessionStart = null;
     _walkTimer?.cancel();
     _walkTimer = null;
     _gpsSub?.cancel();
@@ -1730,6 +1968,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       _send({'type': 'pause'});
       setState(() => _paused = true);
       await _tts.stop();
+      await _stopAudio(); // halt neural playback too (paid tier)
       if (mounted) setState(() => _speaking = false);
       await _updateFgNotification();
     }
@@ -1858,6 +2097,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       _stopForegroundService();
     }
     _tts.stop();
+    _audio.dispose(); // neural-voice player (paid tier)
+    _summaryTimer?.cancel();
+    _walkSummary.dispose();
     _rec.dispose();
     _ch?.sink.close();
     _scroll.dispose();
@@ -1877,6 +2119,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   static const _stGreen = Color(0xFF48C79B); // ready
 
   ({String label, Color color, bool active}) _status(AppLocalizations l) {
+    if (_paused) return (label: l.chipPaused, color: _stAmber, active: false);
     if (!_connected && _wantConnected) return (label: l.chipReconnecting, color: _stAmber, active: true);
     if (!_connected) return (label: l.chipNotConnected, color: _pinPast, active: false);
     if (_speaking) return (label: l.chipSpeaking, color: _accent, active: true);
@@ -2078,6 +2321,13 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             subdomains: MapConfig.subdomains,
             userAgentPackageName: 'com.example.ai_audio_guide',
           ),
+        // The walked GPS track, growing live (under the pins). Only while touring — otherwise it
+        // would stay frozen under the blur on the inactive home. Glow + grey dashed on paused
+        // stretches — same renderer as the summary / history so it looks identical everywhere.
+        if (_touring && _track.length >= 2)
+          PolylineLayer(
+            polylines: trackPolylines(_track, liveColor: Theme.of(context).colorScheme.primary),
+          ),
         // Lite pins: every object the search disc found (drawn under narrated pins;
         // a narrated place's own pin overrides its lite dot by id).
         MarkerLayer(markers: [
@@ -2115,13 +2365,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               height: 46,
               child: GestureDetector(
                 onTap: () => _showPlaceInfo(p),
-                child: Icon(
-                  Icons.location_on,
+                child: _MapPin(
                   size: p.id == _currentPlaceId ? 36 : 26,
                   color: p.id == _currentPlaceId ? _pinCurrent : _pinPast,
-                  shadows: const [
-                    Shadow(color: Color(0x59000000), blurRadius: 6, offset: Offset(0, 2)),
-                  ],
                 ),
               ),
             ),
@@ -2295,51 +2541,6 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   // Account row in the settings sheet (only when accounts are configured). Signed in:
   // show the email + sign out. Signed out: a tile that opens the login screen.
-  Widget _accountTile(AppLocalizations l, void Function(void Function()) setSheet) {
-    final auth = AuthService.instance;
-    if (auth.isSignedIn) {
-      return Column(mainAxisSize: MainAxisSize.min, children: [
-        ListTile(
-          contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.account_circle_outlined),
-          title: Text(l.signedInAs(auth.email ?? '')),
-          trailing: TextButton(
-            onPressed: () async {
-              // Close the settings sheet BEFORE signing out: sign-out flips the auth gate,
-              // which disposes HomePage; a still-open sheet would then rebuild against its
-              // now-defunct context and throw ("State no longer has a context").
-              Navigator.of(context).pop();
-              await auth.signOut();
-            },
-            child: Text(l.signOut),
-          ),
-        ),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: TextButton.icon(
-            onPressed: () => _deleteAccount(setSheet),
-            icon: const Icon(Icons.delete_outline, size: 18),
-            label: Text(l.deleteAccount),
-            style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
-          ),
-        ),
-      ]);
-    }
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: const Icon(Icons.account_circle_outlined),
-      title: Text(l.signIn),
-      subtitle: Text(l.loginSubtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
-      trailing: const Icon(Icons.chevron_right),
-      onTap: () async {
-        await Navigator.of(context).push(
-          MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
-        );
-        setSheet(() {});
-      },
-    );
-  }
-
   // The Premium upgrade sheet — benefits + monthly/yearly buy buttons. Shown from the
   // daily-quota gate, the "history full" banner, the quota WS frame, and the settings
   // tile. Styled per the app's frosted/pastel design language.
@@ -2464,115 +2665,97 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     );
   }
 
-  // The account/subscription row in settings: Go Premium (free) / Premium active (paid).
-  Widget _premiumTile(AppLocalizations l) {
-    final paid = AuthService.instance.isPaid;
-    // Keep the row tappable when paid so the sheet (incl. the stub "cancel" action) is
-    // reachable; a real, backend-granted subscription just shows the "active" state.
-    final tappable = !paid || kStubBilling;
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: const Icon(Icons.workspace_premium_rounded, color: _accentAlt),
-      title: Text(paid ? l.premiumActive : l.goPremium),
-      trailing: tappable ? const Icon(Icons.chevron_right) : null,
-      onTap: tappable ? _showUpgrade : null,
-    );
-  }
-
+  // The account card (opened from the Settings → account row). Identity + subscription
+  // + account actions only. Theme and simulated-walk live in the Settings tab itself —
+  // they were duplicated here and have been removed. App-styled (Manrope, matte glass).
   void _openSettings() {
     final l = AppLocalizations.of(context)!;
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      // Transparent here so the panel colour is painted INSIDE the StatefulBuilder
-      // below — that way the sheet recolours live when the theme is switched from
-      // its own toggle (a fixed backgroundColor would stay the old colour until
-      // the sheet is closed and reopened).
+      useSafeArea: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => StatefulBuilder(
         builder: (c, setSheet) {
-          final cc = _c(context); // re-read on every (setSheet) rebuild → live theme
-          return Container(
-            decoration: BoxDecoration(
-              color: cc.sheetBg,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-            ),
-            padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).viewInsets.bottom + 24),
-            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const _SheetGrabber(),
-            Text(l.settings,
-                style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -0.3,
-                    color: cc.textPrimary)),
-            if (AccountsConfig.enabled) ...[
-              const SizedBox(height: 8),
-              _accountTile(l, setSheet),
-              _premiumTile(l),
-            ],
-            const SizedBox(height: 16),
-            Text(l.appearance,
-                style: TextStyle(
-                    fontSize: 13, fontWeight: FontWeight.w600, color: cc.textSecondary)),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: SegmentedButton<ThemeMode>(
-                segments: [
-                  ButtonSegment(
-                      value: ThemeMode.system,
-                      icon: const Icon(Icons.brightness_auto_rounded, size: 18),
-                      label: Text(l.themeSystem)),
-                  ButtonSegment(
-                      value: ThemeMode.light,
-                      icon: const Icon(Icons.light_mode_rounded, size: 18),
-                      label: Text(l.themeLight)),
-                  ButtonSegment(
-                      value: ThemeMode.dark,
-                      icon: const Icon(Icons.dark_mode_rounded, size: 18),
-                      label: Text(l.themeDark)),
-                ],
-                selected: {widget.themeMode},
-                showSelectedIcon: false,
-                onSelectionChanged: (s) {
-                  widget.onThemeModeChanged(s.first);
-                  setSheet(() {});
-                },
-              ),
-            ),
-            const SizedBox(height: 12),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(l.simulatedWalk),
-              value: _simulate,
-              // Can't switch source mid-walk.
-              onChanged: _active ? null : (v) {
-                setState(() => _simulate = v);
-                setSheet(() {});
-              },
-            ),
-            if (_simulate)
-              DropdownButtonFormField<String>(
-                initialValue: _routeKey,
-                decoration: InputDecoration(
-                  labelText: l.route,
-                  filled: true,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+          final uc = Theme.of(ctx).extension<ui.AppColors>()!;
+          final auth = AuthService.instance;
+          final fill = Theme.of(ctx).brightness == Brightness.dark ? uc.glass : const Color(0x8CFFFFFF);
+          final paid = auth.isPaid;
+          final premiumTappable = !paid || kStubBilling;
+          final name = auth.displayName ?? '';
+          TextStyle ts(double s, FontWeight w, Color col) => GoogleFonts.manrope(fontSize: s, fontWeight: w, color: col);
+          return ui.RoundedSheet(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                // dismiss
+                Center(
+                  child: ui.Pressable(
+                    onTap: () => Navigator.pop(ctx),
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 16),
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(shape: BoxShape.circle, color: uc.glassFill(0.06), border: Border.all(color: uc.glassBorder)),
+                      child: Icon(Icons.keyboard_arrow_down_rounded, color: uc.textSecondary, size: 24),
+                    ),
+                  ),
                 ),
-                items: [
-                  for (final k in kRoutes.keys)
-                    DropdownMenuItem(value: k, child: Text(kRouteLabels[k] ?? k)),
-                ],
-                onChanged: _active
-                    ? null
-                    : (v) {
-                        if (v == null) return;
-                        setState(() => _routeKey = v);
-                        setSheet(() {});
-                      },
-              ),
-          ]),
+                // identity header
+                ui.GlassModule(
+                  fill: fill, sheen: false,
+                  padding: const EdgeInsets.all(14),
+                  child: Row(children: [
+                    const ui.TravelerAvatar(size: 52),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(name.isEmpty ? l.homeGuest : name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(17, FontWeight.w800, uc.textPrimary)),
+                        const SizedBox(height: 2),
+                        Text(auth.email ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(13, FontWeight.w600, uc.textFaint)),
+                      ]),
+                    ),
+                    if (paid)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(color: uc.primary.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(ui.Radii.pill)),
+                        child: Text(l.premiumActive, style: ts(11.5, FontWeight.w800, uc.primary)),
+                      ),
+                  ]),
+                ),
+                const SizedBox(height: 12),
+                // subscription row
+                ui.Pressable(
+                  onTap: premiumTappable ? _showUpgrade : null,
+                  child: ui.GlassModule(
+                    fill: fill, sheen: false,
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                    child: Row(children: [
+                      const Icon(Icons.workspace_premium_rounded, color: _accentAlt, size: 22),
+                      const SizedBox(width: 12),
+                      Expanded(child: Text(paid ? l.premiumActive : l.goPremium, style: ts(15, FontWeight.w700, uc.textPrimary))),
+                      if (premiumTappable) Icon(Icons.chevron_right_rounded, color: uc.textFaint),
+                    ]),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                // sign out
+                ui.AppButton(l.signOut, kind: ui.AppBtnKind.secondary, onTap: () async {
+                  // Close the sheet BEFORE signing out: sign-out flips the auth gate, which
+                  // disposes HomePage; a still-open sheet would rebuild against a dead context.
+                  Navigator.of(context).pop();
+                  await auth.signOut();
+                }),
+                const SizedBox(height: 4),
+                Center(
+                  child: TextButton.icon(
+                    onPressed: () => _deleteAccount(setSheet),
+                    icon: const Icon(Icons.delete_outline_rounded, size: 18),
+                    label: Text(l.deleteAccount, style: ts(13.5, FontWeight.w700, uc.err)),
+                    style: TextButton.styleFrom(foregroundColor: uc.err),
+                  ),
+                ),
+              ]),
+            ),
           );
         },
       ),
@@ -2664,6 +2847,319 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   // Home tab: the live map, blurred behind the inactive modules; status chip + player
   // when a tour is active. Map FABs sit top-right during an active tour.
+  // Stop button → full session end. Sessions ≥10 min are kept + a summary is shown;
+  // shorter ones are discarded (the backend is told to drop the walk) and just reset.
+  // Wipe everything a finished walk left on the home screen — narrated pins, lite objects,
+  // the GPS track and the current-narration card — so the idle map (under the blur) is clean
+  // and a new tour never shows the previous walk's residue.
+  void _clearWalkArtifacts() {
+    if (!mounted) {
+      _places.clear();
+      _nearby = [];
+      _track.clear();
+      return;
+    }
+    setState(() {
+      _places.clear();
+      _nearby = [];
+      _track.clear();
+      _curTitle = null;
+      _curText = null;
+      _curIsReply = false;
+    });
+  }
+
+  void _endSession() {
+    final start = _sessionStart;
+    final elapsed = start == null ? Duration.zero : DateTime.now().difference(start);
+    final recorded = elapsed >= _kMinRecord;
+    final places = _places.where((p) => p.text.trim().isNotEmpty).toList();
+    final track = List<List<double>>.from(_track); // snapshot for the summary before we wipe
+    final meters = _sessionMeters;
+    _walkSummary.value = null; // fresh spinner in the sheet until the recap arrives
+    _hush(); // cut narration/neural audio IMMEDIATELY (the deferred _disconnect no longer does it)
+    // Tell the backend to keep or discard this session's walk BEFORE closing the socket.
+    if (_connected) _send({'type': 'end', 'discard': !recorded});
+    _stopWalk();
+    // A kept walk gets an async structured recap over the WS — keep the socket open briefly so
+    // it can land in the Stop sheet, then close. A discarded walk closes at once (no recap).
+    _summaryTimer?.cancel();
+    if (recorded && _connected) {
+      // Keep the socket open for the async recap; if it never lands, stop the spinner (empty ==
+      // section hidden, not an infinite load) and close.
+      _summaryTimer = Timer(const Duration(seconds: 24), () {
+        if (!mounted) return;
+        if (_walkSummary.value == null) _walkSummary.value = '';
+        _disconnect();
+      });
+    } else {
+      _disconnect();
+    }
+    if (AccountsConfig.enabled) AuthService.instance.refreshEntitlement();
+    _showSessionSummary(
+        recorded: recorded, elapsed: elapsed, meters: meters, places: places, track: track);
+    // Hard end: clear the finished walk off the home screen NOW (the summary sheet uses the
+    // snapshots above), so nothing lingers on the blurred map behind/after it.
+    _clearWalkArtifacts();
+  }
+
+  String _fmtDuration(AppLocalizations l, Duration d) {
+    final h = d.inHours, m = d.inMinutes % 60;
+    if (h > 0) return '$h ${l.unitHr} ${m.toString().padLeft(2, '0')} ${l.unitMin}';
+    return '$m ${l.unitMin}';
+  }
+
+  String _fmtDistance(AppLocalizations l, double meters) {
+    if (meters >= 1000) return '${(meters / 1000).toStringAsFixed(1)} ${l.unitKm}';
+    return '${meters.round()} ${l.unitM}';
+  }
+
+  // Beautifully-formatted end-of-walk summary (duration · distance · places covered).
+  void _showSessionSummary({
+    required bool recorded,
+    required Duration elapsed,
+    required double meters,
+    required List<PlaceMark> places,
+    required List<List<double>> track,
+  }) {
+    final l = AppLocalizations.of(context)!;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final uc = Theme.of(ctx).extension<ui.AppColors>()!;
+        final accent = recorded ? uc.ok : _stAmber;
+        Widget stat(IconData icon, String value, String label) => Expanded(
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+                decoration: BoxDecoration(
+                  color: uc.glassFill(0.05),
+                  borderRadius: BorderRadius.circular(ui.Radii.md),
+                  border: Border.all(color: uc.glassBorder),
+                ),
+                child: Column(children: [
+                  Icon(icon, color: accent, size: 20),
+                  const SizedBox(height: 8),
+                  Text(value, maxLines: 1, overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.manrope(fontSize: 16, fontWeight: FontWeight.w800, color: uc.textPrimary)),
+                  const SizedBox(height: 2),
+                  Text(label, style: GoogleFonts.manrope(fontSize: 11.5, fontWeight: FontWeight.w600, color: uc.textFaint)),
+                ]),
+              ),
+            );
+        return ui.RoundedSheet(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(20, 14, 20, MediaQuery.of(ctx).padding.bottom + 18),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              // celebratory / info badge
+              Center(
+                child: Container(
+                  width: 64, height: 64, alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(colors: [accent, Color.lerp(accent, Colors.black, 0.28)!], begin: Alignment.topLeft, end: Alignment.bottomRight),
+                    boxShadow: [BoxShadow(color: accent.withValues(alpha: 0.4), blurRadius: 20, spreadRadius: -4, offset: const Offset(0, 8))],
+                  ),
+                  child: Icon(recorded ? Icons.check_rounded : Icons.timer_off_rounded, color: uc.onPrimary, size: 32),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Text(recorded ? l.summaryTitle : l.summaryDiscardTitle,
+                  textAlign: TextAlign.center, style: ui.h1(context).copyWith(fontSize: 22)),
+              const SizedBox(height: 16),
+              Row(children: [
+                stat(Icons.schedule_rounded, _fmtDuration(l, elapsed), l.summaryDuration),
+                const SizedBox(width: 10),
+                stat(Icons.straighten_rounded, _fmtDistance(l, meters), l.summaryDistance),
+                const SizedBox(width: 10),
+                stat(Icons.place_rounded, '${places.length}', l.summaryPlaces),
+              ]),
+              if (track.length >= 2) ...[
+                const SizedBox(height: 14),
+                TrackMap(path: track, height: 150, borderRadius: ui.Radii.md),
+              ],
+              if (recorded) ...[
+                const SizedBox(height: 14),
+                ValueListenableBuilder<String?>(
+                  valueListenable: _walkSummary,
+                  builder: (context, summary, _) {
+                    if (summary == null) {
+                      // Recap still generating — a quiet spinner (no text, so no locale issue).
+                      return Container(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        alignment: Alignment.center,
+                        child: SizedBox(
+                          width: 22, height: 22,
+                          child: CircularProgressIndicator(strokeWidth: 2.2, color: uc.textFaint),
+                        ),
+                      );
+                    }
+                    if (summary.isEmpty) return const SizedBox.shrink();
+                    return Container(
+                      width: double.infinity,
+                      constraints: const BoxConstraints(maxHeight: 190),
+                      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+                      decoration: BoxDecoration(
+                        color: uc.glassFill(0.05),
+                        borderRadius: BorderRadius.circular(ui.Radii.md),
+                        border: Border.all(color: uc.glassBorder),
+                      ),
+                      child: SingleChildScrollView(
+                        child: Text(summary, style: GoogleFonts.manrope(
+                          fontSize: 13.5, height: 1.5, fontWeight: FontWeight.w600,
+                          color: uc.textSecondary)),
+                      ),
+                    );
+                  },
+                ),
+              ],
+              if (!recorded) ...[
+                const SizedBox(height: 14),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: _stAmber.withValues(alpha: 0.10),
+                    borderRadius: BorderRadius.circular(ui.Radii.md),
+                    border: Border.all(color: _stAmber.withValues(alpha: 0.25)),
+                  ),
+                  child: Row(children: [
+                    const Icon(Icons.info_outline_rounded, color: _stAmber, size: 18),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text(l.summaryDiscardNote,
+                        style: GoogleFonts.manrope(fontSize: 13, fontWeight: FontWeight.w600, height: 1.35, color: uc.textSecondary))),
+                  ]),
+                ),
+              ],
+              if (recorded && places.isNotEmpty) ...[
+                const SizedBox(height: 18),
+                Align(alignment: Alignment.centerLeft, child: Text(l.summaryTold, style: ui.label(context))),
+                const SizedBox(height: 8),
+                Flexible(
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    padding: EdgeInsets.zero,
+                    itemCount: places.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    itemBuilder: (ctx, i) {
+                      final p = places[i];
+                      return Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: uc.glassFill(0.05),
+                          borderRadius: BorderRadius.circular(ui.Radii.md),
+                          border: Border.all(color: uc.glassBorder),
+                        ),
+                        child: Row(children: [
+                          Container(
+                            width: 26, height: 26, alignment: Alignment.center,
+                            decoration: BoxDecoration(shape: BoxShape.circle, color: uc.primary.withValues(alpha: 0.16)),
+                            child: Text('${i + 1}', style: GoogleFonts.manrope(fontSize: 12, fontWeight: FontWeight.w800, color: uc.primary)),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(child: Text(p.name.isEmpty ? '—' : p.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ui.titleS(ctx))),
+                        ]),
+                      );
+                    },
+                  ),
+                ),
+              ],
+              const SizedBox(height: 18),
+              ui.AppButton(l.summaryDone, onTap: () => Navigator.pop(ctx)),
+            ]),
+          ),
+        );
+      },
+    );
+  }
+
+  // Journal of the current walk: the places narrated so far (`_places`), newest first.
+  void _openTourLog() {
+    final l = AppLocalizations.of(context)!;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final uc = Theme.of(ctx).extension<ui.AppColors>()!;
+        final items = _places.reversed.where((p) => p.text.trim().isNotEmpty).toList();
+        return ui.RoundedSheet(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Center(
+                child: ui.Pressable(
+                  onTap: () => Navigator.pop(ctx),
+                  child: Container(
+                    margin: const EdgeInsets.only(bottom: 14),
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(shape: BoxShape.circle, color: uc.glassFill(0.06), border: Border.all(color: uc.glassBorder)),
+                    child: Icon(Icons.keyboard_arrow_down_rounded, color: uc.textSecondary, size: 22),
+                  ),
+                ),
+              ),
+              Row(children: [
+                Icon(ui.AppIcons.history, color: uc.primary, size: 22),
+                const SizedBox(width: 10),
+                Text(l.tourLogTitle, style: ui.h2(ctx)),
+              ]),
+              const SizedBox(height: 14),
+              if (items.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 40),
+                  child: Text(l.tourLogEmpty, textAlign: TextAlign.center,
+                      style: GoogleFonts.manrope(fontSize: 14.5, fontWeight: FontWeight.w500, height: 1.4, color: uc.textFaint)),
+                )
+              else
+                Flexible(
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    padding: EdgeInsets.zero,
+                    itemCount: items.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 10),
+                    itemBuilder: (ctx, i) {
+                      final p = items[i];
+                      return ui.Pressable(
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _animateTo(p.point, zoom: 17);
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: uc.glassFill(0.05),
+                            borderRadius: BorderRadius.circular(ui.Radii.md),
+                            border: Border.all(color: uc.glassBorder),
+                          ),
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Row(children: [
+                              Container(
+                                width: 26, height: 26, alignment: Alignment.center,
+                                decoration: BoxDecoration(shape: BoxShape.circle, color: uc.primary.withValues(alpha: 0.16)),
+                                child: Text('${items.length - i}', style: GoogleFonts.manrope(fontSize: 12, fontWeight: FontWeight.w800, color: uc.primary)),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(child: Text(p.name.isEmpty ? '—' : p.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ui.titleS(ctx))),
+                            ]),
+                            if (p.text.trim().isNotEmpty) ...[
+                              const SizedBox(height: 8),
+                              Text(p.text.trim(), style: GoogleFonts.manrope(fontSize: 13.5, fontWeight: FontWeight.w500, height: 1.45, color: uc.textSecondary)),
+                            ],
+                          ]),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+            ]),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _homeTab(AppLocalizations l) {
     final active = _active;
     final dark = Theme.of(context).brightness == Brightness.dark;
@@ -2679,7 +3175,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         child: IgnorePointer(
           ignoring: active,
           child: AnimatedOpacity(
-            duration: _animMed,
+            duration: const Duration(milliseconds: 1100),
+            curve: Curves.easeInOutCubic,
             opacity: active ? 0 : 1,
             child: BackdropFilter(
               filter: ImageFilter.blur(sigmaX: dark ? 5 : 3, sigmaY: dark ? 5 : 3),
@@ -2699,24 +3196,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           ),
         ),
       ),
-      // Map FABs — useful while actively touring (pan/zoom/recenter).
+      // Map controls — always visible for the whole tour (zoom/compass/recenter),
+      // centred on the right edge between the status island and the control panel.
       if (active)
         Positioned(
-          top: 0, right: 12,
-          child: SafeArea(
-            bottom: false,
-            child: Padding(
-              padding: const EdgeInsets.only(top: 64),
-              child: Column(mainAxisSize: MainAxisSize.min, children: [
-                _zoomFab(l),
-                const SizedBox(height: 10),
-                if (_mapRotation.abs() > 0.5) ...[
-                  _compassFab(l),
-                  const SizedBox(height: 10),
-                ],
-                _followFab(l),
-              ]),
-            ),
+          top: 0, bottom: 0, right: 12,
+          child: Center(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              _zoomFab(l),
+              const SizedBox(height: 10),
+              _compassFab(l),
+              const SizedBox(height: 10),
+              _followFab(l),
+            ]),
           ),
         ),
       // The redesigned modules (header/premium/focus/swipe · status/player).
@@ -2747,11 +3239,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           paused: _paused,
           recording: _recording,
           voice: _voice,
-          onStop: active ? _primary : null,
+          onStop: active ? _endSession : null,
           onPause: active ? _togglePause : null,
           onAsk: _connected ? _openAsk : null,
           onMic: _connected ? _toggleMic : null,
           onToggleVoice: _toggleVoice,
+          onHistory: active ? _openTourLog : null,
         ),
       ),
     ]);
@@ -2992,12 +3485,12 @@ class _UserPuckState extends State<_UserPuck> {
           Container(
             width: 34,
             height: 34,
+            // Crisp border ring instead of a blurred drop-shadow — the latter smears
+            // when the map pans under Impeller (iOS sim).
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: Colors.white,
-              boxShadow: [
-                BoxShadow(color: Colors.black.withValues(alpha: 0.24), blurRadius: 6, offset: const Offset(0, 2)),
-              ],
+              border: Border.all(color: Colors.black.withValues(alpha: 0.18), width: 1.5),
             ),
             alignment: Alignment.center,
             child: AnimatedRotation(

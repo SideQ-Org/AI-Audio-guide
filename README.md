@@ -21,8 +21,8 @@ The guide is one continuous loop driven by where you walk:
  GPS + heading ─▶ find nearby places ─▶ rank by distance & gaze ─▶ enrich with facts
    (phone)          (OSM Overpass)        ("what am I passing?")     (Wikipedia → web)
                                                                           │
-        on-device speech ◀── narrate a short, spoken blurb ◀── pick what's worth saying
-          (Flutter TTS)         (LLM, streamed)                  (significance + story arc)
+        spoken aloud ◀────── narrate a short, spoken blurb ◀── pick what's worth saying
+   (on-device / neural voice)   (LLM, streamed)                (director: significance + story arc)
 ```
 
 - **Real-time.** Minimal latency from a position update to the start of narration.
@@ -36,8 +36,44 @@ The guide is one continuous loop driven by where you walk:
   for a landmark you can see ahead — and expands its search so you're not left in silence.
 
 A single **stateful orchestrator** ("the brain") owns the loop and all session state; around it are
-stateless LLM roles (scorer, narrator, planner, companion) and services (geo, enrichment, STT).
+stateless LLM roles (scorer, narrator, planner, companion), a deterministic **narrative director**
+over a per-walk **memory graph**, and services (geo, enrichment, STT, TTS).
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design.
+
+### Agent & memory structure
+
+```
+                         ┌─────────────────────  ORCHESTRATOR (the brain)  ─────────────────────┐
+   GPS/heading  ─tick─▶  │  FSM + all session state (seen-list, arc, WalkMemory) · per-tick loop │
+                         └───────────────┬───────────────────────────────────────┬──────────────┘
+                                         ▼                                        ▼
+   Services (stateless)          Pipeline (TextPipeline)                Narrative director (deterministic)
+   ├ geo/    OSM Overpass  ─────▶ discovery → facts → pick ─────┐       reads WalkMemory + candidates:
+   ├ enrich/ Wikipedia→web        (significance heuristic)      │       • callbacks   (as that church earlier…)
+   ├ llm/    per-role router      warm_narration / prefetch     │       • look-ahead  (…an estate up ahead)
+   ├ stt/    cloud Whisper        (hide LLM latency)            │       • fact dedup  (only not-yet-told facts)
+   └ tts/    neural voice ◀───────────────┐                     │       • revisit     (looped back → new detail)
+                                          │                     ▼
+   LLM roles (stateless):          NarrationScheduler ◀── Narrator (realizer) ◀── director hints
+   Scorer · Narrator · Planner ·   sentence-level delivery,     summarizer → end-of-walk recap
+   Companion (barge-in)            weave/park/resume
+                                          │
+                              one sentence at a time ──▶ WebSocket ──▶ client TTS / neural audio
+```
+
+- **Orchestrator** (`agent/orchestrator.py`) — the FSM + session state; the only component that
+  calls geo, the pipeline, the director and the store. Roles never talk to each other.
+- **LLM roles** (`scorer/narrator/planner/companion.py`) — stateless prompt+model; "Landmark" is the
+  top significance tier routed to a premium model, not a separate role.
+- **Narrative director** (`agent/director.py`) — deterministic content-planner (no LLM in the tick):
+  callbacks, look-ahead foreshadow, fact-level dedup + anti-fabrication, and revisit, all read off the
+  memory graph and passed to the Narrator as hints.
+- **Memory graph** (`shared/memory.py`, `WalkMemory` in `SessionState`) — the whole-walk substrate:
+  `narrations` (anti-repeat corpus), `objects` (narrated-object nodes for recall/callbacks/revisit),
+  `told_facts` (fact-level dedup). Survives reconnects. Full typed graph designed in
+  [`MEMORY_GRAPH_DESIGN.md`](MEMORY_GRAPH_DESIGN.md); the director + WalkMemory are the built slice.
+- **NarrationScheduler** (`agent/narration_schedule.py`) — sentence-level delivery so a new object is
+  woven in at a boundary; latency is hidden by pre-generating and pre-synthesizing the next line.
 
 ---
 
@@ -84,7 +120,13 @@ Point the client at your backend with `--dart-define=WS_URL=ws://<host>:8000/ws`
 ## Features
 
 - 🎧 **Zero-interaction tour** — open and walk; it talks when there's something to say.
-- 🗣️ **Voice barge-in** — ask anything mid-walk; it answers and resumes, keeping context.
+- 🗣️ **Voice barge-in** — ask anything mid-walk; it answers (~3 s cloud STT) and resumes, keeping context.
+- 🧠 **A story, not a stream** — the director weaves callbacks ("as that church earlier…"),
+  foreshadows what's ahead, and greets you back when you loop past a place, on one coherent arc.
+- 🔊 **Neural voice (paid tier)** — a lifelike server-synthesized voice, pre-synthesized so it plays
+  gaplessly; the free tier uses the on-device voice.
+- 🗺️ **Live GPS track** — the route is drawn on the map as you walk, shown in the end-of-walk
+  **structured recap**, and kept as a thumbnail in your walk history.
 - 🌍 **8 languages** — narration and place names localized, proper names transliterated.
 - 🔒 **Background walking** — keeps narrating with the screen off or an earbud in; a shade-card
   **Pause** button really halts the tour (no generation, no spend).
@@ -135,8 +177,10 @@ Flutter app. See `backend/README.md` for the full list.
 ## Tech stack
 
 **Backend:** Python, FastAPI, asyncio, WebSocket · OSM Overpass (discovery) · Wikipedia/Wikidata +
-web search (facts) · provider-agnostic LLM client (Anthropic / OpenAI-compatible) · faster-whisper
-(STT) · SQLAlchemy + Postgres (optional durable layer).
-**Mobile:** Flutter/Dart · OpenStreetMap tiles · on-device `flutter_tts` / STT · foreground-service
-background location.
+web search (facts) · provider-agnostic LLM client (Anthropic / OpenAI-compatible / OpenRouter) ·
+deterministic narrative director over a per-walk memory graph · STT (cloud Whisper via OpenRouter, or
+local faster-whisper) · optional neural TTS (OpenAI-compatible `/audio/speech`) · SQLAlchemy +
+Postgres (optional durable layer).
+**Mobile:** Flutter/Dart · OpenStreetMap tiles + live GPS-track polyline · `flutter_tts` (on-device
+voice) + `audioplayers` (neural voice playback) · foreground-service background location.
 **Deploy:** Caddy (automatic HTTPS) + Docker Compose.

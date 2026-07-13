@@ -84,6 +84,8 @@
 	<string>Keeps telling you about the places around you while the app is in your pocket with the screen off.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Lets you ask the guide a question by voice.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Lets you choose a profile photo for your account.</string>
 	<!-- Background operation: keep the GPS stream and on-device narration alive while
 	     the screen is locked, so you can walk with an earbud and the phone in a pocket.
 	     location+audio keep us alive on a walk; fetch is required by flutter_foreground_task. -->

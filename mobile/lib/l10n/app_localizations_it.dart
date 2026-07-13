@@ -176,6 +176,55 @@ class AppLocalizationsIt extends AppLocalizations {
   String get chipOffline => 'offline';
 
   @override
+  String get chipPaused => 'paused';
+
+  @override
+  String get tourLogTitle => 'Walk journal';
+
+  @override
+  String get tourLogEmpty => 'Places I tell you about will appear here.';
+
+  @override
+  String get tourAskVoice => 'Ask by voice';
+
+  @override
+  String get summaryTitle => 'Walk complete';
+
+  @override
+  String get summaryDiscardTitle => 'Walk not saved';
+
+  @override
+  String get summaryDiscardNote =>
+      'Under 10 minutes — not recorded, just reset.';
+
+  @override
+  String get summaryDuration => 'Duration';
+
+  @override
+  String get summaryDistance => 'Distance';
+
+  @override
+  String get summaryPlaces => 'Places';
+
+  @override
+  String get summaryTold => 'What we covered';
+
+  @override
+  String get summaryDone => 'Done';
+
+  @override
+  String get unitMin => 'min';
+
+  @override
+  String get unitHr => 'h';
+
+  @override
+  String get unitKm => 'km';
+
+  @override
+  String get unitM => 'm';
+
+  @override
   String metaConnectionLost(int seconds) {
     return 'connessione persa, riconnessione tra ${seconds}s…';
   }
@@ -222,6 +271,67 @@ class AppLocalizationsIt extends AppLocalizations {
   @override
   String get loginSubtitle =>
       'Accedi per salvare le tue passeggiate e rivederle.';
+
+  @override
+  String get loginWelcomeTitle => 'Welcome back';
+
+  @override
+  String get loginWelcomeSubtitle =>
+      'Open the app and just walk — your guide tells you what\'s around.';
+
+  @override
+  String get loginNewHere => 'New here?';
+
+  @override
+  String get registerSubtitle =>
+      'Create an account to save your walks and revisit them.';
+
+  @override
+  String get haveAccount => 'Already have an account?';
+
+  @override
+  String get nickLabel => 'Nickname';
+
+  @override
+  String get birthdayLabel => 'Birthday';
+
+  @override
+  String get birthdayOptional => 'Birthday · optional';
+
+  @override
+  String get avatarChoose => 'Add a photo · optional';
+
+  @override
+  String get registerPremiumTitle => 'Get Premium right away';
+
+  @override
+  String get registerPremiumSub => 'The whole guide, no limits.';
+
+  @override
+  String get otpTitle => 'Confirm your email';
+
+  @override
+  String otpSentTo(String email) {
+    return 'We sent a 6-digit code to $email. Enter it below to finish.';
+  }
+
+  @override
+  String get otpCodeLabel => 'Code from email';
+
+  @override
+  String get otpConfirm => 'Confirm';
+
+  @override
+  String get otpResend => 'Send the code again';
+
+  @override
+  String get otpResent => 'Code sent again';
+
+  @override
+  String get otpInvalid => 'Wrong or expired code.';
+
+  @override
+  String get orWithEmail => 'or with email';
 
   @override
   String get continueWithGoogle => 'Continua con Google';
@@ -276,6 +386,24 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String get deleteWalk => 'Elimina passeggiata';
+
+  @override
+  String get walkShare => 'Share route';
+
+  @override
+  String get walkShared => 'Route shared with friends';
+
+  @override
+  String get walkSummary => 'Tour summary';
+
+  @override
+  String get walkExpand => 'Read more';
+
+  @override
+  String get walkCollapse => 'Show less';
+
+  @override
+  String get walkReplay => 'Play again';
 
   @override
   String get deleteWalkConfirm =>
@@ -406,4 +534,297 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String get bgFinish => 'Termina';
+
+  @override
+  String get greetMorning => 'Buongiorno,';
+
+  @override
+  String get greetAfternoon => 'Buon pomeriggio,';
+
+  @override
+  String get greetEvening => 'Buonasera,';
+
+  @override
+  String get greetNight => 'Buonanotte,';
+
+  @override
+  String get homePrompt => 'dove andiamo oggi?';
+
+  @override
+  String get homeGuest => 'Viaggiatore';
+
+  @override
+  String get swipeToStart => 'Andiamo';
+
+  @override
+  String get tabHome => 'Home';
+
+  @override
+  String get tabCommunity => 'Community';
+
+  @override
+  String get tabProfile => 'Profilo';
+
+  @override
+  String get themeLabel => 'Tema';
+
+  @override
+  String get focusTitle => 'CONCENTRATI SU';
+
+  @override
+  String get premiumTrial => '1 settimana gratis';
+
+  @override
+  String profileLevelN(int n) {
+    return 'Livello $n';
+  }
+
+  @override
+  String profileToNext(int level, int xp) {
+    return 'al livello $level · $xp XP';
+  }
+
+  @override
+  String get profileAtMax => 'Livello massimo raggiunto';
+
+  @override
+  String get close => 'Close';
+
+  @override
+  String get communityGuest => 'Sign in to see friends, routes and challenges.';
+
+  @override
+  String get communityChallenges => 'Challenges';
+
+  @override
+  String get communityCreateChallenge => 'Create challenge';
+
+  @override
+  String get communityNoChallenges => 'No active challenges yet.';
+
+  @override
+  String get communityFriendsRoutes => 'Friends\' routes';
+
+  @override
+  String get communityFriends => 'Friends';
+
+  @override
+  String get communityAddFriend => 'Add';
+
+  @override
+  String get communityWalkingNow => 'walking now';
+
+  @override
+  String get communityNoFriends => 'No one yet — add friends by handle.';
+
+  @override
+  String get communityRequests => 'Friend requests';
+
+  @override
+  String get communityAccept => 'Accept';
+
+  @override
+  String get communityDecline => 'Decline';
+
+  @override
+  String get communityJoin => 'Join';
+
+  @override
+  String get communityPickHandleTitle => 'Pick a handle';
+
+  @override
+  String get communityPickHandleBody => 'Friends use it to find you.';
+
+  @override
+  String get communityHandleField => 'handle';
+
+  @override
+  String get communityHandleSave => 'Save';
+
+  @override
+  String get communityHandleTaken => 'Handle taken or invalid';
+
+  @override
+  String get communityRequestSent => 'Request sent';
+
+  @override
+  String get communitySearchHandle => 'Search by handle';
+
+  @override
+  String get communitySendRequest => 'Add';
+
+  @override
+  String get communityChallengeTitle => 'Title';
+
+  @override
+  String get communityMetric => 'Metric';
+
+  @override
+  String get communityMetricDistance => 'Distance';
+
+  @override
+  String get communityMetricPlaces => 'Places';
+
+  @override
+  String get communityMetricDistricts => 'Districts';
+
+  @override
+  String get communityGoalLabel => 'Goal';
+
+  @override
+  String get communityDaysLabel => 'Days';
+
+  @override
+  String get communityLeaderboard => 'Leaderboard';
+
+  @override
+  String get communityNoParticipants => 'No participants yet.';
+
+  @override
+  String communityRankPlace(int rank) {
+    return '#$rank';
+  }
+
+  @override
+  String communityGoalKm(int km) {
+    return '$km km';
+  }
+
+  @override
+  String communityGoalPlaces(int count) {
+    return '$count places';
+  }
+
+  @override
+  String communityGoalDistricts(int count) {
+    return '$count districts';
+  }
+
+  @override
+  String feedWalked(String name) {
+    return '$name went for a walk';
+  }
+
+  @override
+  String feedWalkedIn(String name, String city) {
+    return '$name walked in $city';
+  }
+
+  @override
+  String feedStreak(String name, int days) {
+    return '$name — $days-day streak';
+  }
+
+  @override
+  String feedBadge(String name, String badge) {
+    return '$name earned “$badge”';
+  }
+
+  @override
+  String feedChallenge(String name) {
+    return '$name started a challenge';
+  }
+
+  @override
+  String get communityCoWalk => 'Walk together';
+
+  @override
+  String get communityCoWalkSub => 'Live session with a friend';
+
+  @override
+  String get communityCoWalkActive => 'Walking together';
+
+  @override
+  String get communityCoWalkWaiting => 'Waiting for a friend…';
+
+  @override
+  String get communityCoWalkLeave => 'Leave';
+
+  @override
+  String get communityCoWalkExplain =>
+      'Create a code and share it, or enter a friend\'s code — you\'ll see each other live on the map.';
+
+  @override
+  String get communityCoWalkCreate => 'Create a room';
+
+  @override
+  String get communityCoWalkOrJoin => 'or join';
+
+  @override
+  String get communityCoWalkJoin => 'Join';
+
+  @override
+  String get communityCoWalkEnterCode => 'code';
+
+  @override
+  String get communityMyRoutes => 'My routes';
+
+  @override
+  String get communitySeeAll => 'All';
+
+  @override
+  String get communityNoRoutes => 'No walks yet.';
+
+  @override
+  String get communityWhatsNew => 'New: friends, challenges and co-walks';
+
+  @override
+  String get communityTogether => 'Together';
+
+  @override
+  String get communityGroupStreak => 'Group streak';
+
+  @override
+  String get communityGroupStreakSub => 'Keep a streak with friends';
+
+  @override
+  String get communityTeamChallenge => 'Team challenge';
+
+  @override
+  String get communityTeamChallengeSub => 'Compete with friends';
+
+  @override
+  String get communityGroupStreakPick => 'Pick friends for the shared streak';
+
+  @override
+  String get communityGroupStreakEmpty =>
+      'Add friends first to start a group streak.';
+
+  @override
+  String communityGroupStreakDays(int days) {
+    return '$days days together';
+  }
+
+  @override
+  String xpValue(int n) {
+    return '$n XP';
+  }
+
+  @override
+  String get achievements => 'OBIETTIVI';
+
+  @override
+  String get friends => 'Amici';
+
+  @override
+  String get invite => 'Invita';
+
+  @override
+  String get friendsSoon => 'Gli amici arrivano presto';
+
+  @override
+  String get statsSoon => 'Le tue statistiche appariranno qui';
+
+  @override
+  String get communitySoonTitle => 'La community arriva presto';
+
+  @override
+  String get communitySoonBody =>
+      'Qui vivranno amici, percorsi condivisi e sfide.';
+
+  @override
+  String get sectionAccount => 'Account';
+
+  @override
+  String get sectionDeveloper => 'Sviluppatore';
 }

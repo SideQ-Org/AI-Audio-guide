@@ -109,6 +109,27 @@ class AuthService extends ChangeNotifier {
   String? get email =>
       available ? Supabase.instance.client.auth.currentUser?.email : null;
 
+  /// The user's nickname for the profile. Prefers the backend `display_name`, then the
+  /// Supabase user metadata (`display_name`/`name`/`full_name`), else the email's local
+  /// part. Null when nothing is known (guest) — the UI shows a generic label.
+  String? get displayName {
+    final fromProfile = _profile?.displayName;
+    if (fromProfile != null && fromProfile.trim().isNotEmpty) return fromProfile.trim();
+    if (available) {
+      final md = Supabase.instance.client.auth.currentUser?.userMetadata;
+      for (final k in const ['display_name', 'name', 'full_name', 'nickname']) {
+        final v = md?[k];
+        if (v is String && v.trim().isNotEmpty) return v.trim();
+      }
+    }
+    final e = email;
+    if (e != null && e.contains('@')) {
+      final u = e.split('@').first;
+      if (u.isNotEmpty) return u;
+    }
+    return null;
+  }
+
   String? get userId =>
       available ? Supabase.instance.client.auth.currentUser?.id : null;
 
@@ -117,9 +138,38 @@ class AuthService extends ChangeNotifier {
         .signInWithPassword(email: email, password: password);
   }
 
-  Future<void> signUpWithEmail(String email, String password) async {
+  /// Create an account. Optional profile fields ([nick] / [birthdayIso] / [avatarUrl])
+  /// are written to user_metadata up-front so they survive the email-confirm step. When
+  /// email confirmation is on, no session is returned — the caller then collects the
+  /// 6-digit code and calls [verifySignupOtp].
+  Future<void> signUpWithEmail(
+    String email,
+    String password, {
+    String? nick,
+    String? birthdayIso,
+    String? avatarUrl,
+  }) async {
+    final data = <String, dynamic>{};
+    if (nick != null && nick.isNotEmpty) data['display_name'] = nick;
+    if (birthdayIso != null && birthdayIso.isNotEmpty) data['birthday'] = birthdayIso;
+    if (avatarUrl != null && avatarUrl.isNotEmpty) data['avatar_url'] = avatarUrl;
     await Supabase.instance.client.auth
-        .signUp(email: email, password: password);
+        .signUp(email: email, password: password, data: data.isEmpty ? null : data);
+  }
+
+  /// Confirm a fresh signup with the 6-digit code from the email. On success a session
+  /// is established (the auth-state stream fires → the gate swaps to the app).
+  Future<void> verifySignupOtp(String email, String code) async {
+    await Supabase.instance.client.auth.verifyOTP(
+      type: OtpType.signup,
+      email: email,
+      token: code.trim(),
+    );
+  }
+
+  /// Re-send the signup confirmation code to [email].
+  Future<void> resendSignupOtp(String email) async {
+    await Supabase.instance.client.auth.resend(type: OtpType.signup, email: email);
   }
 
   /// Send a password-reset email. The link opens the app via the OAuth deep link.
@@ -128,6 +178,73 @@ class AuthService extends ChangeNotifier {
       email,
       redirectTo: kIsWeb ? null : AccountsConfig.oauthRedirect,
     );
+  }
+
+  /// The user's birthday (ISO `YYYY-MM-DD`), stored in Supabase user_metadata and NOT
+  /// shown on the profile — kept only for a future "happy birthday" greeting.
+  String? get birthday {
+    if (!available) return null;
+    final v = Supabase.instance.client.auth.currentUser?.userMetadata?['birthday'];
+    return v is String && v.isNotEmpty ? v : null;
+  }
+
+  /// The user's chosen avatar, stored in user_metadata as `avatar_url`. Either a real
+  /// URL or a `data:image/...;base64,…` thumbnail (see [TravelerAvatar]). Null => the
+  /// bundled default backpacker avatar is shown.
+  String? get avatarUrl {
+    if (!available) return null;
+    final v = Supabase.instance.client.auth.currentUser?.userMetadata?['avatar_url'];
+    return v is String && v.isNotEmpty ? v : null;
+  }
+
+  /// The user's friends, stored (for now) in user_metadata as `[{id, nick}]`. Empty
+  /// when signed out or none set. A durable `friendships` table is the proper home
+  /// later (see mobile/db/friendships.sql).
+  List<({String id, String nick, int walks, bool paid})> get friends {
+    if (!available) return const [];
+    final raw = Supabase.instance.client.auth.currentUser?.userMetadata?['friends'];
+    if (raw is List) {
+      return [
+        for (final f in raw)
+          if (f is Map && f['id'] is String)
+            (
+              id: f['id'] as String,
+              nick: (f['nick'] as String?)?.trim().isNotEmpty == true ? f['nick'] as String : '—',
+              walks: (f['walks'] as num?)?.toInt() ?? 0,
+              paid: f['paid'] == true,
+            ),
+      ];
+    }
+    return const [];
+  }
+
+  /// Save editable account data. Nick goes to the durable `users.display_name` (drives
+  /// /me + the profile) and to user_metadata; birthday goes to user_metadata only.
+  /// No-op when signed out. Returns nothing; UI reads back via [refreshEntitlement].
+  Future<void> updateProfile({String? nick, String? birthdayIso, String? avatarUrl}) async {
+    if (!available || !isSignedIn) return;
+    final meta = <String, dynamic>{};
+    if (nick != null) meta['display_name'] = nick;
+    if (birthdayIso != null) meta['birthday'] = birthdayIso;
+    if (avatarUrl != null) meta['avatar_url'] = avatarUrl;
+    if (meta.isNotEmpty) {
+      await Supabase.instance.client.auth.updateUser(UserAttributes(data: meta));
+    }
+    // Mirror the nick into the durable users row so /me (and thus the profile) reflects
+    // it. Owner-scoped update; best-effort.
+    final uid = userId;
+    if (nick != null && uid != null) {
+      try {
+        await Supabase.instance.client.from('users').update({'display_name': nick}).eq('id', uid);
+      } catch (_) {/* best-effort */}
+    }
+    await refreshEntitlement();
+  }
+
+  /// Change the signed-in user's password. Throws on failure (weak/short/etc.).
+  Future<void> changePassword(String newPassword) async {
+    if (!available || !isSignedIn) return;
+    await Supabase.instance.client.auth.updateUser(UserAttributes(password: newPassword));
   }
 
   Future<void> signInWithGoogle() => _oauth(OAuthProvider.google);

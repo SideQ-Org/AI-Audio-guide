@@ -31,16 +31,20 @@ def accounts_enabled() -> bool:
 
 
 def _is_transaction_pooler(url: str) -> bool:
-    """True for a Supabase Supavisor (a.k.a. transaction pooler, port 6543) URL.
+    """True ONLY for a Supabase Supavisor **transaction**-mode URL (port 6543).
 
-    The pooler multiplexes many clients over a small set of server backends, so
-    asyncpg's cached, numerically-named prepared statements collide across backends
-    and a call **hangs** (a raw single-connection asyncpg run never reuses a prepared
-    statement across backends — which is exactly why "raw driver works, SQLAlchemy
-    hangs"). Detect by host/port so a direct/dedicated or local connection keeps
-    normal pooling.
+    Transaction mode multiplexes clients over a shared set of server backends and
+    rotates the backend per transaction, so a reused pooled connection sees prepared
+    statements "disappear" (prepared on backend A, executed on backend B →
+    ``InvalidSQLStatementNameError``). That path must therefore run WITHOUT a persistent
+    pool (NullPool) — see get_engine.
+
+    Match ONLY ``:6543``. The Supavisor **session** pooler shares the same host but on
+    ``:5432`` and pins one backend per client connection for its whole life, so it CAN
+    reuse a pooled connection with cached prepared statements — the fast default path.
+    That's why prod uses the session pooler; don't fold it back into this branch.
     """
-    return "pooler.supabase.com" in url or ":6543" in url
+    return ":6543" in url
 
 
 def get_engine() -> AsyncEngine:
@@ -63,11 +67,13 @@ def get_engine() -> AsyncEngine:
                 cur.execute("PRAGMA foreign_keys=ON")
                 cur.close()
         elif _is_transaction_pooler(url):
-            # Supabase transaction pooler: the documented SQLAlchemy-asyncpg fix
-            # (dialect docs, "Prepared Statement Name with PGBouncer") — NullPool so
-            # Supavisor owns pooling and we never hold/reuse a server connection, plus
-            # per-prepare unique statement names and a disabled asyncpg statement cache
-            # so nothing is reused across pooled backends.
+            # Supabase transaction pooler (:6543). CANNOT keep a persistent pool: the backend
+            # rotates per transaction, so a reused connection's prepared statements vanish
+            # (InvalidSQLStatementNameError). NullPool (one fresh connection per checkout, bound to
+            # one backend for its single-transaction life) + disabled statement cache + unique
+            # names is the only correct config here — but it pays a full TLS+auth handshake to the
+            # (remote) pooler on EVERY request (~3.8 s to eu-central-1). Prefer the session pooler
+            # (:5432, the else branch) in prod for reuse; this branch stays correct-but-slow.
             from sqlalchemy.pool import NullPool
 
             _engine = create_async_engine(
@@ -81,10 +87,20 @@ def get_engine() -> AsyncEngine:
                 future=True,
             )
         else:
-            # Direct/dedicated Postgres (or the local supabase stack on :54322):
-            # ordinary pooling with prepared-statement caching is fine and faster.
+            # Session pooler (:5432), direct/dedicated Postgres, or the local supabase stack
+            # (:54322). One backend is pinned per connection for its whole life, so we REUSE a
+            # persistent pool with normal (cached) prepared statements — fast. No pool_pre_ping:
+            # the session pooler is ~190 ms RTT away (eu-central-1), so a per-checkout liveness
+            # round-trip would add ~190 ms to every request; staleness is guarded by AGE
+            # (pool_recycle) plus the startup keepalive (main.py `_warm_db_pool`) that keeps the
+            # pool warm and fresh. Connection reuse is what avoids the ~3.8 s cold handshake.
             _engine = create_async_engine(
-                url, echo=settings.db_echo, pool_pre_ping=True, future=True
+                url,
+                echo=settings.db_echo,
+                pool_size=5,
+                max_overflow=10,
+                pool_recycle=1500,
+                future=True,
             )
 
     return _engine

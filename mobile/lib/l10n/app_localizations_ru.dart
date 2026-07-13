@@ -176,6 +176,55 @@ class AppLocalizationsRu extends AppLocalizations {
   String get chipOffline => 'оффлайн';
 
   @override
+  String get chipPaused => 'на паузе';
+
+  @override
+  String get tourLogTitle => 'Журнал прогулки';
+
+  @override
+  String get tourLogEmpty => 'Здесь появятся места, о которых я рассказал.';
+
+  @override
+  String get tourAskVoice => 'Спросить голосом';
+
+  @override
+  String get summaryTitle => 'Прогулка завершена';
+
+  @override
+  String get summaryDiscardTitle => 'Прогулка не сохранена';
+
+  @override
+  String get summaryDiscardNote =>
+      'Меньше 10 минут — не записали, просто сбросили.';
+
+  @override
+  String get summaryDuration => 'Длительность';
+
+  @override
+  String get summaryDistance => 'Дистанция';
+
+  @override
+  String get summaryPlaces => 'Мест';
+
+  @override
+  String get summaryTold => 'Что рассказали';
+
+  @override
+  String get summaryDone => 'Готово';
+
+  @override
+  String get unitMin => 'мин';
+
+  @override
+  String get unitHr => 'ч';
+
+  @override
+  String get unitKm => 'км';
+
+  @override
+  String get unitM => 'м';
+
+  @override
   String metaConnectionLost(int seconds) {
     return 'Связь потеряна, переподключение через ${seconds}s…';
   }

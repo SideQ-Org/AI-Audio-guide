@@ -538,5 +538,7 @@ async def walk_detail(walk_id: str, user_id: str = Depends(current_user)) -> Wal
             for e in walk.events
         ]
         detail = _walk_out(walk).model_dump()
+        detail.pop("path", None)  # _walk_out now carries a downsampled preview; use the FULL path
         path = walk.path
-    return WalkDetailOut(**detail, events=events, path=path)
+        summary = walk.summary
+    return WalkDetailOut(**detail, events=events, path=path, summary=summary)

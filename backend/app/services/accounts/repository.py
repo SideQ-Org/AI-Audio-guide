@@ -225,6 +225,18 @@ async def update_walk_path(
         await session.flush()
 
 
+async def set_walk_summary(
+    session: AsyncSession, *, walk_id: uuid.UUID | str, user_id: uuid.UUID | str, summary: str
+) -> None:
+    """Store the end-of-walk recap on the walk (owner-checked), so it's readable later."""
+    if not summary:
+        return
+    walk = await session.get(Walk, _as_uuid(walk_id))
+    if walk is not None and walk.user_id == _as_uuid(user_id):
+        walk.summary = summary
+        await session.flush()
+
+
 async def list_walks(
     session: AsyncSession,
     *,

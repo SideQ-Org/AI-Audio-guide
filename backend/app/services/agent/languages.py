@@ -296,7 +296,7 @@ _GREETING_OPENERS: dict[str, dict[str, str]] = {
 _GREETING_TAILS: dict[str, list[tuple[str, str]]] = {
     "ru": [
         ("Начинаем прогулку — {place}. Осмотрюсь и расскажу, чем тут интересно.",
-         "Рад пройтись с тобой. Осмотрюсь и расскажу, чем интересны эти места."),
+         "Рада пройтись с тобой. Осмотрюсь и расскажу, чем интересны эти места."),
         ("Мы с тобой — {place}. Дай гляну по сторонам и введу в курс.",
          "Пройдёмся не спеша. Дай гляну по сторонам и введу в курс."),
         ("Прогуляемся — {place}. Сейчас осмотрюсь и покажу, что вокруг любопытного.",
@@ -316,7 +316,7 @@ _GREETING_TAILS: dict[str, list[tuple[str, str]]] = {
     ],
     "fr": [
         ("Nous sommes près de {place}. Je regarde autour et je t'en fais un aperçu.",
-         "Ravi de marcher avec toi. Je regarde autour et je t'en fais un aperçu."),
+         "Ravie de marcher avec toi. Je regarde autour et je t'en fais un aperçu."),
         ("On démarre à {place}. Un instant, je regarde autour et je te situe.",
          "Allons-y tranquillement. Un instant, je regarde autour et je te situe."),
     ],
@@ -377,12 +377,12 @@ def greeting(code: str | None, place: str | None = None, hour: int | None = None
 # repeat the same connective verbatim — that repetition is exactly what the narrator prompt
 # bans ("затёртые связки по кругу").
 _RESUME_CONNECTIVES: dict[str, tuple[str, ...]] = {
-    "ru": ("Так вот, вернёмся.", "На чём я остановился…", "Ну, продолжим."),
+    "ru": ("Так вот, вернёмся.", "На чём я остановилась…", "Ну, продолжим."),
     "en": ("So, back to what I was saying.", "Anyway, where was I…", "Right, let's carry on."),
     "es": ("Bueno, volvamos a lo que decía.", "¿Por dónde iba…", "En fin, sigamos."),
     "fr": ("Bref, revenons à ce que je disais.", "Où en étais-je…", "Bon, continuons."),
     "de": ("Also, zurück zu dem, was ich sagte.", "Wo war ich…", "Gut, weiter geht's."),
-    "it": ("Dunque, torniamo a quello che dicevo.", "Dov'ero rimasto…", "Bene, andiamo avanti."),
+    "it": ("Dunque, torniamo a quello che dicevo.", "Dov'ero rimasta…", "Bene, andiamo avanti."),
     "pt": ("Então, voltando ao que eu dizia.", "Onde é que eu ia…", "Enfim, vamos continuar."),
     "zh": ("好，我们接着刚才说的。", "刚才说到哪了……", "好，继续吧。"),
 }
@@ -392,6 +392,161 @@ def resume_connective(code: str | None, index: int = 0) -> str:
     """Spoken before the remaining sentences of a narration we paused to weave an object in.
     `index` rotates through the per-language variants (`% len`) so repeated resumes vary."""
     variants = _RESUME_CONNECTIVES.get(normalize(code), _RESUME_CONNECTIVES[FALLBACK])
+    return variants[index % len(variants)]
+
+
+# Higher-level "let's get back to the tour" bridges spoken after a voice question OR after
+# un-pausing — one short line before the guide picks the tour back up. Two moods, chosen by
+# whether what we paused is still relevant (see NarrationScheduler): `continue` returns to the
+# SAME topic ("на чём мы остановились…"); `onward` moves on to fresh nearby material because we
+# walked past the old one. Many variants per language, rotated by call index so they don't get
+# repetitive/annoying. Feminine self-reference to match the voice (see [[assistant-gender]]).
+_TOUR_BRIDGES: dict[str, dict[str, tuple[str, ...]]] = {
+    "ru": {
+        "continue": (
+            "Так, на чём мы остановились… да, продолжаем.",
+            "Ну что, вернёмся к нашей прогулке.",
+            "Итак, продолжим с того же места.",
+            "Хорошо, возвращаюсь к тому, о чём рассказывала.",
+            "Так, о чём это я… а, да.",
+            "Ладно, продолжаем экскурсию.",
+            "Ну, продолжим начатое.",
+            "Так, снова к нашей теме.",
+            "Возвращаемся туда, где прервались.",
+        ),
+        "onward": (
+            "Ну что, идём дальше.",
+            "Так, продолжаем прогулку — тут вокруг тоже интересно.",
+            "Ладно, двигаемся дальше.",
+            "А мы тем временем идём дальше.",
+            "Хорошо, посмотрим, что тут вокруг.",
+            "Итак, продолжаем — впереди ещё есть на что взглянуть.",
+            "Ну, идём дальше по маршруту.",
+            "Так, а теперь — о том, что вокруг нас сейчас.",
+            "Продолжим прогулку.",
+        ),
+    },
+    "en": {
+        "continue": (
+            "So, where were we… right, let's carry on.",
+            "Anyway, back to our walk.",
+            "Okay, let me pick up where I left off.",
+            "Right, back to what I was telling you.",
+            "So, let's continue where we stopped.",
+        ),
+        "onward": (
+            "Anyway, let's keep going.",
+            "Okay, moving on — there's plenty around us too.",
+            "Right, let's carry on with the walk.",
+            "So, let's see what's around here now.",
+            "Let's keep strolling.",
+        ),
+    },
+    "es": {
+        "continue": (
+            "Bueno, ¿por dónde íbamos… ah, sí, seguimos.",
+            "En fin, volvamos a nuestro paseo.",
+            "Vale, retomo lo que te contaba.",
+            "Sigamos donde lo dejamos.",
+            "Bien, continuamos con lo de antes.",
+        ),
+        "onward": (
+            "Bueno, sigamos adelante.",
+            "Vale, continuamos — por aquí también hay cosas interesantes.",
+            "Seguimos con el paseo.",
+            "Veamos qué hay por aquí ahora.",
+            "Continuemos caminando.",
+        ),
+    },
+    "fr": {
+        "continue": (
+            "Alors, où en étions-nous… ah oui, on continue.",
+            "Bref, revenons à notre balade.",
+            "Bon, je reprends où je m'étais arrêtée.",
+            "Reprenons là où on s'est arrêtés.",
+            "Bien, continuons sur notre sujet.",
+        ),
+        "onward": (
+            "Bref, continuons.",
+            "Bon, on avance — il y a de quoi voir par ici aussi.",
+            "Poursuivons la balade.",
+            "Voyons ce qu'il y a autour de nous maintenant.",
+            "Continuons à marcher.",
+        ),
+    },
+    "de": {
+        "continue": (
+            "Also, wo waren wir… ach ja, weiter geht's.",
+            "Also, zurück zu unserem Spaziergang.",
+            "Gut, ich mache da weiter, wo ich aufgehört habe.",
+            "Machen wir dort weiter, wo wir waren.",
+            "Also, weiter mit unserem Thema.",
+        ),
+        "onward": (
+            "Also, gehen wir weiter.",
+            "Gut, weiter — hier ringsum gibt es auch einiges.",
+            "Setzen wir den Spaziergang fort.",
+            "Schauen wir, was hier gerade um uns herum ist.",
+            "Gehen wir weiter.",
+        ),
+    },
+    "it": {
+        "continue": (
+            "Allora, dov'eravamo… ah sì, continuiamo.",
+            "Dunque, torniamo alla nostra passeggiata.",
+            "Bene, riprendo da dove avevo lasciato.",
+            "Riprendiamo da dove eravamo.",
+            "Allora, continuiamo con il nostro discorso.",
+        ),
+        "onward": (
+            "Allora, andiamo avanti.",
+            "Bene, proseguiamo — anche qui intorno c'è da vedere.",
+            "Continuiamo la passeggiata.",
+            "Vediamo cosa c'è qui intorno adesso.",
+            "Continuiamo a camminare.",
+        ),
+    },
+    "pt": {
+        "continue": (
+            "Então, onde estávamos… ah sim, continuamos.",
+            "Enfim, voltando ao nosso passeio.",
+            "Bom, retomo de onde parei.",
+            "Vamos continuar de onde paramos.",
+            "Então, seguimos com o nosso assunto.",
+        ),
+        "onward": (
+            "Então, vamos seguindo.",
+            "Bom, continuamos — por aqui também há o que ver.",
+            "Vamos continuar o passeio.",
+            "Vejamos o que há à nossa volta agora.",
+            "Vamos continuar a caminhar.",
+        ),
+    },
+    "zh": {
+        "continue": (
+            "好，我们刚才说到哪了……对，继续。",
+            "那我们接着刚才的散步。",
+            "好，我接着刚才的说。",
+            "从刚才停下的地方继续吧。",
+            "好，我们继续刚才的话题。",
+        ),
+        "onward": (
+            "好，我们继续往前走。",
+            "那我们接着走——这周围也有值得看的。",
+            "继续我们的散步吧。",
+            "看看现在我们周围有什么。",
+            "我们接着走吧。",
+        ),
+    },
+}
+
+
+def tour_bridge(code: str | None, index: int = 0, mode: str = "onward") -> str:
+    """A short 'back to the tour' line after a question or a pause. `mode` is "continue" (return
+    to the same, still-relevant topic) or "onward" (we've moved on — lead into fresh material).
+    `index` rotates the per-language variants so repeats don't get annoying."""
+    lang = _TOUR_BRIDGES.get(normalize(code), _TOUR_BRIDGES[FALLBACK])
+    variants = lang.get(mode) or lang["onward"]
     return variants[index % len(variants)]
 
 
@@ -420,6 +575,24 @@ _AREA_TOPIC: dict[str, str] = {
     ),
 }
 
+# Grounded variant used when there are NO web-verified area facts. The model invents
+# obscure street/district detail (the "метеоритный кратер" fabrication) but reliably
+# knows a *named city* — so this leans on widely-known knowledge and demands [SILENCE]
+# rather than invention. Only ever used at the city level (see Orchestrator._area_line).
+_AREA_TOPIC_GROUNDED_EN = (
+    "one widely-known, verifiable fact about the {label} {name} — real history or "
+    "geography a well-read local would confirm, spoken plainly. Do NOT invent specifics, "
+    "dates or names, and no repeats. If you don't know a solid fact, reply exactly [SILENCE]"
+)
+_AREA_TOPIC_GROUNDED: dict[str, str] = {
+    "ru": (
+        "один широко известный, достоверный факт про {label} {name} — реальная история "
+        "или география, которую подтвердил бы начитанный местный, простыми словами. "
+        "НЕ выдумывай конкретику, даты и имена, без повторов. Если твёрдого факта нет — "
+        "ответь ровно [SILENCE]"
+    ),
+}
+
 _STREET_HOOK_EN = "stepping onto {street}"
 _STREET_HOOK: dict[str, str] = {
     "ru": "переход на улицу {street}",
@@ -439,6 +612,12 @@ def level_labels(code: str | None) -> tuple[str, str, str]:
 def area_topic(code: str | None, label: str, name: str) -> str:
     """One cascade-beat instruction for the area narrator."""
     tmpl = _AREA_TOPIC.get(normalize(code), _AREA_TOPIC_EN)
+    return tmpl.format(label=label, name=name)
+
+
+def area_topic_grounded(code: str | None, label: str, name: str) -> str:
+    """A cascade beat for fact-less areas: widely-known city knowledge or [SILENCE]."""
+    tmpl = _AREA_TOPIC_GROUNDED.get(normalize(code), _AREA_TOPIC_GROUNDED_EN)
     return tmpl.format(label=label, name=name)
 
 

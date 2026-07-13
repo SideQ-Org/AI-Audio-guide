@@ -18,6 +18,18 @@ LLMs (OpenRouter) or a local model (LM Studio), and the Flutter app builds to an
 - `backend/` — FastAPI + asyncio + WebSocket server; the orchestrator and all agent logic.
 - `mobile/` — Flutter client (Android/iOS/web/Windows): full-screen OSM map, on-device TTS/STT,
   8 languages, background-while-locked walking (foreground service + Pause-button shade card).
+  The **active-tour home** is a distinct redesigned state (`ui/screens.dart` `HomeModules`,
+  `ui/components.dart` `StatusIsland`/`TourControls`/`MicButton`): swiping "Поехали" plays a
+  staggered activation choreography (map blur lifts + inactive blocks slide away → a Dynamic-Island
+  status pill drops in and a matte-glass control panel with a highlighted mic slides up), always-on
+  map controls (zoom/compass/recenter), a per-walk journal, and a Stop → end-of-walk summary sheet
+  (duration · distance · places · a **track mini-map** · and an async LLM **structured recap** — the
+  client keeps the socket open ~18 s after `end` so the recap can land, showing a spinner until it
+  does). The **GPS track** is drawn live on the map as a growing glow polyline (grey dashed on paused
+  stretches) via the shared `ui/track_map.dart` (`TrackMap`/`trackPolylines`) — the same renderer
+  feeds the summary, the history-list thumbnails and the walk detail; the list `/walks` payload
+  carries a downsampled `path` for the previews. Map markers use **crisp halos/borders, not blurred
+  shadows** — blurred marker shadows smear/ghost when the map pans under Impeller (iOS sim).
 - `deploy/` — Caddy + docker-compose for the prod host: Caddy terminates TLS, **serves the
   Flutter web build** at `/`, and reverse-proxies `/ws /health /ready /stats` to the backend.
   The web build is a **generated artifact**, not checked in: build it in `mobile/` and copy it
@@ -30,17 +42,30 @@ LLMs (OpenRouter) or a local model (LM Studio), and the Flutter app builds to an
   accounts/tiers work: `ACCOUNTS_DESIGN.md` (durable-layer design), `SUPABASE_SETUP.md` (the
   checklist to turn accounts ON — dormant without keys), `PROD_INFRA.md` (what's prototype-grade
   and the knob to harden each), plus `PRIVACY_POLICY.md` / `TERMS.md` / `MVP_PITCH.md`. For the
-  in-progress mobile visual overhaul: `design/DESIGN_SPEC.md` (the single source of truth for the
+  mobile visual overhaul: `design/DESIGN_SPEC.md` (the single source of truth for the
   premium redesign — design tokens, palette, per-screen specs in `design/screens/`, refs in
-  `design/refs/`; **not yet built into Flutter** — read it before touching mobile UI). For the
-  planned narrative-memory work: `MEMORY_GRAPH_DESIGN.md` (draft — a per-walk memory graph of
-  objects/themes/facts to kill repetition/fabrication and enable callbacks + long-term memory;
-  design only, not built).
+  `design/refs/`; **substantially built into Flutter now** — login/register, home (incl. the
+  active-tour state), community, profile and settings all ship the redesign via `ui/design.dart`
+  tokens + `ui/components.dart`; read the spec before touching mobile UI to stay on-palette). For the
+  social layer: `design/COMMUNITY.md` (friends/feed/challenges/group-streaks + Realtime presence and
+  co-walk design) and `design/PROFILE_ACHIEVEMENTS.md` (the level curve + achievements shown on the
+  profile — `ui/level.dart`/`ui/achievements.dart` mirror the same formulas the backend derives). For the
+  narrative-memory work: `MEMORY_GRAPH_DESIGN.md` (a per-walk memory graph of objects/themes/facts to
+  kill repetition/fabrication and enable callbacks + long-term memory). **Partly built now** — the
+  `NarrativeDirector` (`agent/director.py`) + `WalkMemory` (`shared/memory.py`) ship callbacks,
+  fact-level dedup/anti-fabrication, look-ahead foreshadow and revisit (see "Narrative director &
+  memory graph" below); the full typed-graph + arc planning stays design.
+
+> **Note:** `CONTINUE.md`, `SUPABASE_SETUP.md`, and `PROD_INFRA.md` are **gitignored** operational
+> handoff docs (they hold prod IP / SSH workflow / test-account creds) — they live only in the
+> personal repo, so a fresh checkout of the shared repo won't have them even though this file cites
+> them heavily (e.g. `CONTINUE.md §0h`). Don't treat their absence as a mistake or go looking for them.
 
 > The prose in `ARCHITECTURE.md` predates some decisions. Where it disagrees with the code,
 > the code wins: the **default LLM backend is Claude/Anthropic** (see `backend/app/config.py`),
-> state defaults to **in-memory** (Redis optional), and **TTS runs on the client** (server TTS
-> is a no-op `NullTTS`). `CONTINUE.md` reflects the real deployed config (OpenRouter/Gemini in
+> state defaults to **in-memory** (Redis optional), and **TTS runs on the client by default**
+> (server TTS is a no-op `NullTTS` unless neural TTS is turned on — see "Neural TTS" below).
+> `CONTINUE.md` reflects the real deployed config (OpenRouter/Gemini in
 > dev, DeepSeek in prod due to a regional block).
 
 ## Backend — commands
@@ -131,7 +156,10 @@ The LLM roles (`backend/app/services/agent/`, prompts in `backend/prompts/*.txt`
   outlined topics) so narration across many objects reads as one coherent spine rather than
   disconnected blurbs. `HeuristicPlanner` (offline) or `LLMPlanner` (structured JSON).
 - **Companion** (`companion.py`) — handles voice/text barge-in; can use tools; returns a reply
-  plus an optional `control_patch` (e.g. "skip shops", "be brief") that steers the tour.
+  plus an optional `control_patch` (e.g. "skip shops", "be brief") that steers the tour. Its
+  inline reply is the **whole** answer — the question is deliberately NOT re-queued as an area-beat
+  "focus" topic (that produced a second, redundant/stale beat re-telling the same fact on a field
+  walk; `on_utterance` no longer touches `pending_focus`).
 
 Prompts are assembled in layers: `SYSTEM_PROMPT(role, lang) = CORE(lang) + ROLE_BLOCK(role) +
 RUNTIME_CONTEXT`. `core.txt` holds the invariants shared by every role; `RUNTIME_CONTEXT` is the
@@ -141,7 +169,14 @@ The per-tick agent work (discovery → facts → Scorer → Narrator, plus area-
 and prefetch) is assembled in `pipeline.py` (`TextPipeline`), separate from the orchestrator's
 FSM/persistence. `TextPipeline` also **pre-generates** the narration for the object you're walking
 toward (`warm_narration` → `_narr_cache`, keyed `(place_id, lang)`) so its blurb is spoken the
-instant you arrive rather than after a 5–20 s LLM wait; `step()` pops the cache when present.
+instant you arrive rather than after a 5–20 s LLM wait; `step()` pops the cache when present. The
+**area monologue is pre-generated the same way**: while the current outline beat is being spoken,
+the orchestrator warms the NEXT one in the background (`prefetch_area` → `commit_area`, gated by
+`AREA_PREFETCH`) so the inter-beat LLM latency (10–17 s cold at session start — the "медленно
+переключался между блоками" gap) is hidden behind delivery instead of opening a silent gap.
+`prefetch_area` is strictly **read-only** (no `store.save`): it runs concurrently with delivery /
+weave / barge-in without touching session state, and the producer commits the result single-
+threaded, re-checking freshness (still the next outline topic) so it can't repeat or drift.
 `name_localizer.py` (`NameLocalizer`, cached LLM) renders place titles in the session language
 while keeping proper names transliterated — it feeds both narration and map labels.
 
@@ -151,9 +186,38 @@ bubble is **woven in at a sentence boundary** (never a mid-word cut). The interr
 remaining sentences are parked on a stack and **resume** afterward with a spoken connective
 (`resume_connective`), unless the walker has moved too far for it to still make sense. If the
 object being told outranks the newcomer (`current_outranks`), the current line finishes in full and
-the newcomer is covered briefly afterward as "by the way, we passed…" (`passed_object_intro`).
+the newcomer is covered briefly afterward in the past tense — `narrate_object(..., passed=True)`,
+which the Narrator renders via its `FLAGS.passed` "объект уже позади" block ("кстати, мы прошли…").
 `languages.py` also holds the instant, no-LLM **session greeting** (`greeting`, time-of-day +
 random tail) spoken the moment a walk starts to fill the cold-load gap before the area intro.
+
+**Narrative director & memory graph** (`director.py` + `shared/memory.py`). `director.py` is the
+**content-planner** layer — deterministic (no LLM in the tick, O(objects)), it decides *structure*
+while the Narrator stays the *realizer*. Reading `SessionState.memory` (`WalkMemory`) and the live
+candidate window it owns four decisions, threaded into `pipeline.step`/`warm_narration` and the area
+path as hints the Narrator may use:
+- **Callbacks** (`find_callback`) — reference an earlier-narrated object of the same category
+  ("как та церковь, что мы прошли раньше"), excluding the last couple and dull/commercial types.
+- **Look-ahead** (`find_lookahead`) — tease a notable object coming up ahead in the gaze cone
+  ("впереди — старая усадьба"), so the tour leans forward.
+- **Fact dedup / anti-fabrication** (`atomize_facts` + `WalkMemory.new_facts`/`told_facts`) —
+  atomize enrichment into sentence-level facts and feed a beat ONLY not-yet-told ones (kills reworded
+  "опять про берёзы"); wired into the area path (`_emit_area_beat`). Elaborate additionally requires
+  facts (no facts ⇒ silence, never invented history).
+- **Revisit** (`find_revisit`) — when the walker loops back to an object told earlier — near it now
+  AND ≥`revisit_min_route_m` of route walked since (the `SessionState.route_len_m` odometer, so it
+  never fires right after the main narration) — add "снова у X" + one fresh detail via elaborate.
+
+`WalkMemory` is the graph substrate, persisted in `SessionState` (survives resume): `narrations`
+(whole-walk anti-repeat corpus, Jaccard/containment), `objects` (`ObjectMemo` nodes —
+id/name/category/wikidata/theme/significance/lat/lon/said_route_m; recall + callbacks + revisit),
+`told_facts` (fact-level dedup). The FULL graph (typed Object/Area/Theme/Fact nodes + edges,
+look-ahead **arc** planning) is designed in `MEMORY_GRAPH_DESIGN.md`; the director + WalkMemory above
+are the **built** slice (the doc's "design only" note is stale — Phases 1-5 shipped).
+
+`summarizer.py` (`LLMSummarizer`) writes the **end-of-walk structured recap** from the whole-walk
+narration corpus — one post-walk LLM call fired on `end` (kept walks), delivered async as a `summary`
+WS message and rendered in the client's Stop sheet (spinner → text).
 
 Services (`backend/app/services/`):
 - `geo/` — OSM **Overpass** discovery: radius search, type/distance/gaze-cone ranking, adaptive
@@ -166,14 +230,30 @@ Services (`backend/app/services/`):
   **off the hot-path**: top-K candidates, prefetch-ahead, ~9 s timeout, memory+disk cache.
 - `llm/` — provider-agnostic `LLMClient` + a per-role router. Default Anthropic; OpenAI-compatible
   base URL for OpenRouter or local LM Studio. A `METER` tracks tokens/cost per session.
-- `stt/` — `faster-whisper` (real) or `MockSTT`. `tts/` — interface only; `NullTTS` server-side
-  (the **client** speaks via `flutter_tts`).
+- `stt/` — voice barge-in transcription: `MockSTT` (tests), `FasterWhisperSTT` (local CPU/GPU,
+  slow — ~8-10 s), or **`OpenRouterSTT`** (cloud Whisper-family via the OpenAI-compatible
+  `/audio/transcriptions`, ~3 s — the **prod default**, `STT_BACKEND=openrouter`). Reuses the LLM
+  creds; prod uses `mistralai/voxtral-mini-transcribe` (perfect Russian, no geoblock — `openai/*`
+  transcription 403s from the prod region, like TTS). `tts/` — `NullTTS` (text-only, default; the
+  **client** speaks via `flutter_tts`) **or** `OpenAITTS` (optional **neural** voice — see below).
 - `state/store.py` — session store, in-memory by default (LRU + TTL caps), Redis optional.
 - `accounts/` — **optional** durable layer (SQLAlchemy async → Postgres/Supabase in prod, SQLite
   in tests) for user accounts + walk history. `auth.py` verifies a Supabase JWT (JWKS or legacy
   HS256) → `user_id`; `repository.py`/`models.py`/`db.py` are the CRUD/ORM/engine; `api.py` is the
   REST surface (`/me`, `/walks`). Ownership is enforced both in-app and by Postgres RLS
   (`backend/db/rls.sql`). Entirely dormant without keys — see "Accounts & tiers" below.
+  - **Community/social** (`community.py` + `community_api.py`, mounted at `/community/*`; design
+    in `design/COMMUNITY.md`) is a second durable module kept separate from `repository.py` the
+    same way `history.py` is: it owns **friendships, an activity feed, challenges, and group
+    streaks**, plus the values *derived* from the durable `walks` rows (level, streak, presence,
+    challenge progress — `level_for_walks()` mirrors mobile `ui/level.dart`). Same guard as the
+    rest of the durable layer: 503 when accounts are off. New ORM tables live in `models.py`
+    (`Friendship`, `ActivityEvent`, `Challenge`, `ChallengeParticipant`, `GroupStreak`,
+    `GroupStreakMember`) with RLS policies in `rls.sql`. **Live presence + co-walk** ride Supabase
+    Realtime directly from the client (`mobile/lib/accounts/realtime_service.dart`), not the
+    backend: a global `presence:community` channel for friends' live "walking now" status (coords
+    rounded ~110 m for privacy) and per-room `presence:cowalk:<CODE>` channels for two friends
+    walking together. Caddy proxies `/community/*` to the backend (`deploy/`).
 - `billing/` — **optional** subscription receipt verification. Client buys via the store, POSTs
   the purchase token to `/billing/...`; `verify.py` checks it against Google Play (Apple stubbed)
   and flips the account to the paid tier. 503 when unconfigured.
@@ -210,10 +290,14 @@ time delivery — the sentence granularity is what makes seamless weaving possib
 - **In:** `position` (lat/lon/heading/pace), `utterance` (typed question), `audio` (base64 WAV →
   STT), `listen` (mic open/close, sent around a voice question), `played` (paced-playback ack),
   `language`, `theme`, `control` (manual `control_patch`), `auth` (Supabase JWT, see Accounts),
-  `pause`/`resume` (real server-side halt — see below), `ping` (keepalive, ignored).
-- **Out:** `state`, `narration` (text + place + coords), `places` (all discovered objects, for map
-  pins), `reply`, `transcript`, `language`, `error`, `ping` (server keepalive every 20 s), `quota`
-  (`{scope:"daily"}` — a free account is out of daily tours; the client shows the upgrade prompt).
+  `pause`/`resume` (real server-side halt — see below), `end` (Stop button: halt the tour;
+  with `discard:true` the backend deletes this session's walk — a walk shorter than the client's
+  10-minute record threshold is dropped, see "Session record rule" below), `ping` (keepalive, ignored).
+- **Out:** `state`, `narration` (text + place + coords, **+ optional `audio_b64`/`audio_mime`** —
+  see Neural TTS), `places` (all discovered objects, for map pins), `reply` (also carries optional
+  audio), `transcript`, `summary` (structured end-of-walk recap, pushed async after `end` on a kept
+  walk — see the director/summarizer above), `language`, `error`, `ping` (server keepalive every
+  20 s), `quota` (`{scope:"daily"}` — a free account is out of daily tours; upgrade prompt).
   The `auth` reply also carries `tier` / `tours_today` / `daily_tour_limit` (feature: account tiers).
 
 **Connectivity resilience (the real-walk fix — see `CONTINUE.md` §0).** A real mobile walk drops
@@ -234,9 +318,48 @@ recorded as a flagged breadcrumb (`[lat, lon, 1.0]`; unpaused points are `[lat, 
 a grey dashed polyline in history; a long pause refreshes `walk_last_event_at` so it doesn't rotate
 into a second walk. The in-app pause button and the notification button share one `_paused` flag.
 
+**Session record rule (Stop → summary, 10-minute gate).** The **Stop** button ends the session
+outright (client `_endSession`): it sends `end`, halts the walk, and shows a formatted **end-of-walk
+summary** (duration · distance · places narrated). The client owns the record decision — it stamps
+`_sessionStart` on activation and accumulates walked distance. A session **≥10 min counts and is
+kept**; a **shorter one is discarded** — the client sends `end` with `discard:true` and the backend
+(`_discard_walk` in `main.py`) deletes the walk row persisted for that session, so short walks never
+enter history/streaks/challenges. (History rows are still created eagerly on the first narrated
+object — see `history.py`; the `end`/`discard` signal is what prunes a too-short one on Stop.)
+
 Other endpoints: `GET /health` (liveness), `GET /ready` (503 if recent LLM calls all failed),
 `GET /stats` (admin, gated by `STATS_TOKEN`), `GET /` (browser test client, `backend/web/index.html`),
-plus the accounts/billing REST routers (`/me`, `/walks`, `/billing/...`) mounted in `main.py`.
+plus the accounts/billing/community REST routers (`/me`, `/walks`, `/billing/...`, `/community/*`)
+mounted in `main.py`.
+
+### Neural TTS (optional, tier-gated — off by default)
+
+By default the guide is spoken by the **client's on-device `flutter_tts`** (robotic, and it
+mispronounces proper names/numbers). A **neural voice** can be turned on server-side: with
+`TTS_BACKEND=openai` + a key, a **PAID** session has each spoken sentence synthesized by
+`OpenAITTS` (`services/tts/tts.py`, OpenAI `gpt-4o-mini-tts` → mp3) and attached **base64 to the
+same `narration`/`reply` frame** (`audio_b64`/`audio_mime`). The client (`main.dart`) plays that
+audio via **`audioplayers`** when present and falls back to `flutter_tts` when absent — so free
+tier, guests, TTS-off, and synth failures all still speak, unchanged. Design invariants:
+- **Gating** is by `SESSION_TIER` + `tts_tier_min` (like model routing); synth happens in
+  `Connection.send_out()` **before** the send lock (an HTTP call must not block heartbeat/state),
+  and returns `None` on any error → text-only. It's keyed to the existing per-sentence `played`
+  pacing, so weaving/barge-in/pause are untouched (`_hush`/`pause` stop the `AudioPlayer` too).
+- **Cache** `(sha1(text), voice, fmt)` (memory + optional `TTS_CACHE_PATH` disk) reuses a phrase
+  across sessions; TTS spend is metered into the same `METER`/`USD_HARD_CAP` as LLM cost.
+- **Creds reuse the LLM's** — OpenRouter proxies an OpenAI-compatible `/audio/speech`, so
+  `TTS_API_KEY`/`TTS_BASE_URL` default (empty) to `OPENAI_API_KEY`/`OPENAI_BASE_URL` (the same
+  OpenRouter setup). **Region caveat (our prod):** OpenRouter geoblocks OpenAI/Google/Anthropic
+  from the prod region (§5), so `openai/gpt-4o-mini-tts` is **unreachable** there — the default is
+  **`x-ai/grok-voice-tts-1.0`** (voice `Ara`), which returns mp3 and works from the blocked region.
+  Gemini TTS also works but only emits `pcm` (would need client-side WAV-wrapping). List what's
+  available: `GET {base}/models?output_modalities=speech`.
+- **iOS gotcha:** the `audioplayers` session uses the **same `.playback` category** as
+  `flutter_tts` (`AudioContextIOS` in `_initTts`) so paid-tier audio keeps playing screen-locked
+  and routes to Bluetooth. Free tier separately gets an **upgraded on-device voice**
+  (`_selectBestVoice`: iOS enhanced/premium, Android network voices) via `getVoices`/`setVoice`.
+- Knobs: `TTS_BACKEND`, `TTS_MODEL`, `TTS_VOICE`(+`_BY_LANG`), `TTS_FORMAT`, `TTS_API_KEY`,
+  `TTS_BASE_URL`, `TTS_TIMEOUT_S`, `TTS_TIER_MIN`, `TTS_CACHE_PATH`, `TTS_PRICE_PER_MCHAR`.
 
 ### Accounts, tiers & billing (optional — dormant by default)
 
@@ -306,14 +429,20 @@ run without keys. For a real walk, flip the wiring:
 `config.py` has many more knobs, grouped by subsystem: per-role model routing (`MODEL_SCORER`,
 `MODEL_NARRATOR`, `MODEL_COMPANION`, `MODEL_LANDMARK`, `MODEL_ENRICHER`), the instant opener
 (`SESSION_GREETING`), radius tuning (`DEFAULT_RADIUS_M`, `MAX_RADIUS_M`, `WEAVE_RADIUS_M`,
-`NARRATE_RADIUS_M` — the tight "right here" passing bubble, 45 m — and `REACH_RADIUS_M` — the
-tighter cap on the gaze-gated reach fallback so it fires for what you're *about* to reach, not
-150–200 m away — `SCORER_MAX_CANDIDATES`),
-area monologue (`AREA_ENRICH`, `AREA_MAX_BEATS`), the inventory cache (`INVENTORY_ENABLED`,
+`NARRATE_RADIUS_M` — the "right here" passing bubble, 55 m (was 45 m — too tight; real side-passes
+hovered at 50–53 m and never fired) — and `REACH_RADIUS_M` — the tighter cap on the gaze-gated
+reach fallback so it fires for what you're *about* to reach, not 150–200 m away —
+`SCORER_MAX_CANDIDATES`),
+area monologue (`AREA_ENRICH`, `AREA_MAX_BEATS`, `AREA_PREFETCH` — background pre-gen of the next
+outline beat, above; `AREA_CASCADE_REQUIRES_FACTS` — level-aware anti-fabrication: with no verified
+facts the fact-less area cascade still keeps talking about the well-known **city** but never
+descends to the street/district detail the model would invent), the inventory cache (`INVENTORY_ENABLED`,
 `INVENTORY_RADIUS_M`, `INVENTORY_REFETCH_FRAC`, `INVENTORY_TTL_S`), enrichment (`ENRICH_TOP_K`,
-`ENRICH_LOOKAHEAD_K`, `ENRICH_TIMEOUT_S`, `ENRICH_CACHE_PATH`), Whisper (`WHISPER_MODEL_SIZE`,
-`WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`), and the state store (`REDIS_URL`, `SESSION_TTL_S`,
-`MAX_SESSIONS`). `config.py` itself is the authoritative list.
+`ENRICH_LOOKAHEAD_K`, `ENRICH_TIMEOUT_S`, `ENRICH_CACHE_PATH`), STT (`STT_BACKEND` —
+`faster_whisper` local vs `openrouter` cloud; `WHISPER_*` for local, `STT_MODEL`/`STT_TIMEOUT_S`
+for cloud), neural TTS (`TTS_BACKEND`, `TTS_VOICE`, `TTS_TIER_MIN`, `TTS_PRESYNTH`, … — see "Neural
+TTS" above), revisit (`REVISIT_ENABLED`, `REVISIT_RADIUS_M`, `REVISIT_MIN_ROUTE_M`), and the state
+store (`REDIS_URL`, `SESSION_TTL_S`, `MAX_SESSIONS`). `config.py` itself is the authoritative list.
 
 **Accounts/tiers/billing** (all empty = feature off, guest-only): `DATABASE_URL` (durable layer;
 empty ⇒ `accounts_enabled()` False), `SUPABASE_JWKS_URL` or `SUPABASE_JWT_SECRET` (+ `SUPABASE_JWT_AUD`)

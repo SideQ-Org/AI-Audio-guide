@@ -444,18 +444,19 @@ def test_area_cascade_bounded_per_level_then_silent():
     asyncio.run(run())
 
 
-def test_cascade_skipped_without_facts_to_avoid_fabrication():
-    """Anti-fabrication: with no verified area facts and the planned arc exhausted, the
-    'atypical fact про <area>' cascade is NOT run (it would invent) — _area_line returns
-    "" so the caller reaches a real object / bridges / goes quiet instead of fabricating."""
+def test_cascade_city_allowed_without_facts_but_never_street():
+    """Anti-fabrication is LEVEL-AWARE. With no verified facts the model invents obscure
+    street/district detail — but it reliably knows a NAMED CITY. So with the planned arc
+    exhausted the cascade keeps talking about the *city* (grounded, [SILENCE] if unsure),
+    the "лучше бы про город дальше говорил" fix — and never descends to the street it
+    would make up."""
     orch = _orch([])
 
-    called = False
+    topics: list[str] = []
 
     async def fake_narrate_area(address, **kw):
-        nonlocal called
-        called = True
-        return f"fabricated: {kw['topic'][:20]}", None  # the model WOULD produce prose
+        topics.append(kw["topic"])
+        return f"city beat: {kw['topic'][:20]}", None
 
     orch.pipeline.narrate_area = fake_narrate_area
 
@@ -465,7 +466,89 @@ def test_cascade_skipped_without_facts_to_avoid_fabrication():
         st.area_facts = ""  # enrichment came back empty
         st.narrative_plan.outline = []  # planned arc exhausted -> only the cascade is left
         out = await orch._area_line(st, Pace.SLOW)
-        assert out == "" and not called  # cascade gated, model never asked to invent
+        assert out.startswith("city beat:")  # kept talking instead of going quiet...
+        assert any("Долгопрудный" in t for t in topics)  # ...about the city
+        assert not any("Парковая" in t for t in topics)  # never the ungrounded street
+
+    asyncio.run(run())
+
+
+def test_prefetch_area_is_read_only():
+    """The background beat pre-generation warms the NEXT outline beat WITHOUT touching
+    session state (no store.save, no told/history/counter mutation) — that read-only
+    property is what makes it safe to run concurrently with delivery / barge-in / weave."""
+    orch = _orch([])
+
+    async def fake_narrate_area(address, **kw):
+        return f"warmed: {kw['topic']}", "next-hook"
+
+    orch.pipeline.narrate_area = fake_narrate_area
+
+    async def run():
+        st = await orch.store.load("pf")
+        st.address = Address(city="Москва")
+        st.area_facts = "Проверенные факты."  # facts resolved -> prefetch is eligible
+        st.narrative_plan.outline = ["arc-1", "arc-2"]
+        await orch.store.save(st)
+        pre = await orch.prefetch_area("pf", Pace.SLOW)
+        assert pre == ("arc-1", "warmed: arc-1", "next-hook")  # next outline topic, generated
+        # nothing was committed — state is exactly as it was
+        st2 = await orch.store.load("pf")
+        assert st2.narrative_plan.told == []
+        assert st2.area_beats == 0
+        assert st2.narration_history == []
+        assert st2.narrative_plan.next_hook is None
+
+    asyncio.run(run())
+
+
+def test_prefetch_area_bails_without_resolved_facts():
+    """Read-only means it must NOT trigger the (state-mutating) area-facts fetch: if facts
+    aren't resolved yet, prefetch bails so the live path fetches them first."""
+    orch = _orch([])
+
+    async def boom(*a, **k):  # must never be called
+        raise AssertionError("narrate_area called before facts resolved")
+
+    orch.pipeline.narrate_area = boom
+
+    async def run():
+        st = await orch.store.load("pf2")
+        st.address = Address(city="Москва")
+        st.area_facts = None  # not fetched yet
+        st.narrative_plan.outline = ["arc-1"]
+        await orch.store.save(st)
+        assert await orch.prefetch_area("pf2", Pace.SLOW) is None
+
+    asyncio.run(run())
+
+
+def test_commit_area_lands_fresh_beat_and_discards_stale():
+    """commit_area lands a warmed beat only while it's STILL the next outline topic; once
+    that topic has been covered (or a theme-switch rebuilt the outline) it discards the
+    warmed beat so the tour never re-tells or drifts to a stale arc."""
+    orch = _orch([])
+    orch.pipeline.narrate_area = None  # commit uses the pregen text, never the LLM
+
+    async def run():
+        st = await orch.store.load("cm")
+        st.address = Address(city="Москва")
+        st.area_facts = "Факты."
+        st.narrative_plan.outline = ["arc-1", "arc-2"]
+        await orch.store.save(st)
+
+        # fresh: arc-1 is still next -> committed, state advances
+        out = await orch.commit_area("cm", "arc-1", "warmed one.", "hook", Pace.SLOW)
+        assert out is not None and out.text == "warmed one."
+        st = await orch.store.load("cm")
+        assert "arc-1" in st.narrative_plan.told
+        assert st.area_beats == 1
+        assert st.narrative_plan.next_hook == "hook"
+
+        # stale: arc-1 already told, so a second warmed arc-1 is dropped (no double-tell)
+        assert await orch.commit_area("cm", "arc-1", "warmed again.", "h2", Pace.SLOW) is None
+        st = await orch.store.load("cm")
+        assert st.area_beats == 1  # unchanged
 
     asyncio.run(run())
 
