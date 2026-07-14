@@ -1,7 +1,7 @@
 name: ai_audio_guide
 description: AI Audio Guide — real-time autonomous walking tour client.
 publish_to: "none"
-version: 0.1.0+2
+version: 0.1.1+3
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
