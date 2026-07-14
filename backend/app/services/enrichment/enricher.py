@@ -53,6 +53,11 @@ class Enricher(Protocol):
         self, place: Place, context: str | None = None, language: str = _DEFAULT_LANG
     ) -> str | None: ...
 
+    def image_for(self, place_id: str) -> str | None:
+        """Object photo URL captured during enrichment (Wikipedia lead image), or None.
+        Default: no image source (overridden by WikiEnricher/CompositeEnricher)."""
+        return None
+
 
 class EnrichmentCache:
     """Facts cache keyed by (place_id, language): the SAME place yields different
@@ -85,6 +90,9 @@ class MockEnricher:
         self, place: Place, context: str | None = None, language: str = _DEFAULT_LANG
     ) -> str | None:
         return self._facts.get(place.id)
+
+    def image_for(self, place_id: str) -> str | None:
+        return None
 
     @classmethod
     def from_json(cls, path: str | Path) -> MockEnricher:
@@ -189,6 +197,9 @@ class WebSearchEnricher:
         self._persist()
         return facts
 
+    def image_for(self, place_id: str) -> str | None:
+        return None  # web-search facts carry no reliable image
+
 
 class WikiEnricher:
     """Free facts from Wikipedia/Wikidata for OSM places tagged wikipedia=/wikidata=.
@@ -201,6 +212,13 @@ class WikiEnricher:
         self._chars = summary_chars
         self._prefer = prefer_langs
         self._cache: dict[str, str | None] = {}
+        # place_id -> lead-image URL (Wikipedia thumbnail), captured for free from the same
+        # page/summary response we fetch for facts. Language-independent, so keyed by id only.
+        self._images: dict[str, str] = {}
+
+    def image_for(self, place_id: str) -> str | None:
+        """The object's photo URL (Wikipedia lead image) if one was found during enrichment."""
+        return self._images.get(place_id)
 
     def _langs(self, language: str) -> tuple[str, ...]:
         """Preferred Wikipedia languages for this session: the session language, then
@@ -241,39 +259,50 @@ class WikiEnricher:
                 # Wikidata FIRST when available: its sitelinks let us pick the article
                 # in the session language (the `wikipedia=` tag is pinned to one
                 # language — often `ru:` here — and would otherwise force that locale).
+                image: str | None = None
                 if wd:
-                    facts = await self._from_wikidata(client, wd, prefer)
+                    facts, image = await self._from_wikidata(client, wd, prefer)
                 if not facts and wp:
                     lang, _, title = wp.partition(":")
                     if not title:  # tag was just a title, no "lang:" prefix
                         lang, title = prefer[0], wp
-                    facts = await self._summary(client, lang, title)
+                    facts, image = await self._summary(client, lang, title)
         except Exception as e:  # transient network/parse — don't cache, retry later
             _log.warning("wiki enrich failed for %s: %s", place.id, e)
             return None
+        if image:  # the page's lead photo — free, straight from the summary response
+            self._images[place.id] = image
         _bounded_set(self._cache, key, facts)
         return facts
 
-    async def _summary(self, client: httpx.AsyncClient, lang: str, title: str) -> str | None:
+    async def _summary(
+        self, client: httpx.AsyncClient, lang: str, title: str
+    ) -> tuple[str | None, str | None]:
+        """(extract, image_url) from the Wikipedia REST summary. The image is the page's lead
+        photo — `thumbnail` (already sized, ideal for a card), falling back to `originalimage`."""
         t = urllib.parse.quote(title.replace(" ", "_"), safe="")
         r = await client.get(f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{t}")
         if r.status_code != 200:
-            return None
-        extract = (r.json().get("extract") or "").strip()
-        return extract[: self._chars] if extract else None
+            return None, None
+        data = r.json()
+        extract = (data.get("extract") or "").strip()
+        image = (data.get("thumbnail") or {}).get("source") or (
+            data.get("originalimage") or {}
+        ).get("source")
+        return (extract[: self._chars] if extract else None), image
 
     async def _from_wikidata(
         self, client: httpx.AsyncClient, qid: str, prefer: tuple[str, ...]
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         r = await client.get(f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json")
         if r.status_code != 200:
-            return None
+            return None, None
         links = r.json().get("entities", {}).get(qid, {}).get("sitelinks", {})
         for lang in prefer:
             sl = links.get(f"{lang}wiki")
             if sl:
                 return await self._summary(client, lang, sl["title"])
-        return None
+        return None, None
 
 
 class CompositeEnricher:
@@ -289,6 +318,9 @@ class CompositeEnricher:
         self._wiki = wiki
         self._web = web
         self._web_min_weight = web_min_weight
+
+    def image_for(self, place_id: str) -> str | None:
+        return self._wiki.image_for(place_id)  # photos come from the wiki path only
 
     async def facts_for(
         self, place: Place, context: str | None = None, language: str = _DEFAULT_LANG

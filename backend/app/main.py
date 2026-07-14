@@ -362,6 +362,11 @@ async def _send(
                 "lat": out.lat,
                 "lon": out.lon,
                 "final": True,
+                # Structured re-readable facts + a photo URL + category for the object card (not
+                # spoken). Repeated on each sentence of the object; the client keeps the first.
+                "card": out.card,
+                "image": out.image,
+                "category": out.category,
                 # Neural audio for this sentence (PAID + TTS on); absent => client speaks
                 # the text with its on-device voice.
                 "audio_b64": audio_b64,

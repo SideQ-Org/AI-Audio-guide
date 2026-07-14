@@ -40,7 +40,7 @@ from app.shared.schemas import (
 from .director import find_callback
 from .languages import passing_mention
 from .name_localizer import NameLocalizer
-from .narrator import Narrator, split_hook, split_sentences
+from .narrator import Narrator, split_card, split_hook, split_sentences
 from .scorer import Scorer
 from .significance import at_least, significance_from_weight, tags_have_wiki
 from .walklog import clip, get_logger
@@ -67,6 +67,8 @@ class StepResult:
     place: Place | None
     significance: Significance | None
     next_hook: str | None = None  # baton to weave into the next paragraph
+    card: str | None = None  # re-readable structured facts for the object card (not spoken)
+    image: str | None = None  # object photo URL (Wikipedia thumbnail) for the card, if any
 
 
 # Atypical-facts-forward area enrichment: lesser-known facts about the district /
@@ -117,7 +119,7 @@ class TextPipeline:
         # Pre-generated object narrations: (place_id, lang) -> (text, hook). Filled by
         # `warm_narration` for the object you're walking toward, read+popped by `step` so
         # the blurb is spoken the INSTANT you reach it (no 5-20 s LLM wait on arrival).
-        self._narr_cache: dict[tuple[str, str], tuple[str, str]] = {}
+        self._narr_cache: dict[tuple[str, str], tuple[str, str | None, str | None]] = {}
         # Pre-generated area story arcs: area_key -> PlannerOutput. Warmed in the background at
         # the greeting (while it's being spoken) so the first area intro is instant, not a cold
         # planner LLM wait after the opener. Read+popped by the orchestrator's _maybe_area_intro.
@@ -204,9 +206,10 @@ class TextPipeline:
         self, chosen, place, sig, *, addr, heading, pace, switching, theme, told,
         next_hook, history, preferences, passing, in_view, lang, nothing_new,
         passed=False, callback=None, lookahead=None,
-    ) -> tuple[str, str]:
-        """The narrator call for one chosen object — shared by step() and
-        warm_narration() so a pre-generated blurb matches what step would produce."""
+    ) -> tuple[str, str | None, str | None]:
+        """The narrator call for one chosen object — shared by step() and warm_narration()
+        so a pre-generated blurb matches what step would produce. Returns (spoken, hook, card):
+        the CARD block is stripped FIRST (before HOOK, whose matcher runs to end-of-text)."""
         raw = await self.narrator.narrate(
             NarratorInput(
                 place=place, significance=sig, facts=chosen.facts_snippet,
@@ -221,7 +224,9 @@ class TextPipeline:
                 language=lang,
             )
         )
-        return split_hook(raw, lang)
+        body, card = split_card(raw)
+        text, hook = split_hook(body, lang)
+        return text, hook, card
 
     async def warm_narration(
         self, chosen, *, seen, history, address, heading, pace, preferences,
@@ -255,7 +260,7 @@ class TextPipeline:
             # the true side/in_view when a fresh candidate arrives with facts already cached.
             neutral = enriched.model_copy(update={"side": None})
             callback = find_callback(recall or [], place) if recall else None
-            text, hook = await self._render_object(
+            text, hook, card = await self._render_object(
                 neutral, place, sig, addr=addr, heading=heading, pace=pace, switching=False,
                 theme=theme, told=told, next_hook=next_hook, history=history,
                 preferences=preferences, passing=True, in_view=False,
@@ -267,7 +272,7 @@ class TextPipeline:
             log.debug("warm_narration skipped for %r: %r", chosen.place.id, e)
             return
         if text:
-            self._narr_cache[key] = (text, hook)
+            self._narr_cache[key] = (text, hook, card)
             if len(self._narr_cache) > 32:  # bound: keep the freshest handful
                 self._narr_cache.pop(next(iter(self._narr_cache)))
             log.info("pregenerate place=%r | %s", place.name, clip(text))
@@ -396,16 +401,19 @@ class TextPipeline:
         callback = find_callback(recall or [], place) if recall else None
         cached = None if passed else self._narr_cache.pop((chosen.place.id, lang), None)
         if cached is not None:
-            text, hook = cached
+            text, hook, card = cached
             log.info("step CACHED place=%r (pre-generated) | %s", place.name, clip(text))
         else:
-            text, hook = await self._render_object(
+            text, hook, card = await self._render_object(
                 chosen, place, sig, addr=addr, heading=heading, pace=pace,
                 switching=switching, theme=theme, told=told, next_hook=next_hook,
                 history=history, preferences=preferences, passing=passing,
                 passed=passed, in_view=in_view, lang=lang, nothing_new=not candidates,
                 callback=callback, lookahead=lookahead,
             )
+        # Object photo for the card (Wikipedia thumbnail captured during enrichment); None for
+        # non-wiki objects. Read fresh per place — not cached with the narration (id-keyed).
+        image = self.enricher.image_for(chosen.place.id)
         # Guarantee a close, named object is never dead air. DeepSeek sometimes ignores
         # the "passing -> never silent" rule (especially with empty facts), and a
         # silenced passing object would then be gated out forever (its facts-aware
@@ -455,7 +463,9 @@ class TextPipeline:
             "floor" if floored else ("text" if text else "silence"),
             clip(text),
         )
-        return StepResult(text, ScorerOutput(), place, sig, next_hook=hook)
+        return StepResult(
+            text, ScorerOutput(), place, sig, next_hook=hook, card=card, image=image
+        )
 
     async def elaborate(
         self,

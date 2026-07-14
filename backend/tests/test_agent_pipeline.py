@@ -67,7 +67,7 @@ def test_step_uses_and_pops_the_pregeneration_cache():
     """step() speaks the pre-generated blurb (no LLM call) and removes it — one-shot."""
     async def run():
         pipeline = TextPipeline(HeuristicScorer(), TemplateNarrator(), MockEnricher({}))
-        pipeline._narr_cache[("p", "ru")] = ("Готовый рассказ про музей.", "хук")
+        pipeline._narr_cache[("p", "ru")] = ("Готовый рассказ про музей.", "хук", None)
         near = _candidate("p", "Музей", "museum", 0.6, dist=30, facts=None)
         out = await pipeline.step([near], seen=[], history=[], language="ru", passing=True)
         return out, pipeline._narr_cache

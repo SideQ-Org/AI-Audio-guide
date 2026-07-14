@@ -544,8 +544,12 @@ class PlaceMark {
   final String id;
   final LatLng point;
   final String name;
-  String text; // accumulated narration(s) about this place
-  PlaceMark(this.id, this.point, this.name, this.text);
+  String text; // accumulated narration(s) about this place (the spoken excursion)
+  String category; // OSM-derived category (for the card icon + label)
+  String? card; // structured, re-readable facts (narrator CARD block) — shown in the card
+  String? image; // object photo URL (Wikipedia lead image), or null
+  PlaceMark(this.id, this.point, this.name, this.text,
+      {this.category = '', this.card, this.image});
 }
 
 // A narrated-place map pin: a colored `location_on` with a CRISP white halo behind it
@@ -579,11 +583,203 @@ class NearbyObject {
 // Muted family accents for the lite pins — the icon SHAPE tells you what it is; the
 // colour just groups it (culture/nature/water/civic/everyday). Kept low-saturation so a
 // disc full of them doesn't turn into confetti. Readable on both light and dark tiles.
-const _catCulture = Color(0xFFDE9B3C); // soft ochre — museums, monuments, worship, art
-const _catNature = Color(0xFF2FA37C); // soft green — parks, forests, terrain
-const _catWater = Color(0xFF5090EA); // soft blue — water, rivers, fountains
-const _catCivic = Color(0xFF8A94A6); // soft slate — civic, transport, structures
-const _catEveryday = Color(0xFFA7B0BE); // faint slate — shops, cafes, plain buildings
+// Human-readable category labels for the object cards — the raw OSM-derived category
+// ("place_of_worship", "river") is a code, not a label. Russian + English (the app's primary
+// locales; other languages fall back to English, matching the app's i18n state). Unmapped
+// categories are prettified (snake_case -> "Snake case") so nothing shows a raw code.
+const Map<String, ({String ru, String en})> _catLabels = {
+  'museum': (ru: 'Музей', en: 'Museum'),
+  'gallery': (ru: 'Галерея', en: 'Gallery'),
+  'artwork': (ru: 'Арт-объект', en: 'Artwork'),
+  'arts_centre': (ru: 'Центр искусств', en: 'Arts centre'),
+  'monument': (ru: 'Памятник', en: 'Monument'),
+  'obelisk': (ru: 'Обелиск', en: 'Obelisk'),
+  'memorial': (ru: 'Мемориал', en: 'Memorial'),
+  'castle': (ru: 'Замок', en: 'Castle'),
+  'fort': (ru: 'Крепость', en: 'Fort'),
+  'palace': (ru: 'Дворец', en: 'Palace'),
+  'city_gate': (ru: 'Городские ворота', en: 'City gate'),
+  'place_of_worship': (ru: 'Храм', en: 'Place of worship'),
+  'monastery': (ru: 'Монастырь', en: 'Monastery'),
+  'historic': (ru: 'Историческое место', en: 'Historic site'),
+  'ruins': (ru: 'Руины', en: 'Ruins'),
+  'arch': (ru: 'Арка', en: 'Arch'),
+  'attraction': (ru: 'Достопримечательность', en: 'Attraction'),
+  'theatre': (ru: 'Театр', en: 'Theatre'),
+  'concert_hall': (ru: 'Концертный зал', en: 'Concert hall'),
+  'cinema': (ru: 'Кинотеатр', en: 'Cinema'),
+  'viewpoint': (ru: 'Смотровая площадка', en: 'Viewpoint'),
+  'lighthouse': (ru: 'Маяк', en: 'Lighthouse'),
+  'tower': (ru: 'Башня', en: 'Tower'),
+  'manor': (ru: 'Усадьба', en: 'Manor'),
+  'farm': (ru: 'Ферма', en: 'Farm'),
+  'heritage': (ru: 'Объект наследия', en: 'Heritage site'),
+  'park': (ru: 'Парк', en: 'Park'),
+  'garden': (ru: 'Сад', en: 'Garden'),
+  'forest': (ru: 'Лес', en: 'Forest'),
+  'wood': (ru: 'Лес', en: 'Woods'),
+  'nature_reserve': (ru: 'Заповедник', en: 'Nature reserve'),
+  'orchard': (ru: 'Сад', en: 'Orchard'),
+  'vineyard': (ru: 'Виноградник', en: 'Vineyard'),
+  'common': (ru: 'Луг', en: 'Common'),
+  'allotments': (ru: 'Огороды', en: 'Allotments'),
+  'peak': (ru: 'Вершина', en: 'Peak'),
+  'hill': (ru: 'Холм', en: 'Hill'),
+  'ridge': (ru: 'Хребет', en: 'Ridge'),
+  'volcano': (ru: 'Вулкан', en: 'Volcano'),
+  'cliff': (ru: 'Скала', en: 'Cliff'),
+  'rock': (ru: 'Скала', en: 'Rock'),
+  'cave_entrance': (ru: 'Пещера', en: 'Cave'),
+  'beach': (ru: 'Пляж', en: 'Beach'),
+  'bay': (ru: 'Залив', en: 'Bay'),
+  'glacier': (ru: 'Ледник', en: 'Glacier'),
+  'water': (ru: 'Водоём', en: 'Water'),
+  'reservoir': (ru: 'Водохранилище', en: 'Reservoir'),
+  'waterfall': (ru: 'Водопад', en: 'Waterfall'),
+  'wetland': (ru: 'Болото', en: 'Wetland'),
+  'river': (ru: 'Река', en: 'River'),
+  'spring': (ru: 'Источник', en: 'Spring'),
+  'geyser': (ru: 'Гейзер', en: 'Geyser'),
+  'fountain': (ru: 'Фонтан', en: 'Fountain'),
+  'marina': (ru: 'Марина', en: 'Marina'),
+  'watermill': (ru: 'Водяная мельница', en: 'Watermill'),
+  'windmill': (ru: 'Ветряная мельница', en: 'Windmill'),
+  'aqueduct': (ru: 'Акведук', en: 'Aqueduct'),
+  'water_tower': (ru: 'Водонапорная башня', en: 'Water tower'),
+  'townhall': (ru: 'Ратуша', en: 'Town hall'),
+  'exhibition_centre': (ru: 'Выставочный центр', en: 'Exhibition centre'),
+  'courthouse': (ru: 'Суд', en: 'Courthouse'),
+  'university': (ru: 'Университет', en: 'University'),
+  'college': (ru: 'Колледж', en: 'College'),
+  'school': (ru: 'Школа', en: 'School'),
+  'kindergarten': (ru: 'Детский сад', en: 'Kindergarten'),
+  'library': (ru: 'Библиотека', en: 'Library'),
+  'hospital': (ru: 'Больница', en: 'Hospital'),
+  'clinic': (ru: 'Клиника', en: 'Clinic'),
+  'community_centre': (ru: 'Дом культуры', en: 'Community centre'),
+  'club': (ru: 'Клуб', en: 'Club'),
+  'marketplace': (ru: 'Рынок', en: 'Market'),
+  'train_station': (ru: 'Вокзал', en: 'Train station'),
+  'stadium': (ru: 'Стадион', en: 'Stadium'),
+  'square': (ru: 'Площадь', en: 'Square'),
+  'pedestrian': (ru: 'Пешеходная улица', en: 'Promenade'),
+  'cemetery': (ru: 'Кладбище', en: 'Cemetery'),
+  'bridge': (ru: 'Мост', en: 'Bridge'),
+  'cafe': (ru: 'Кафе', en: 'Cafe'),
+  'restaurant': (ru: 'Ресторан', en: 'Restaurant'),
+  'fast_food': (ru: 'Фастфуд', en: 'Fast food'),
+  'bar': (ru: 'Бар', en: 'Bar'),
+  'pub': (ru: 'Паб', en: 'Pub'),
+  'shop': (ru: 'Магазин', en: 'Shop'),
+  'building': (ru: 'Здание', en: 'Building'),
+  'place': (ru: 'Место', en: 'Place'),
+};
+
+// Localized, human-readable label for an object category. `ru` picks the Russian label;
+// anything else uses English. Unknown categories are prettified from snake_case.
+String _categoryLabel(String category, {required bool ru}) {
+  final e = _catLabels[category];
+  if (e != null) return ru ? e.ru : e.en;
+  if (category.isEmpty) return ru ? 'Место' : 'Place';
+  final words = category.replaceAll('_', ' ').trim();
+  return words.isEmpty ? category : '${words[0].toUpperCase()}${words.substring(1)}';
+}
+
+// Rounded hero photo for the activated-object card (Wikipedia lead image). Soft placeholder
+// while loading; a broken URL collapses gracefully so the card just falls back to text-only.
+class _CardHero extends StatelessWidget {
+  final String url;
+  const _CardHero({required this.url});
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return SizedBox(
+      height: 176,
+      width: double.infinity,
+      child: Stack(fit: StackFit.expand, children: [
+        Container(color: c.glassFill(0.06)),
+        Image.network(url, fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+          loadingBuilder: (ctx, child, prog) => prog == null
+              ? child
+              : Center(
+                  child: SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: c.textFaint))),
+        ),
+        // grabber pill sits over the image top
+        Positioned(
+          top: 10,
+          left: 0,
+          right: 0,
+          child: Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.72),
+                  borderRadius: BorderRadius.circular(2)),
+            ),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+// Category icon in a tinted rounded chip — the shared object-card/pin glyph, coloured from
+// the category accent (ui.Cat via _categoryStyle).
+class _CatIconChip extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  const _CatIconChip({required this.icon, required this.color});
+  @override
+  Widget build(BuildContext context) => Container(
+        width: 44,
+        height: 44,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.14),
+          borderRadius: BorderRadius.circular(ui.Radii.sm),
+          border: Border.all(color: color.withValues(alpha: 0.30)),
+        ),
+        child: Icon(icon, color: color, size: 22),
+      );
+}
+
+// One structured fact line in the activated-object card — a small accent bullet + the fact.
+class _FactRow extends StatelessWidget {
+  final String text;
+  final Color color;
+  const _FactRow({required this.text, required this.color});
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 7, right: 10),
+          child: Container(
+              width: 6, height: 6, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+        ),
+        Expanded(
+          child: Text(text,
+              style: GoogleFonts.manrope(fontSize: 14.5, height: 1.45, color: c.textSecondary)),
+        ),
+      ]),
+    );
+  }
+}
+
+// Category accent colours now live in the design system (ui.Cat) — aliased here so the big
+// _categoryStyle switch stays terse. One source of truth for pins + cards.
+const _catCulture = ui.Cat.culture; // museums, monuments, worship, art
+const _catNature = ui.Cat.nature; // parks, forests, terrain
+const _catWater = ui.Cat.water; // water, rivers, fountains
+const _catCivic = ui.Cat.civic; // civic, transport, structures
+const _catEveryday = ui.Cat.everyday; // shops, cafes, plain buildings
 
 // Map a backend category (OSM-derived, see backend geo/categories.py) to a minimalist
 // Material icon + family colour, so the map reads without a tap. Unknown categories fall
@@ -615,6 +811,12 @@ const _catEveryday = Color(0xFFA7B0BE); // faint slate — shops, cafes, plain b
     case 'archaeological_site':
     case 'arch':
       return (icon: Icons.account_balance, color: _catCulture);
+    case 'manor':
+    case 'farm':
+    case 'farmhouse':
+      return (icon: Icons.holiday_village, color: _catCulture);
+    case 'heritage':
+      return (icon: Icons.verified, color: _catCulture);
     case 'attraction':
       return (icon: Icons.attractions, color: _catCulture);
     case 'theatre':
@@ -685,8 +887,18 @@ const _catEveryday = Color(0xFFA7B0BE); // faint slate — shops, cafes, plain b
     case 'university':
     case 'college':
       return (icon: Icons.school, color: _catCivic);
+    case 'school':
+      return (icon: Icons.menu_book, color: _catCivic);
+    case 'kindergarten':
+      return (icon: Icons.child_care, color: _catCivic);
     case 'library':
       return (icon: Icons.local_library, color: _catCivic);
+    case 'hospital':
+    case 'clinic':
+      return (icon: Icons.local_hospital, color: _catCivic);
+    case 'community_centre':
+    case 'club':
+      return (icon: Icons.groups_2, color: _catCivic);
     case 'marketplace':
       return (icon: Icons.storefront, color: _catCivic);
     case 'train_station':
@@ -1396,6 +1608,11 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final lon = (m['lon'] as num?)?.toDouble();
     if (id == null || lat == null || lon == null) return;
     final txt = (m['text'] as String?) ?? '';
+    // Structured facts + photo + category ride along on the narration frame (repeated per
+    // sentence). Capture the first non-empty value; the card reads these, not the spoken text.
+    final card = (m['card'] as String?)?.trim();
+    final image = (m['image'] as String?)?.trim();
+    final cat = (m['category'] as String?) ?? '';
     setState(() {
       _currentPlaceId = id;
       PlaceMark? existing;
@@ -1403,9 +1620,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         if (p.id == id) existing = p;
       }
       if (existing == null) {
-        _places.add(PlaceMark(id, LatLng(lat, lon), (m['place_name'] as String?) ?? '', txt));
-      } else if (txt.isNotEmpty && !existing.text.contains(txt)) {
-        existing.text = '${existing.text}\n\n$txt';
+        _places.add(PlaceMark(id, LatLng(lat, lon), (m['place_name'] as String?) ?? '', txt,
+            category: cat, card: card, image: image));
+      } else {
+        if (txt.isNotEmpty && !existing.text.contains(txt)) {
+          existing.text = '${existing.text}\n\n$txt';
+        }
+        if (card != null && card.isNotEmpty) existing.card = card;
+        if (image != null && image.isNotEmpty) existing.image = image;
+        if (cat.isNotEmpty) existing.category = cat;
       }
     });
   }
@@ -2178,54 +2401,73 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   static const _sheetShape = RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(28)));
 
-  // A soft tinted rounded-square holding an icon — the header glyph on info sheets.
-  Widget _iconChip(IconData icon, Color tint) => Container(
-        width: 40,
-        height: 40,
-        decoration: BoxDecoration(
-          color: tint.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        alignment: Alignment.center,
-        child: Icon(icon, color: tint, size: 22),
-      );
-
   // Tap a narrated pin -> a card with the place's name and its accumulated story.
   void _showPlaceInfo(PlaceMark p) {
-    final c = _c(context);
-    final tint = p.id == _currentPlaceId ? _pinCurrent : _pinPast;
+    final c = context.colors;
+    final style = _categoryStyle(p.category);
+    final ru = Localizations.localeOf(context).languageCode == 'ru';
+    final label = _categoryLabel(p.category, ru: ru);
+    // The card shows STRUCTURED facts (narrator CARD block), not the word-for-word excursion.
+    // Split into lines, strip any leading bullet. Fall back to the spoken text only if the
+    // narrator emitted no card (older walks / card disabled).
+    final factLines = (p.card ?? '')
+        .split('\n')
+        .map((s) => s.trim().replaceFirst(RegExp(r'^[-•*·—]\s*'), '').trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: c.sheetBg,
-      shape: _sheetShape,
-      builder: (ctx) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.45,
-        maxChildSize: 0.85,
-        builder: (ctx, controller) => ListView(
-          controller: controller,
-          padding: const EdgeInsets.fromLTRB(22, 12, 22, 28),
-          children: [
-            const _SheetGrabber(),
-            Row(children: [
-              _iconChip(Icons.place_rounded, tint),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(p.name.isEmpty ? '—' : p.name,
-                    style: TextStyle(
-                        fontSize: 21,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: -0.4,
-                        color: c.textPrimary)),
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => ui.RoundedSheet(
+        child: DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: p.image != null ? 0.6 : 0.44,
+          maxChildSize: 0.92,
+          minChildSize: 0.3,
+          builder: (ctx, controller) => ListView(
+            controller: controller,
+            padding: EdgeInsets.zero,
+            children: [
+              if (p.image != null) _CardHero(url: p.image!),
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                    ui.Gap.xl, p.image != null ? ui.Gap.lg : ui.Gap.md, ui.Gap.xl, ui.Gap.xxl),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (p.image == null) const Center(child: _SheetGrabber()),
+                    Row(children: [
+                      _CatIconChip(icon: style.icon, color: style.color),
+                      const SizedBox(width: ui.Gap.md),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(p.name.isEmpty ? label : p.name, style: ui.titleS(ctx)),
+                            if (label.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(label,
+                                  style: GoogleFonts.manrope(
+                                      fontSize: 13, fontWeight: FontWeight.w600, color: style.color)),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ]),
+                    const SizedBox(height: ui.Gap.lg),
+                    if (factLines.isNotEmpty)
+                      ...factLines.map((f) => _FactRow(text: f, color: style.color))
+                    else if (p.text.trim().isNotEmpty)
+                      Text(p.text.trim(),
+                          style: GoogleFonts.manrope(
+                              fontSize: 15, height: 1.55, color: c.textSecondary)),
+                  ],
+                ),
               ),
-            ]),
-            const SizedBox(height: 16),
-            Text(
-              p.text.isEmpty ? '…' : p.text,
-              style: TextStyle(fontSize: 15, height: 1.58, letterSpacing: 0.1, color: c.textSecondary),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -2235,47 +2477,46 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   // guide will tell its story once you walk up to it (no facts yet). Outline icon and
   // the faint accent distinguish it from a narrated place.
   void _showNearbyInfo(NearbyObject o) {
-    final c = _c(context);
+    final c = context.colors;
     final style = _categoryStyle(o.category);
+    final ru = Localizations.localeOf(context).languageCode == 'ru';
+    final label = _categoryLabel(o.category, ru: ru);
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: c.sheetBg,
-      shape: _sheetShape,
+      backgroundColor: Colors.transparent,
       builder: (ctx) {
         final l = AppLocalizations.of(ctx)!;
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(22, 12, 22, 28),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const _SheetGrabber(),
-              Row(children: [
-                _iconChip(style.icon, style.color),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(o.name.isEmpty ? o.category : o.name,
-                          style: TextStyle(
-                              fontSize: 19,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: -0.3,
-                              color: c.textPrimary)),
-                      if (o.category.isNotEmpty) ...[
+        return ui.RoundedSheet(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(ui.Gap.xl, ui.Gap.md, ui.Gap.xl,
+                ui.Gap.xxl + MediaQuery.of(ctx).padding.bottom),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Center(child: _SheetGrabber()),
+                Row(children: [
+                  _CatIconChip(icon: style.icon, color: style.color),
+                  const SizedBox(width: ui.Gap.md),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(o.name.isEmpty ? label : o.name, style: ui.titleS(ctx)),
                         const SizedBox(height: 2),
-                        Text(o.category, style: TextStyle(fontSize: 13.5, color: c.textSecondary)),
+                        Text(label,
+                            style: GoogleFonts.manrope(
+                                fontSize: 13, fontWeight: FontWeight.w600, color: style.color)),
                       ],
-                    ],
+                    ),
                   ),
-                ),
-              ]),
-              const SizedBox(height: 16),
-              Text(l.nearbyHint,
-                  style: TextStyle(fontSize: 14, height: 1.5, color: c.textFaint)),
-            ],
+                ]),
+                const SizedBox(height: ui.Gap.lg),
+                Text(l.nearbyHint,
+                    style: GoogleFonts.manrope(fontSize: 14, height: 1.5, color: c.textFaint)),
+              ],
+            ),
           ),
         );
       },

@@ -172,6 +172,10 @@ class Settings(BaseSettings):
     # so transitions are woven rather than improvised cold. Kept on the creative
     # (temperature) text path — not JSON — so prose quality is unaffected.
     narrator_emit_hook: bool = True
+    # Narrator appends a trailing `CARD:` block (2-3 framing-free facts) in the SAME call as the
+    # spoken narration — the re-readable structured facts for the object card, stripped before TTS
+    # (like the HOOK baton). Zero extra LLM cost. Off => cards fall back to the spoken text.
+    narrator_emit_card: bool = True
 
     # Wiring (which implementations the orchestrator factory builds)
     agent_backend: str = "heuristic"  # heuristic | openai | anthropic

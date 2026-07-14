@@ -114,6 +114,9 @@ class OrchestratorOutput:
     place_name: str | None = None
     lat: float | None = None
     lon: float | None = None
+    card: str | None = None  # structured, re-readable facts for the object card (not spoken)
+    image: str | None = None  # object photo URL (Wikipedia lead image) for the card, if any
+    category: str | None = None  # OSM-derived category (card icon + label on the client)
 
 
 def fingerprint(candidates: list[Candidate], cache=None, language: str = "ru") -> str:
@@ -695,7 +698,8 @@ class Orchestrator:
         )
         self._record_history(st, out.place, out.significance, out.text)
         return await self._finish(
-            st, state, "narration", out.text, out.place, out.significance
+            st, state, "narration", out.text, out.place, out.significance,
+            card=out.card, image=out.image,
         )
 
     # When nothing new is nearby, carry the story arc: advance the area outline by
@@ -1140,6 +1144,8 @@ class Orchestrator:
         text: str = "",
         place=None,
         significance=None,
+        card: str | None = None,
+        image: str | None = None,
     ) -> OrchestratorOutput:
         prev = str(st.state)
         if prev != state.value:
@@ -1175,4 +1181,7 @@ class Orchestrator:
             place.name if place else None,
             place.location.lat if place else None,
             place.location.lon if place else None,
+            card=card,
+            image=image,
+            category=place.category if place else None,
         )

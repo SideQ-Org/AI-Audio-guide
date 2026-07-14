@@ -44,6 +44,34 @@ _HOOK_RE_LABELLED = re.compile(
 )
 
 
+# Structured facts for the object CARD (re-readable, NOT spoken): the narrator appends a
+# trailing `CARD:` block with 2-3 dry facts (no "ты проходишь мимо" framing). Emitted in the
+# SAME call as the narration (zero extra LLM cost), stripped before TTS like the HOOK baton.
+_CARD_INSTR = (
+    "\n\nПОСЛЕ строки HOOK (или в самом конце, если HOOK нет) добавь блок для КАРТОЧКИ: "
+    "отдельной строкой `CARD:` (слово CARD и двоеточие — ЛАТИНИЦЕЙ ровно так, не переводи), "
+    "а под ней 2–3 КОРОТКИХ факта об этом объекте на языке ответа — сухо, по делу, для "
+    "чтения потом. КАЖДЫЙ факт с новой строки. БЕЗ обращений и рамок экскурсии: слова "
+    "«ты», «вы», «проходишь мимо», «слева/справа», «сейчас», «перед тобой» — ЗАПРЕЩЕНЫ. "
+    "Только проверенные факты (как в озвучке; из FACTS). Нет фактов — блок CARD НЕ добавляй."
+)
+# Strip the CARD block off the end (before the HOOK strip, since HOOK's matcher is greedy to
+# end-of-text and would otherwise swallow the card). `CARD:` to end, across newlines.
+_CARD_RE = re.compile(r"(?is)\n?\s*\bCARD\s*[:：]\s*(.*)$")
+
+
+def split_card(text: str) -> tuple[str, str | None]:
+    """Return (text_without_card, card_facts). The card is the trailing `CARD:` block —
+    2-3 framing-free fact lines for the re-readable object card. None when absent."""
+    if not text:
+        return text, None
+    m = _CARD_RE.search(text)
+    if m is None:
+        return text, None
+    card = (m.group(1) or "").strip() or None
+    return text[: m.start()], card
+
+
 def _strip_hook(text: str) -> tuple[str, str | None]:
     """Return (text_without_baton, hook). Tries the ASCII form first, then a localized
     label on its own trailing line."""
@@ -225,6 +253,8 @@ class LLMNarrator:
         system = system_for(role, inp.language)
         if settings.narrator_emit_hook:
             system += _HOOK_INSTR
+        if settings.narrator_emit_card:
+            system += _CARD_INSTR
         user = build_narrator_user(inp)
         text = await self._llm.complete_text(role, system, user)
         return normalize(text)

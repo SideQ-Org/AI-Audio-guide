@@ -59,6 +59,17 @@ abstract final class AppIcons {
   static const usersThree = Icons.groups_rounded;
 }
 
+// Accent colours for map-object categories — part of the design system so map pins, object
+// cards and the activated card all tint from ONE source. Muted, earthy tones that sit on the
+// glass/mesh background in both themes (a hair desaturated vs. pure hues to stay on-palette).
+abstract final class Cat {
+  static const culture = Color(0xFFD59448); // warm ochre — museums, monuments, worship, art
+  static const nature = Color(0xFF3C9E77); // sage green — parks, forests, terrain
+  static const water = Color(0xFF4E8FD1); // muted blue — water, rivers, fountains
+  static const civic = Color(0xFF7E93A8); // slate — civic, transport, structures
+  static const everyday = Color(0xFF9AA6A0); // faint sage-slate — shops, cafes, plain buildings
+}
+
 // ── colours (ThemeExtension) ───────────────────────────────────────────────
 @immutable
 class AppColors extends ThemeExtension<AppColors> {
