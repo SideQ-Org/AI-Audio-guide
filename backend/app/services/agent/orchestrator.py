@@ -619,6 +619,7 @@ class Orchestrator:
             st.area_bridge_said = False
             st.area_level = 0  # new area -> restart the city->district->street cascade
             st.area_level_beats = 0
+            st.area_cityless_beats = 0  # new city => a fresh grounded-line budget
             # fresh area => fresh story arc, but keep the user's chosen theme (if any)
             st.narrative_plan = NarrativePlan(theme_override=st.narrative_plan.theme_override)
             st.last_street = addr.street  # adopt silently; the area opener covers arrival
@@ -703,6 +704,7 @@ class Orchestrator:
         st.last_significance = out.significance
         st.elaboration_count = 0  # fresh place — allow follow-ups again
         st.area_beats = 0  # fresh budget of connective area beats for the next lull
+        st.area_cityless_beats = 0  # real object flowed -> re-arm the grounded city filler
         st.area_bridge_said = False  # let a future lull say "пройдём дальше" again
         plan.told = (plan.told + [out.place.name])[-_TOLD_CAP:]  # arc ledger (anti-repeat)
         plan.next_hook = out.next_hook  # baton: weave this into the next paragraph
@@ -877,11 +879,19 @@ class Orchestrator:
             if not city:
                 log.info("skip cascade: no verified facts and no city to fall back on")
                 return ""
+            # Hard cap: once the real well-known city facts are spent, the model FABRICATES
+            # fresh specifics every tick, and because each invention differs textually,
+            # is_repeat can't stop the loop (8 invented monologues down 1-я Советская). After
+            # a couple of grounded lines, go quiet; a real object / new area re-arms it.
+            if st.area_cityless_beats >= settings.area_cityless_max:
+                log.info("cityless cap reached (%d) -> quiet", st.area_cityless_beats)
+                return ""
             city_l, _, _ = lang.level_labels(st.language)
             topic = lang.area_topic_grounded(st.language, city_l, city)
-            # repeat-suppression in _emit_area_beat self-limits this: once the well-known
-            # city facts are spent it returns "" and the caller bridges + goes quiet.
-            return await self._emit_area_beat(st, topic, focus=None, pace=pace)
+            text = await self._emit_area_beat(st, topic, focus=None, pace=pace)
+            if text:
+                st.area_cityless_beats += 1
+            return text
         levels = self._area_levels(st)
         attempts = 0
         while st.area_level < len(levels) and attempts < _LEVEL_ATTEMPTS_PER_TICK:

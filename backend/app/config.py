@@ -138,6 +138,14 @@ class Settings(BaseSettings):
     # ungrounded cascade is skipped in fact-less areas; the planned arc + reach + real objects
     # carry the tour instead. Grounded areas cascade as before.
     area_cascade_requires_facts: bool = True
+    # Hard cap on the FACT-LESS city fallback (area_cascade_requires_facts=True + no verified
+    # facts + a known city). That path leans on "widely-known city knowledge", but once the real
+    # facts are spent the model FABRICATES fresh specifics every tick ("первая почтовая станция",
+    # "испытывали полигон") — and because each invention is textually different, is_repeat can't
+    # stop the loop (a walk down 1-я Советская got 8 invented monologues in a row). After this
+    # many grounded city lines in one dry stretch the fallback goes quiet; a real object or a new
+    # area re-arms it. Keep small: a fact-less town deserves a line or two, not a lecture.
+    area_cityless_max: int = 2
     # Pre-generate the NEXT outline area beat in the background WHILE the current one is
     # being spoken, so its LLM latency (10-17 s cold on a field walk) is hidden behind
     # delivery instead of opening a silent gap between beats ("медленно переключался

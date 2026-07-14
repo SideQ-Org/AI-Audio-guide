@@ -267,6 +267,35 @@ def clean_continuation(history: list[str], code: str | None, *, n: int = 2) -> l
     return substantive[-n:]
 
 
+# How many opening words identify a "way of starting" a line. The narrator's most grating
+# repetition is reopening object after object the same way ("и вот тут…", "ты проходишь…") —
+# so we hand the model the openings it JUST used as an explicit AVOID list. Feeding it the
+# real data works far better than a general "vary your openers" instruction.
+_OPENER_WORDS = 5
+_OPENER_STRIP = " .,;:!?—–-…\"'«»()"
+
+
+def recent_openers(history: list[str], code: str | None, *, k: int = 6,
+                   words: int = _OPENER_WORDS) -> list[str]:
+    """The opening `words`-word fragments of the last `k` substantive narration lines — the
+    AVOID_OPENERS ban list, so the guide doesn't begin object after object the same way.
+    Reuses clean_continuation's bridge/short-line filter; deduped (case-insensitive),
+    oldest→newest."""
+    bset = set(bridges(code))
+    out: list[str] = []
+    seen: set[str] = set()
+    for h in history:
+        s = h.strip()
+        if s in bset or len(s) < _CONTINUE_MIN_CHARS:
+            continue
+        frag = " ".join(s.split()[:words]).strip(_OPENER_STRIP)
+        key = frag.lower()
+        if frag and key not in seen:
+            seen.add(key)
+            out.append(frag)
+    return out[-k:]
+
+
 # A warm, instant opener spoken the moment a walk starts — no LLM, so the tour begins
 # immediately while discovery/geocode/the area intro load in the background (the area
 # intro, which names the place properly, follows on the next tick).
@@ -298,51 +327,77 @@ _GREETING_TAILS: dict[str, list[tuple[str, str]]] = {
         ("Начинаем прогулку — {place}. Осмотрюсь и расскажу, чем тут интересно.",
          "Рада пройтись с тобой. Осмотрюсь и расскажу, чем интересны эти места."),
         ("Мы с тобой — {place}. Дай гляну по сторонам и введу в курс.",
-         "Пройдёмся не спеша. Дай гляну по сторонам и введу в курс."),
+         "Дай гляну по сторонам и введу в курс — а там и пойдём."),
         ("Прогуляемся — {place}. Сейчас осмотрюсь и покажу, что вокруг любопытного.",
-         "Прогуляемся не торопясь. Сейчас осмотрюсь и покажу, что вокруг любопытного."),
+         "Сейчас осмотрюсь и покажу, что вокруг любопытного."),
+        ("Отправная точка — {place}. Огляжусь по сторонам и начну рассказывать.",
+         "Огляжусь по сторонам и начну рассказывать."),
+        ("Ну что, {place} — хорошее начало. Сориентируюсь и поведу тебя дальше.",
+         "Ну что, пойдём — сориентируюсь и поведу тебя дальше."),
+        ("Ты как раз у {place}. Дай соберусь с мыслями — и в путь.",
+         "Дай соберусь с мыслями — и в путь."),
+        ("Стартуем — {place}. Пробегусь взглядом по округе и расскажу самое любопытное.",
+         "Пробегусь взглядом по округе и расскажу самое любопытное."),
+        ("Вот и {place}. Пригляжусь, что здесь к чему, и поделюсь.",
+         "Пригляжусь, что здесь к чему, и поделюсь."),
     ],
     "en": [
         ("We're near {place}. Let me look around and preview the walk for you.",
          "Glad to walk with you. Let me look around and preview the walk."),
         ("Our start is {place}. Give me a moment to look around and set the scene.",
-         "Let's take it slow. Give me a moment to look around and set the scene."),
+         "Give me a moment to look around and set the scene."),
+        ("Here we are — {place}. Let me get my bearings and tell you what's around.",
+         "Let me get my bearings and tell you what's around."),
+        ("Starting point — {place}. I'll scan the surroundings and share the good bits.",
+         "I'll scan the surroundings and share the good bits."),
     ],
     "es": [
         ("Estamos cerca de {place}. Echo un vistazo y te adelanto lo que veremos.",
          "Me alegra pasear contigo. Echo un vistazo y te adelanto lo que veremos."),
         ("Empezamos por {place}. Un momento, miro alrededor y te pongo en situación.",
-         "Vamos con calma. Un momento, miro alrededor y te pongo en situación."),
+         "Un momento, miro alrededor y te pongo en situación."),
+        ("Aquí estamos — {place}. Me oriento y te cuento lo que hay alrededor.",
+         "Me oriento un momento y te cuento lo que hay alrededor."),
     ],
     "fr": [
         ("Nous sommes près de {place}. Je regarde autour et je t'en fais un aperçu.",
          "Ravie de marcher avec toi. Je regarde autour et je t'en fais un aperçu."),
         ("On démarre à {place}. Un instant, je regarde autour et je te situe.",
-         "Allons-y tranquillement. Un instant, je regarde autour et je te situe."),
+         "Un instant, je regarde autour et je te situe."),
+        ("Nous voilà — {place}. Je m'oriente et je te dis ce qu'il y a autour.",
+         "Je m'oriente un instant et je te dis ce qu'il y a autour."),
     ],
     "de": [
         ("Wir sind nahe {place}. Ich schaue mich um und gebe dir kurz einen Überblick.",
          "Schön, mit dir zu gehen. Ich schaue mich um und gebe dir einen Überblick."),
         ("Wir starten bei {place}. Moment, ich sehe mich um und ordne alles ein.",
-         "Lass es uns ruhig angehen. Moment, ich sehe mich um und ordne alles ein."),
+         "Moment, ich sehe mich um und ordne alles ein."),
+        ("Da sind wir — {place}. Ich orientiere mich und erzähle dir, was hier ist.",
+         "Ich orientiere mich kurz und erzähle dir, was hier ist."),
     ],
     "it": [
         ("Siamo vicino a {place}. Do un'occhiata e ti anticipo cosa vedremo.",
          "Che bello passeggiare con te. Do un'occhiata e ti anticipo cosa vedremo."),
         ("Partiamo da {place}. Un attimo, mi guardo intorno e ti oriento.",
-         "Andiamo con calma. Un attimo, mi guardo intorno e ti oriento."),
+         "Un attimo, mi guardo intorno e ti oriento."),
+        ("Eccoci — {place}. Mi oriento e ti racconto cosa c'è intorno.",
+         "Mi oriento un attimo e ti racconto cosa c'è intorno."),
     ],
     "pt": [
         ("Estamos perto de {place}. Vou olhar em volta e já te dou uma prévia.",
          "Que bom caminhar com você. Vou olhar em volta e já te dou uma prévia."),
         ("Começamos por {place}. Um instante, olho em volta e te situo.",
-         "Vamos com calma. Um instante, olho em volta e te situo."),
+         "Um instante, olho em volta e te situo."),
+        ("Aqui estamos — {place}. Vou me orientar e te contar o que há em volta.",
+         "Vou me orientar um instante e te contar o que há em volta."),
     ],
     "zh": [
         ("我们就在{place}附近。我看看四周，先给您简单介绍这次散步。",
          "很高兴与您同行。我看看四周，先给您简单介绍这次散步。"),
         ("这次从{place}出发。稍等，我看看周围，给您理理头绪。",
-         "我们慢慢走。稍等，我看看周围，给您理理头绪。"),
+         "稍等，我看看周围，给您理理头绪。"),
+        ("我们到了——{place}。我先认认方向，再跟您说说周围有什么。",
+         "我先认认方向，再跟您说说周围有什么。"),
     ],
 }
 
@@ -580,16 +635,24 @@ _AREA_TOPIC: dict[str, str] = {
 # knows a *named city* — so this leans on widely-known knowledge and demands [SILENCE]
 # rather than invention. Only ever used at the city level (see Orchestrator._area_line).
 _AREA_TOPIC_GROUNDED_EN = (
-    "one widely-known, verifiable fact about the {label} {name} — real history or "
-    "geography a well-read local would confirm, spoken plainly. Do NOT invent specifics, "
-    "dates or names, and no repeats. If you don't know a solid fact, reply exactly [SILENCE]"
+    "one widely-known, verifiable fact about the {label} {name} AS A WHOLE — its geography, "
+    "its overall history or what it's generally known for, at CITY scale only, spoken plainly. "
+    "This must be something famous enough to appear in an encyclopedia about {name}, NOT about "
+    "one street or building. FORBIDDEN: specific years/dates, 'the first X', named people, "
+    "streets, shops, institutions, or any claim you're not certain applies to THIS town — "
+    "inventing those is a hard error. Don't have such a city-scale fact you're SURE of (a small "
+    "or obscure town)? Reply exactly [SILENCE] — silence beats a plausible-sounding invention."
 )
 _AREA_TOPIC_GROUNDED: dict[str, str] = {
     "ru": (
-        "один широко известный, достоверный факт про {label} {name} — реальная история "
-        "или география, которую подтвердил бы начитанный местный, простыми словами. "
-        "НЕ выдумывай конкретику, даты и имена, без повторов. Если твёрдого факта нет — "
-        "ответь ровно [SILENCE]"
+        "один широко известный, достоверный факт про {label} {name} В ЦЕЛОМ — география, общая "
+        "история или то, чем этот город известен, ТОЛЬКО на уровне города, простыми словами. "
+        "Это должно быть настолько общеизвестно, что попало бы в энциклопедию про {name}, а НЕ "
+        "про отдельную улицу или дом. ЗАПРЕЩЕНО: конкретные годы и даты, «первый/первая…», имена "
+        "людей, улицы, магазины, учреждения и любые утверждения, в которых не уверен, что они "
+        "относятся ИМЕННО к этому городу — выдумать такое грубая ошибка. Нет такого достоверного "
+        "факта уровня города (маленький или малоизвестный город)? Ответь ровно [SILENCE] — "
+        "молчание лучше правдоподобной выдумки."
     ),
 }
 

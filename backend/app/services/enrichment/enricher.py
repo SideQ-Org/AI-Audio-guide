@@ -217,8 +217,43 @@ class WikiEnricher:
         self._images: dict[str, str] = {}
 
     def image_for(self, place_id: str) -> str | None:
-        """The object's photo URL (Wikipedia lead image) if one was found during enrichment."""
+        """The object's photo URL if one was found during enrichment — a Wikipedia lead image,
+        a Wikidata P18 photo, or a Commons/URL image tag straight off the OSM object."""
         return self._images.get(place_id)
+
+    @staticmethod
+    def _commons_thumb(filename: str, width: int = 640) -> str | None:
+        """A sized Commons thumbnail URL for a `File:` name, via Special:FilePath (which
+        redirects to the scaled image). None for an empty name."""
+        filename = filename.strip()
+        if not filename:
+            return None
+        q = urllib.parse.quote(filename.replace(" ", "_"), safe="")
+        return f"https://commons.wikimedia.org/wiki/Special:FilePath/{q}?width={width}"
+
+    @classmethod
+    def _p18_image(cls, entity: dict) -> str | None:
+        """Wikidata P18 (image) claim -> a Commons thumbnail URL, or None when unset. Covers
+        the many wikidata-tagged objects that have a photo but NO Wikipedia article."""
+        try:
+            fname = entity["claims"]["P18"][0]["mainsnak"]["datavalue"]["value"]
+        except (KeyError, IndexError, TypeError):
+            return None
+        return cls._commons_thumb(fname)
+
+    @classmethod
+    def _osm_tag_image(cls, tags: dict[str, str]) -> str | None:
+        """A photo straight from the OSM object's own tags (free, no network): a
+        `wikimedia_commons=File:…` -> Commons thumbnail, or a direct `image=https://…` URL.
+        Only https for a bare URL (a mobile card can load it and the web build stays mixed-
+        content-clean)."""
+        commons = (tags.get("wikimedia_commons") or "").strip()
+        if commons.startswith("File:"):
+            return cls._commons_thumb(commons[len("File:"):])
+        img = (tags.get("image") or "").strip()
+        if img.startswith("https://"):
+            return img
+        return None
 
     def _langs(self, language: str) -> tuple[str, ...]:
         """Preferred Wikipedia languages for this session: the session language, then
@@ -233,6 +268,12 @@ class WikiEnricher:
     async def facts_for(
         self, place: Place, context: str | None = None, language: str = _DEFAULT_LANG
     ) -> str | None:
+        # #2 OSM image tags (free, no network, exact): capture BEFORE the wiki gate, so even a
+        # non-wiki object carrying image=/wikimedia_commons= gets a card photo. A Wikipedia/P18
+        # lead image (below) overrides it when found (canonical); otherwise this one stands.
+        osm_img = self._osm_tag_image(place.tags)
+        if osm_img and place.id not in self._images:
+            self._images[place.id] = osm_img
         wp = place.tags.get("wikipedia")
         wd = place.tags.get("wikidata")
         if not wp and not wd:
@@ -266,7 +307,8 @@ class WikiEnricher:
                     lang, _, title = wp.partition(":")
                     if not title:  # tag was just a title, no "lang:" prefix
                         lang, title = prefer[0], wp
-                    facts, image = await self._summary(client, lang, title)
+                    facts, wp_image = await self._summary(client, lang, title)
+                    image = image or wp_image  # keep the P18 photo if the article had no lead image
         except Exception as e:  # transient network/parse — don't cache, retry later
             _log.warning("wiki enrich failed for %s: %s", place.id, e)
             return None
@@ -297,12 +339,17 @@ class WikiEnricher:
         r = await client.get(f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json")
         if r.status_code != 200:
             return None, None
-        links = r.json().get("entities", {}).get(qid, {}).get("sitelinks", {})
+        entity = r.json().get("entities", {}).get(qid, {})
+        # #1 Wikidata P18: the entity's own image, from the JSON we already fetched for sitelinks
+        # (no extra request) — covers wikidata-tagged objects with a photo but no Wiki article.
+        p18 = self._p18_image(entity)
+        links = entity.get("sitelinks", {})
         for lang in prefer:
             sl = links.get(f"{lang}wiki")
             if sl:
-                return await self._summary(client, lang, sl["title"])
-        return None, None
+                facts, image = await self._summary(client, lang, sl["title"])
+                return facts, (image or p18)  # article lead image preferred, else the P18 photo
+        return None, p18  # no article in a preferred language -> still surface the P18 photo
 
 
 class CompositeEnricher:

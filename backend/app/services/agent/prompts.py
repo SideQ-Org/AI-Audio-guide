@@ -12,7 +12,11 @@ from functools import cache
 from pathlib import Path
 
 from app.config import settings
-from app.services.agent.languages import clean_continuation, prompt_language
+from app.services.agent.languages import (
+    clean_continuation,
+    prompt_language,
+    recent_openers,
+)
 from app.services.llm.router import Role
 from app.shared.schemas import (
     AreaInput,
@@ -175,6 +179,8 @@ def build_narrator_user(inp: NarratorInput) -> str:
             # POSITIVE continuity signal, distinct from HISTORY (the do-not-repeat ledger).
             # Terse bridges/floor lines are filtered so we don't seed on "Пройдём дальше."
             "CONTINUE_FROM": clean_continuation(inp.history, inp.language),
+            # The openings you JUST used — do NOT start this line any of these ways (A1 variety).
+            "AVOID_OPENERS": recent_openers(inp.history, inp.language),
             "HISTORY": inp.history,
             "FLAGS": {
                 "switching": inp.flags.switching,
@@ -203,6 +209,8 @@ def build_area_user(inp: AreaInput) -> str:
             "BEAT_MODE": inp.beat_mode,  # rotating rhetorical angle for variety (A1)
             # continue this voice (A1), filtering terse bridges/floor lines
             "CONTINUE_FROM": clean_continuation(inp.history, inp.language),
+            # The openings you JUST used — do NOT start this paragraph any of these ways (A1).
+            "AVOID_OPENERS": recent_openers(inp.history, inp.language),
             "HISTORY": inp.history,
             "PACE": inp.pace.value,
         }

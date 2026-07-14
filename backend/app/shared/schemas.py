@@ -342,6 +342,10 @@ class SessionState(BaseModel):
     # atypical facts at one level, descend when it runs dry, go quiet after street.
     area_level: int = 0  # 0=city, 1=district, 2=street (index into the levels present)
     area_level_beats: int = 0  # facts told at the current level (per-level soft budget)
+    # Fact-less city fallback counter (see Orchestrator._area_line + area_cityless_max): caps
+    # how many ungrounded city lines a dry stretch may emit before going quiet, since the
+    # model fabricates fresh (non-repeating) specifics forever otherwise. Reset by object/area.
+    area_cityless_beats: int = 0
     # the story arc — formed when an area is entered, augmented along the route
     narrative_plan: NarrativePlan = Field(default_factory=NarrativePlan)
     # working memory of the whole walk (narrative memory graph, phase 1): what was said,

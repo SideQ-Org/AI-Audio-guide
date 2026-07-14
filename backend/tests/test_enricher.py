@@ -179,3 +179,47 @@ def test_wiki_enricher_no_tag_returns_none():
     from app.services.enrichment.enricher import WikiEnricher
     # no wikipedia/wikidata tag -> None without any network call
     assert asyncio.run(WikiEnricher().facts_for(_place("nt"))) is None
+
+
+def _tagged(pid, tags):
+    return Place(id=pid, name="X", category="historic",
+                location=GeoPoint(lat=55.75, lon=37.62), tags=tags)
+
+
+def test_p18_image_from_wikidata_entity():
+    """#1 Wikidata P18 -> a Commons thumbnail URL, extracted from the entity JSON we already
+    fetch for sitelinks (no extra request) — the win for wikidata objects with no article."""
+    from app.services.enrichment.enricher import WikiEnricher
+    entity = {"claims": {"P18": [{"mainsnak": {"datavalue": {"value": "Red Square 01.jpg"}}}]}}
+    url = WikiEnricher._p18_image(entity)
+    assert url == (
+        "https://commons.wikimedia.org/wiki/Special:FilePath/Red_Square_01.jpg?width=640"
+    )
+    # No P18 claim -> None (falls through to no image, never crashes).
+    assert WikiEnricher._p18_image({"claims": {}}) is None
+    assert WikiEnricher._p18_image({}) is None
+
+
+def test_osm_tag_image_commons_and_url():
+    """#2 photo straight off the OSM tags: wikimedia_commons=File:… and a direct https image=."""
+    from app.services.enrichment.enricher import WikiEnricher
+    assert WikiEnricher._osm_tag_image({"wikimedia_commons": "File:Foo bar.jpg"}) == (
+        "https://commons.wikimedia.org/wiki/Special:FilePath/Foo_bar.jpg?width=640"
+    )
+    assert WikiEnricher._osm_tag_image({"image": "https://pics.example/x.jpg"}) == (
+        "https://pics.example/x.jpg"
+    )
+    # http (mixed-content) and Category: are rejected; no tag -> None.
+    assert WikiEnricher._osm_tag_image({"image": "http://insecure/x.jpg"}) is None
+    assert WikiEnricher._osm_tag_image({"wikimedia_commons": "Category:Churches"}) is None
+    assert WikiEnricher._osm_tag_image({}) is None
+
+
+def test_facts_for_captures_osm_image_without_wiki_or_network():
+    """A non-wiki object with an image= tag gets a card photo even though it has no facts —
+    captured before the wiki gate, so no network call happens (returns None facts, image set)."""
+    from app.services.enrichment.enricher import WikiEnricher
+    enr = WikiEnricher()
+    place = _tagged("osm1", {"image": "https://pics.example/cafe.jpg"})
+    assert asyncio.run(enr.facts_for(place)) is None  # no wiki tags -> no facts, no network
+    assert enr.image_for("osm1") == "https://pics.example/cafe.jpg"  # ...but the photo is there

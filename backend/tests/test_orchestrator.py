@@ -473,6 +473,40 @@ def test_cascade_city_allowed_without_facts_but_never_street():
     asyncio.run(run())
 
 
+def test_cityless_fallback_capped_then_rearmed_by_object():
+    """The fact-less city fallback fabricates fresh (non-repeating) specifics every tick, so
+    is_repeat can't stop it (8 invented monologues down 1-я Советская). It is hard-capped at
+    area_cityless_max grounded lines per dry stretch, then goes quiet; a real object re-arms it."""
+    orch = _orch([])
+
+    n = 0
+
+    async def fake_narrate_area(address, **kw):
+        nonlocal n
+        n += 1
+        # DISTINCT text each call, so is_repeat can't stop it — only the cap can.
+        return f"выдуманный факт номер {n} про город", None
+
+    orch.pipeline.narrate_area = fake_narrate_area
+
+    async def run():
+        st = await orch.store.load("cityless")
+        st.address = Address(city="Долгопрудный", street="1-я Советская")
+        st.area_facts = ""  # enrichment empty -> the fabrication-prone fallback
+        st.narrative_plan.outline = []  # only the cascade is left
+        cap = settings.area_cityless_max
+        produced = [await orch._area_line(st, Pace.SLOW) for _ in range(cap + 4)]
+        nonempty = [t for t in produced if t]
+        assert len(nonempty) == cap  # capped despite every beat being textually distinct
+        assert produced[cap] == ""  # went quiet instead of inventing another street "fact"
+
+        # A real object narrated -> the filler re-arms (matches _commit_step's reset).
+        st.area_cityless_beats = 0
+        assert await orch._area_line(st, Pace.SLOW)  # talks again after real content
+
+    asyncio.run(run())
+
+
 def test_prefetch_area_is_read_only():
     """The background beat pre-generation warms the NEXT outline beat WITHOUT touching
     session state (no store.save, no told/history/counter mutation) — that read-only
