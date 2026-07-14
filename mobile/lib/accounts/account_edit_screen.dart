@@ -143,9 +143,8 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
                     child: TextField(
                       controller: _nick,
                       textCapitalization: TextCapitalization.words,
-                      decoration: const InputDecoration(
-                        border: InputBorder.none,
-                        contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 16),
+                      decoration: bareInput(
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 16),
                         hintText: 'Ваш ник',
                       ),
                     ),
@@ -191,8 +190,7 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
                       TextField(
                         controller: _pw1,
                         obscureText: _pwHidden,
-                        decoration: InputDecoration(
-                          border: InputBorder.none,
+                        decoration: bareInput(
                           contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 14),
                           hintText: 'Новый пароль',
                           suffixIcon: IconButton(
@@ -205,9 +203,8 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
                       TextField(
                         controller: _pw2,
                         obscureText: _pwHidden,
-                        decoration: const InputDecoration(
-                          border: InputBorder.none,
-                          contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 14),
+                        decoration: bareInput(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 14),
                           hintText: 'Повторите пароль',
                         ),
                       ),

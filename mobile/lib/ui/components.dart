@@ -63,16 +63,91 @@ Future<bool> showBrandConfirm(
   return r ?? false;
 }
 
-/// Bottom-sheet body with rounded top corners over the brand gradient — the on-brand
-/// container for modal sheets (achievement/stat detail, etc.).
+/// A fully chrome-free [InputDecoration] for a `TextField` that sits INSIDE a styled well
+/// (a `GlassModule` / pill / bordered `Container`). The app theme's `inputDecorationTheme`
+/// paints a fill + a hairline enabled outline + a green FOCUSED outline; a field that only
+/// sets `border: InputBorder.none` still inherits `enabledBorder`/`focusedBorder`, so the
+/// theme draws a *second* rounded box inside the well — the "поле в поле" bug. This nulls
+/// EVERY border slot and turns `filled` off, so the well owns the shape/fill and the field
+/// carries only text. Use it for every in-well field (mirrors what `AuthGlassField` does).
+InputDecoration bareInput({
+  String? hintText,
+  TextStyle? hintStyle,
+  Widget? icon,
+  Widget? suffixIcon,
+  EdgeInsetsGeometry? contentPadding,
+  bool isCollapsed = false,
+  bool isDense = false,
+}) =>
+    InputDecoration(
+      filled: false,
+      isCollapsed: isCollapsed,
+      isDense: isDense,
+      hintText: hintText,
+      hintStyle: hintStyle,
+      icon: icon,
+      suffixIcon: suffixIcon,
+      contentPadding: contentPadding,
+      border: InputBorder.none,
+      enabledBorder: InputBorder.none,
+      focusedBorder: InputBorder.none,
+      disabledBorder: InputBorder.none,
+      errorBorder: InputBorder.none,
+      focusedErrorBorder: InputBorder.none,
+    );
+
+/// Content-SIZED bottom-sheet body — the single on-brand container for every modal sheet
+/// (object cards, stat/achievement detail, community forms, summaries…). Same warm cream
+/// gradient as the object cards, a flat fill (NO mesh blobs / blur, so it can't lag), rounded
+/// top, and — crucially — it sizes to its CONTENT with a height ceiling, instead of stretching
+/// to fill the sheet the way the old GradientBackground did (that left big empty areas below
+/// short content). A long sheet caps at [maxHeightFactor] of the screen and scrolls.
+///
+/// [scrollable] (default): wrap the child in a SingleChildScrollView — for the common case of a
+/// short `Column(mainAxisSize.min)`. Set it FALSE for a child that owns its own scrolling /
+/// `Flexible`/`ListView` (a list or paginated sheet): the container's maxHeight then bounds that
+/// child so its Flexible can flex, and the sheet still sizes to content up to the ceiling.
+class CardSheet extends StatelessWidget {
+  final Widget child;
+  final bool scrollable;
+  final double maxHeightFactor;
+  const CardSheet({
+    super.key,
+    required this.child,
+    this.scrollable = true,
+    this.maxHeightFactor = 0.85,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * maxHeightFactor,
+      ),
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [c.bgTop, c.bgBottom],
+        ),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(Radii.xl)),
+      ),
+      child: scrollable ? SingleChildScrollView(child: child) : child,
+    );
+  }
+}
+
+/// Deprecated: kept as a thin alias so any un-migrated call site still renders content-sized.
+/// Prefer [CardSheet]. Defaults to `scrollable: false` — its historical children own their
+/// own layout (some carry a `Flexible`/`ListView`), so it must not impose a scroll wrapper.
+@Deprecated('Use CardSheet — content-sized sheet with the object-card look')
 class RoundedSheet extends StatelessWidget {
   final Widget child;
   const RoundedSheet({super.key, required this.child});
   @override
-  Widget build(BuildContext context) => ClipRRect(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(Radii.xl)),
-        child: GradientBackground(child: child),
-      );
+  Widget build(BuildContext context) => CardSheet(scrollable: false, child: child);
 }
 
 /// Wraps a tappable widget with a subtle scale-down press animation so it clearly

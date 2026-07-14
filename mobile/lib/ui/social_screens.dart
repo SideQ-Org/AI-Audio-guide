@@ -125,7 +125,7 @@ class _AchGrid extends StatelessWidget {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => RoundedSheet(
+      builder: (ctx) => CardSheet(
         child: Padding(
           padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 24),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -180,8 +180,8 @@ class _FriendsScreenState extends State<FriendsScreen> {
                     padding: const EdgeInsets.symmetric(horizontal: 12),
                     child: TextField(
                       onChanged: (v) => setState(() => _q = v),
-                      decoration: InputDecoration(
-                        border: InputBorder.none,
+                      cursorColor: c.primary,
+                      decoration: bareInput(
                         contentPadding: const EdgeInsets.symmetric(vertical: 14),
                         icon: Icon(Icons.search_rounded, color: c.textFaint),
                         hintText: 'Поиск друзей',

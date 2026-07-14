@@ -794,9 +794,8 @@ class _HandleSetupCardState extends State<_HandleSetupCard> {
                     autocorrect: false,
                     cursorColor: c.primary,
                     style: body(context).copyWith(fontWeight: FontWeight.w600),
-                    decoration: InputDecoration(
+                    decoration: bareInput(
                       isCollapsed: true,
-                      border: InputBorder.none,
                       hintText: l.communityHandleField,
                       hintStyle: body(context).copyWith(color: c.textFaint, fontWeight: FontWeight.w600),
                     ),
@@ -867,7 +866,7 @@ class _AddFriendSheetState extends State<_AddFriendSheet> {
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
     final c = context.colors;
-    return RoundedSheet(
+    return CardSheet(
       child: Padding(
         padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).viewInsets.bottom + 24),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -883,7 +882,7 @@ class _AddFriendSheetState extends State<_AddFriendSheet> {
                 controller: _ctrl, autofocus: true, autocorrect: false, cursorColor: c.primary,
                 onChanged: _onChanged,
                 style: body(context).copyWith(fontWeight: FontWeight.w600),
-                decoration: InputDecoration(isCollapsed: true, border: InputBorder.none,
+                decoration: bareInput(isCollapsed: true,
                     hintText: l.communitySearchHandle,
                     hintStyle: body(context).copyWith(color: c.textFaint, fontWeight: FontWeight.w600)),
               )),
@@ -971,7 +970,7 @@ class _CreateChallengeSheetState extends State<_CreateChallengeSheet> {
                 fontWeight: FontWeight.w800, color: sel ? c.onPrimary : c.textPrimary)),
           ),
         );
-    return RoundedSheet(
+    return CardSheet(
       child: Padding(
         padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).viewInsets.bottom + 24),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -983,7 +982,7 @@ class _CreateChallengeSheetState extends State<_CreateChallengeSheet> {
             child: Center(child: TextField(
               controller: _title, autocorrect: false, cursorColor: c.primary,
               style: body(context).copyWith(fontWeight: FontWeight.w600),
-              decoration: InputDecoration(isCollapsed: true, border: InputBorder.none,
+              decoration: bareInput(isCollapsed: true,
                   hintText: l.communityChallengeTitle,
                   hintStyle: body(context).copyWith(color: c.textFaint, fontWeight: FontWeight.w600)),
             )),
@@ -1250,7 +1249,7 @@ class _CoWalkSheetState extends State<_CoWalkSheet> {
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
     final c = context.colors;
-    return RoundedSheet(
+    return CardSheet(
       child: Padding(
         padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).viewInsets.bottom + 24),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -1271,7 +1270,7 @@ class _CoWalkSheetState extends State<_CoWalkSheet> {
                   controller: _code, autocorrect: false, textCapitalization: TextCapitalization.characters,
                   cursorColor: c.primary, textAlign: TextAlign.center,
                   style: h2(context).copyWith(fontSize: 20, letterSpacing: 4),
-                  decoration: InputDecoration(isCollapsed: true, border: InputBorder.none,
+                  decoration: bareInput(isCollapsed: true,
                       hintText: l.communityCoWalkEnterCode,
                       hintStyle: body(context).copyWith(color: c.textFaint, fontWeight: FontWeight.w600, letterSpacing: 0)),
                 )),
@@ -1456,7 +1455,7 @@ class _GroupStreakSheetState extends State<_GroupStreakSheet> {
     final l = AppLocalizations.of(context)!;
     final c = context.colors;
     final withHandle = widget.friends.where((f) => f.handle != null).toList();
-    return RoundedSheet(
+    return CardSheet(
       child: Padding(
         padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).viewInsets.bottom + 24),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [

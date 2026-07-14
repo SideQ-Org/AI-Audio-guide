@@ -547,7 +547,7 @@ class _ProfileTabState extends State<ProfileTab> {
 
   Widget _statSheet(BuildContext ctx, {required String value, required String title, required String note, required Widget art, List<Widget> extra = const []}) {
     final c = context.colors;
-    return RoundedSheet(
+    return CardSheet(
       child: Padding(
         padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 24),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -640,7 +640,7 @@ class _ProfileTabState extends State<ProfileTab> {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => RoundedSheet(
+      builder: (ctx) => CardSheet(
         child: Padding(
           padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 24),
           child: Column(mainAxisSize: MainAxisSize.min, children: [

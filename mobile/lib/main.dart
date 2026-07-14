@@ -2472,33 +2472,27 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   // Content-SIZED object-card sheet: a warm cream sheet (the app's bg gradient, no expanding
   // mesh/blur — so it sizes to its content and never leaves a big empty area, and stays light
   // enough not to lag). `top` is the hero photo or grabber; `children` are the body rows.
+  // The object-card sheet, now built on the shared ui.CardSheet (same content-sizing +
+  // cream gradient every modal sheet uses). `top` is the hero photo or grabber; `children`
+  // are the body rows under a comfortable padding.
   Widget _cardShell(BuildContext ctx, {required Widget top, double topGap = 0, required List<Widget> children}) {
-    final c = ctx.colors;
-    return Container(
-      constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.82),
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-            begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [c.bgTop, c.bgBottom]),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(ui.Radii.xl)),
-      ),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            top,
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                  ui.Gap.xl, topGap, ui.Gap.xl, ui.Gap.xl + MediaQuery.of(ctx).padding.bottom),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: children,
-              ),
+    return ui.CardSheet(
+      maxHeightFactor: 0.82,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          top,
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+                ui.Gap.xl, topGap, ui.Gap.xl, ui.Gap.xl + MediaQuery.of(ctx).padding.bottom),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: children,
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -2860,7 +2854,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                   ]),
                 ),
               );
-          return ui.RoundedSheet(
+          return ui.CardSheet(
+            scrollable: false,  // child owns its SingleChildScrollView; CardSheet just bounds it
             child: SingleChildScrollView(
               padding: EdgeInsets.fromLTRB(22, 12, 22, MediaQuery.of(ctx).viewInsets.bottom + 28),
               child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -2952,7 +2947,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           final premiumTappable = !paid || kStubBilling;
           final name = auth.displayName ?? '';
           TextStyle ts(double s, FontWeight w, Color col) => GoogleFonts.manrope(fontSize: s, fontWeight: w, color: col);
-          return ui.RoundedSheet(
+          return ui.CardSheet(
             child: Padding(
               padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
               child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -3217,7 +3212,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                 ]),
               ),
             );
-        return ui.RoundedSheet(
+        return ui.CardSheet(
+          scrollable: false,  // holds a Flexible>ListView (places) + a scrollable recap; CardSheet bounds it
           child: Padding(
             padding: EdgeInsets.fromLTRB(20, 14, 20, MediaQuery.of(ctx).padding.bottom + 18),
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -3353,7 +3349,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       builder: (ctx) {
         final uc = Theme.of(ctx).extension<ui.AppColors>()!;
         final items = _places.reversed.where((p) => p.text.trim().isNotEmpty).toList();
-        return ui.RoundedSheet(
+        return ui.CardSheet(
+          scrollable: false,  // holds a Flexible>ListView(shrinkWrap) of places; CardSheet bounds it
           child: Padding(
             padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [

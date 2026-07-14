@@ -548,7 +548,8 @@ class _EventSheet extends StatelessWidget {
     final l = AppLocalizations.of(context)!;
     final c = context.colors;
     final text = (event.narration ?? '').trim();
-    return RoundedSheet(
+    return CardSheet(
+      scrollable: false,  // holds a Flexible>SingleChildScrollView (narration); CardSheet bounds it
       child: Padding(
         padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(context).padding.bottom + 20),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [

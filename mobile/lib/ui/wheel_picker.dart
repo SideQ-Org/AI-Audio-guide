@@ -36,7 +36,7 @@ Future<DateTime?> showAppDatePicker(
     backgroundColor: Colors.transparent,
     builder: (ctx) {
       final c = ctx.colors;
-      return RoundedSheet(
+      return CardSheet(
         child: Padding(
           padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).padding.bottom + 12),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
