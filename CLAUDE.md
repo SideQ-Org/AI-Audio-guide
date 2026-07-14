@@ -29,7 +29,15 @@ LLMs (OpenRouter) or a local model (LM Studio), and the Flutter app builds to an
   stretches) via the shared `ui/track_map.dart` (`TrackMap`/`trackPolylines`) — the same renderer
   feeds the summary, the history-list thumbnails and the walk detail; the list `/walks` payload
   carries a downsampled `path` for the previews. Map markers use **crisp halos/borders, not blurred
-  shadows** — blurred marker shadows smear/ghost when the map pans under Impeller (iOS sim).
+  shadows** — blurred marker shadows smear/ghost when the map pans under Impeller (iOS sim) — and are
+  **typed pins** (per-category icon/colour, `ui.Cat`); tapping one opens the object **card**. All
+  modal sheets share one **content-sized** container, `ui/components.dart` `CardSheet` (the cream
+  gradient of the cards, flat fill — no mesh/blur, so no lag and **no empty space below short
+  content**; `scrollable:false` for list sheets so their `Flexible`/`ListView` still flex under the
+  height cap; `RoundedSheet` is a deprecated alias). The object card shows the narrator's structured
+  `card` facts + `image` photo (`_cardShell` → `CardSheet`). In-well text fields (search bars, etc.)
+  use `ui.bareInput()` — it nulls **every** `InputDecoration` border slot + `filled:false`, so the
+  theme's focused outline can't draw a box inside the pill ("поле в поле").
 - `deploy/` — Caddy + docker-compose for the prod host: Caddy terminates TLS, **serves the
   Flutter web build** at `/`, and reverse-proxies `/ws /health /ready /stats` to the backend.
   The web build is a **generated artifact**, not checked in: build it in `mobile/` and copy it
@@ -152,6 +160,16 @@ The LLM roles (`backend/app/services/agent/`, prompts in `backend/prompts/*.txt`
   writes area-level monologue (see `area.txt`). **"Landmark" is not a separate role/file** — it
   is the top `Significance` tier (`significance.py`); when a place scores `LANDMARK`,
   `role_for_significance()` routes the *same* Narrator call to the premium `model_landmark`.
+  The Narrator is handed **`AVOID_OPENERS`** (`languages.recent_openers` — its own recent opening
+  phrases) so it doesn't start object after object the same way; its output passes code backstops
+  in `split_hook` (attributions/solicits) plus **`strip_factless_history`** — with empty FACTS,
+  any invented history/date/creation sentence is dropped, keeping only the plain naming line (the
+  anti-fabrication net over the "detsad appeared in those years…" slip). An optional **listener
+  form-of-address** (он/она/нейтрально; `USER_ADDRESS` ContextVar → `_address_instr`, where neutral
+  *actively* avoids gendered 2nd-person) is appended to its prompt — distinct from the guide's own
+  voice-gender (`assistant_gender`/`_SELF_REFERENCE`). In the SAME call it emits a trailing
+  **`CARD:`** block of dry, re-readable facts (`split_card`, `narrator_emit_card`) for the object
+  card — stripped before TTS, never spoken.
 - **Planner** (`planner.py`, `planner.txt`) — on entering a new area, forms a story arc (theme +
   outlined topics) so narration across many objects reads as one coherent spine rather than
   disconnected blurbs. `HeuristicPlanner` (offline) or `LLMPlanner` (structured JSON).
@@ -221,13 +239,21 @@ WS message and rendered in the client's Stop sheet (spinner → text).
 
 Services (`backend/app/services/`):
 - `geo/` — OSM **Overpass** discovery: radius search, type/distance/gaze-cone ranking, adaptive
-  radius, dedup. Linear features (rivers/canals) snap to the nearest geometry point. `geo/inventory.py`
+  radius, dedup. Linear features (rivers/canals) snap to the nearest geometry point. **Candidate
+  dedup** (`geo/ranking.py` `Dedup` dataclass, threaded through discovery) keeps the same object
+  out of LLM context twice — by `wikidata` QID, by same-name-within-`dedup_name_radius_m`, and by
+  name across the many same-name OSM segments of a **linear** feature (`LINEAR_CATEGORIES`, so a
+  river/promenade is narrated once, not per segment). `geo/inventory.py`
   is a per-session object cache: it fetches a wide disc **once** and reuses it for ranking across
   ticks, re-fetching only when the user walks far from the anchor — this is what keeps Overpass
   query volume down (`inventory_*` config, on by default).
 - `enrichment/enricher.py` — `CompositeEnricher`: **Wikipedia/Wikidata first (free)** for places
   tagged `wikipedia=`/`wikidata=`, paid OpenRouter web-search fallback only for the rest. Kept
-  **off the hot-path**: top-K candidates, prefetch-ahead, ~9 s timeout, memory+disk cache.
+  **off the hot-path**: top-K candidates, prefetch-ahead, ~9 s timeout, memory+disk cache. It also
+  captures the **object photo** for the card (`image_for(place_id)`), sourced free/exact in this
+  order: the Wikipedia lead image, then the **Wikidata `P18`** image (for `wikidata`-tagged objects
+  with no article — pulled from the entity JSON already fetched, no extra request), then an OSM tag
+  (`wikimedia_commons=File:…` → a Commons thumbnail, or a direct `image=https://…`) with no network.
 - `llm/` — provider-agnostic `LLMClient` + a per-role router. Default Anthropic; OpenAI-compatible
   base URL for OpenRouter or local LM Studio. A `METER` tracks tokens/cost per session.
 - `stt/` — voice barge-in transcription: `MockSTT` (tests), `FasterWhisperSTT` (local CPU/GPU,
@@ -290,11 +316,14 @@ time delivery — the sentence granularity is what makes seamless weaving possib
 - **In:** `position` (lat/lon/heading/pace), `utterance` (typed question), `audio` (base64 WAV →
   STT), `listen` (mic open/close, sent around a voice question), `played` (paced-playback ack),
   `language`, `theme`, `control` (manual `control_patch`), `auth` (Supabase JWT, see Accounts),
-  `pause`/`resume` (real server-side halt — see below), `end` (Stop button: halt the tour;
+  `address_form` (`WSSetAddressForm` — the optional listener он/она/нейтрально; persisted on
+  `SessionState.user_address`, survives resume), `pause`/`resume` (real server-side halt — see below),
+  `end` (Stop button: halt the tour;
   with `discard:true` the backend deletes this session's walk — a walk shorter than the client's
   10-minute record threshold is dropped, see "Session record rule" below), `ping` (keepalive, ignored).
 - **Out:** `state`, `narration` (text + place + coords, **+ optional `audio_b64`/`audio_mime`** —
-  see Neural TTS), `places` (all discovered objects, for map pins), `reply` (also carries optional
+  see Neural TTS — **+ optional `card`/`image`/`category`** for the tappable object card: the dry
+  `CARD:` facts, a photo URL, and the type), `places` (all discovered objects, for map pins), `reply` (also carries optional
   audio), `transcript`, `summary` (structured end-of-walk recap, pushed async after `end` on a kept
   walk — see the director/summarizer above), `language`, `error`, `ping` (server keepalive every
   20 s), `quota` (`{scope:"daily"}` — a free account is out of daily tours; upgrade prompt).
@@ -430,13 +459,20 @@ run without keys. For a real walk, flip the wiring:
 `MODEL_NARRATOR`, `MODEL_COMPANION`, `MODEL_LANDMARK`, `MODEL_ENRICHER`), the instant opener
 (`SESSION_GREETING`), radius tuning (`DEFAULT_RADIUS_M`, `MAX_RADIUS_M`, `WEAVE_RADIUS_M`,
 `NARRATE_RADIUS_M` — the "right here" passing bubble, 55 m (was 45 m — too tight; real side-passes
-hovered at 50–53 m and never fired) — and `REACH_RADIUS_M` — the tighter cap on the gaze-gated
+hovered at 50–53 m and never fired) — with `NARRATE_RADIUS_LOW_M` (32 m) applied instead for a
+LOW-significance, fact-less object (a plain kindergarten/shop) so it only fires when you're truly
+beside it, not 48 m to the side (`Orchestrator._narrate_reach_m`) — and `REACH_RADIUS_M` — the
+tighter cap on the gaze-gated
 reach fallback so it fires for what you're *about* to reach, not 150–200 m away —
 `SCORER_MAX_CANDIDATES`),
 area monologue (`AREA_ENRICH`, `AREA_MAX_BEATS`, `AREA_PREFETCH` — background pre-gen of the next
 outline beat, above; `AREA_CASCADE_REQUIRES_FACTS` — level-aware anti-fabrication: with no verified
 facts the fact-less area cascade still keeps talking about the well-known **city** but never
-descends to the street/district detail the model would invent), the inventory cache (`INVENTORY_ENABLED`,
+descends to the street/district detail the model would invent; `AREA_CITYLESS_MAX` (2) — a hard cap
+on that fact-less city fallback, because once the real city facts are spent the model **fabricates**
+fresh non-repeating specifics every tick and `is_repeat` can't catch invention (the 1-я Советская
+loop of 8 invented monologues) — reset by a real object / new area; note `AREA_MAX_BEATS` was found
+to be **dead config**, never enforced), the inventory cache (`INVENTORY_ENABLED`,
 `INVENTORY_RADIUS_M`, `INVENTORY_REFETCH_FRAC`, `INVENTORY_TTL_S`), enrichment (`ENRICH_TOP_K`,
 `ENRICH_LOOKAHEAD_K`, `ENRICH_TIMEOUT_S`, `ENRICH_CACHE_PATH`), STT (`STT_BACKEND` —
 `faster_whisper` local vs `openrouter` cloud; `WHISPER_*` for local, `STT_MODEL`/`STT_TIMEOUT_S`

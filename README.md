@@ -123,6 +123,14 @@ Point the client at your backend with `--dart-define=WS_URL=ws://<host>:8000/ws`
 - 🗣️ **Voice barge-in** — ask anything mid-walk; it answers (~3 s cloud STT) and resumes, keeping context.
 - 🧠 **A story, not a stream** — the director weaves callbacks ("as that church earlier…"),
   foreshadows what's ahead, and greets you back when you loop past a place, on one coherent arc.
+  It varies how it opens each line (it's told its own recent openers to avoid), and never invents
+  history for a place it has no facts about — an unknown building gets one plain naming line, not a
+  fabricated backstory.
+- 🃏 **Tappable place cards** — every discovered object is a typed pin on the map; tap it for a card
+  with the object's **structured facts** (not the spoken script, so it re-reads cleanly) and a photo
+  when one exists — a Wikipedia lead image, a Wikidata image, or a Commons/URL tag on the OSM object.
+- 👋 **Talks to you the way you want** — an optional, neutrally-named setting lets the guide address
+  you in the grammatical form you choose (or stay neutral by default) — it's about phrasing, not identity.
 - 🔊 **Neural voice (paid tier)** — a lifelike server-synthesized voice, pre-synthesized so it plays
   gaplessly; the free tier uses the on-device voice.
 - 🗺️ **Live GPS track** — the route is drawn on the map as you walk, shown in the end-of-walk
