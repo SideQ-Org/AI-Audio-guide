@@ -36,9 +36,10 @@ from app.services.agent.walklog import (
     tick_reset,
     tick_snapshot,
 )
+from app.services.geo.categories import LINEAR_CATEGORIES
 from app.services.geo.discovery import Discovery
 from app.services.geo.geocoder import Geocoder
-from app.services.geo.ranking import build_candidates
+from app.services.geo.ranking import _norm_name, build_candidates
 from app.services.llm.client import as_background
 from app.services.metrics import GUIDE
 from app.services.state.store import StateStore
@@ -228,7 +229,8 @@ class Orchestrator:
             return None
         st = await self.store.load(session_id)
         cands = build_candidates(
-            position, heading, inv.places, settings.narrate_radius_m, st.seen_place_ids
+            position, heading, inv.places, settings.narrate_radius_m, st.seen_place_ids,
+            st.seen_linear_names,
         )
         if not cands:
             return None
@@ -296,7 +298,8 @@ class Orchestrator:
         if place is None:
             return await self._finish(st, State.IDLE, "silence")
         cands = build_candidates(
-            st.position, st.heading, [place], settings.weave_radius_m, st.seen_place_ids
+            st.position, st.heading, [place], settings.weave_radius_m, st.seen_place_ids,
+            st.seen_linear_names,
         )
         if not cands:
             return await self._finish(st, State.IDLE, "silence")
@@ -406,11 +409,12 @@ class Orchestrator:
             # deadline so a slow/blocked Overpass can't stall the tick for minutes.
             discover = (
                 self.discovery.discover_inventory(
-                    session_id, position, heading, st.seen_place_ids
+                    session_id, position, heading, st.seen_place_ids, st.seen_linear_names
                 )
                 if settings.inventory_enabled
                 else self.discovery.discover_adaptive(
-                    position, heading, st.seen_place_ids, settings.default_radius_m
+                    position, heading, st.seen_place_ids, settings.default_radius_m,
+                    st.seen_linear_names,
                 )
             )
             result = await asyncio.wait_for(discover, timeout=_DISCOVERY_DEADLINE_S)
@@ -668,6 +672,12 @@ class Orchestrator:
         switching = bool(st.last_place_id and out.place.id != st.last_place_id)
         st.narration_history = (st.narration_history + [out.text])[-_HISTORY_CAP:]
         st.seen_place_ids = (st.seen_place_ids + [out.place.id])[-_SEEN_CAP:]
+        # Remember linear features (river/promenade) by NAME too, so the next OSM way-segment
+        # of the same river isn't narrated again as a fresh object (the "Чура twice" bug).
+        if out.place.category in LINEAR_CATEGORIES and _norm_name(out.place.name):
+            st.seen_linear_names = (
+                st.seen_linear_names + [_norm_name(out.place.name)]
+            )[-_SEEN_CAP:]
         st.last_place_id = out.place.id
         st.last_place = out.place
         st.last_significance = out.significance

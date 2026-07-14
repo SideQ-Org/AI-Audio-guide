@@ -51,9 +51,12 @@ class Discovery:
         heading: Heading,
         seen: list[str],
         radius_m: float,
+        seen_linear_names: list[str] = (),
     ) -> list[Candidate]:
         places = await self.provider.fetch_places(position, radius_m)
-        return build_candidates(position, heading, places, radius_m, seen)
+        return build_candidates(
+            position, heading, places, radius_m, seen, seen_linear_names
+        )
 
     async def discover_adaptive(
         self,
@@ -61,6 +64,7 @@ class Discovery:
         heading: Heading,
         seen: list[str],
         radius_m: float,
+        seen_linear_names: list[str] = (),
     ) -> DiscoveryResult:
         # One tight query (cheap, fast — covers dense city centres). If it's empty,
         # jump STRAIGHT to the max radius in a single wide query instead of stepping
@@ -68,14 +72,14 @@ class Discovery:
         # in a sparse suburb blew the per-tick deadline, so objects never surfaced
         # (the "talks about the district but never reaches any object" bug). At most
         # two queries now; proximity is handled by ranking, not by re-querying.
-        candidates = await self.discover(position, heading, seen, radius_m)
+        candidates = await self.discover(position, heading, seen, radius_m, seen_linear_names)
         if candidates:
             return DiscoveryResult(candidates, radius_m, expanded=False, exhausted=False)
         if radius_m >= self.max_radius_m:
             log.info("adaptive: 0 at r=%.0f (already max) -> exhausted", radius_m)
             return DiscoveryResult([], radius_m, expanded=False, exhausted=True)
         wide = self.max_radius_m
-        candidates = await self.discover(position, heading, seen, wide)
+        candidates = await self.discover(position, heading, seen, wide, seen_linear_names)
         log.info("adaptive: 0 at r=%.0f -> expand to %.0f -> %d found",
                  radius_m, wide, len(candidates))
         return DiscoveryResult(candidates, wide, expanded=True, exhausted=not candidates)
@@ -86,6 +90,7 @@ class Discovery:
         position: GeoPoint,
         heading: Heading,
         seen: list[str],
+        seen_linear_names: list[str] = (),
     ) -> DiscoveryResult:
         """Inventory-backed discovery: serve candidates from a per-session cached
         disc instead of hitting Overpass every tick. The candidate set is still a
@@ -100,10 +105,10 @@ class Discovery:
             # to the live adaptive search so the guide never goes dark.
             log.info("inventory empty -> live adaptive fallback")
             return await self.discover_adaptive(
-                position, heading, seen, settings.default_radius_m
+                position, heading, seen, settings.default_radius_m, seen_linear_names
             )
         candidates = build_candidates(
-            position, heading, inv.places, settings.default_radius_m, seen
+            position, heading, inv.places, settings.default_radius_m, seen, seen_linear_names
         )
         if candidates:
             log.debug(
@@ -118,7 +123,7 @@ class Discovery:
         # object instead of looping on the area monologue.
         passed = self.inventory.passed_ids(inv)
         wide = build_candidates(
-            position, heading, inv.places, settings.inventory_radius_m, seen
+            position, heading, inv.places, settings.inventory_radius_m, seen, seen_linear_names
         )
         ahead = [c for c in wide if c.place.id not in passed]
         candidates = ahead or wide

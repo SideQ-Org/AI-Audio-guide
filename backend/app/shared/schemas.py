@@ -304,6 +304,9 @@ class SessionState(BaseModel):
     pace: Pace = Pace.SLOW
     address: Address = Field(default_factory=Address)
     seen_place_ids: list[str] = Field(default_factory=list)
+    # Normalized names of narrated LINEAR features (river/canal/promenade) — so a river split
+    # across several OSM way-segments isn't re-narrated per segment (dedup by name, not id).
+    seen_linear_names: list[str] = Field(default_factory=list)
     narration_history: list[str] = Field(default_factory=list)
     conversation: list[str] = Field(default_factory=list)
     control_patch: ControlPatch = Field(default_factory=ControlPatch)

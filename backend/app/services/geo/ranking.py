@@ -19,7 +19,12 @@ from app.shared.geo_math import (
 )
 from app.shared.schemas import Candidate, GazeConfidence, GeoPoint, Heading, Place
 
-from .categories import weight_for
+from .categories import LINEAR_CATEGORIES, weight_for
+
+
+def _norm_name(name: str | None) -> str:
+    """Normalize a feature name for cross-segment matching (case/space-insensitive)."""
+    return (name or "").strip().lower()
 
 GAZE_CONE_DEG = 35.0  # narrower cone: only fire for what's clearly ahead, not off to the side
 _GAZE_BOOST_HIGH = 1.5
@@ -57,12 +62,22 @@ def build_candidates(
     places: Iterable[Place],
     radius_m: float,
     seen: Iterable[str] = (),
+    seen_linear_names: Iterable[str] = (),
 ) -> list[Candidate]:
     seen_ids = set(seen)
+    # Names of already-narrated LINEAR features (river/canal/promenade). A river split across
+    # several OSM ways would otherwise be told once per segment — dedup those by name so the
+    # SAME river isn't re-narrated when the walker crosses onto the next segment.
+    seen_linear = {_norm_name(n) for n in seen_linear_names if _norm_name(n)}
     candidates: list[Candidate] = []
     for place in places:
         if place.id in seen_ids:
             continue
+        if (
+            place.category in LINEAR_CATEGORIES
+            and _norm_name(place.name) in seen_linear
+        ):
+            continue  # another segment of a linear feature already narrated under this name
         # For a polygon/line, measure to the whole shape from the LIVE position (0 when
         # inside) and take direction from the true nearest edge point — not a stale
         # snapped vertex (B1). A point object stays a plain haversine to its location.

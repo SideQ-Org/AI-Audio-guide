@@ -6,6 +6,14 @@ later combined with proximity and gaze in ``ranking.py``.
 
 from __future__ import annotations
 
+# Categories for LINEAR features that OSM splits into many `way` segments sharing one name
+# (a river/canal runs as several ways; a promenade too). Each segment is a distinct object with
+# its own id, so id-based dedup lets the SAME river be narrated once per segment ("проходишь мимо
+# речки Чуры" twice). These are deduped by NAME instead — see build_candidates. Area water
+# (ponds/lakes = "water") is NOT here: a pond is one object, not a split line.
+LINEAR_CATEGORIES: frozenset[str] = frozenset({"river", "pedestrian"})
+
+
 WEIGHT_BY_CATEGORY: dict[str, float] = {
     # landmarks / culture
     "museum": 0.9,
