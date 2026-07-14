@@ -39,7 +39,13 @@ from app.services.agent.orchestrator import (
 )
 from app.services.agent.walklog import get_logger
 from app.services.billing.api import router as billing_router
-from app.services.llm.client import METER, SESSION_ID, SESSION_TIER, as_background
+from app.services.llm.client import (
+    METER,
+    SESSION_ID,
+    SESSION_TIER,
+    USER_ADDRESS,
+    as_background,
+)
 from app.services.metrics import GUIDE
 from app.services.stt.stt import STTClient, build_stt
 from app.shared.geo_math import haversine_m
@@ -51,6 +57,7 @@ from app.shared.schemas import (
     WSAuth,
     WSControl,
     WSPositionUpdate,
+    WSSetAddressForm,
     WSSetLanguage,
     WSSetTheme,
     WSUserUtterance,
@@ -397,6 +404,7 @@ class _SessionRuntime:
         self.session_id = session_id
         self.user_id: str | None = None  # set on a valid `auth` message; None = guest
         self.tier: str = "free"  # account tier; upgraded on a valid paid `auth` (feature: tiers)
+        self.user_address: str = ""  # grammatical form to address the walker ("" = neutral)
         self.tours_today: int = 0  # walks started in the last 24h (loaded on auth; quota gate)
         self.quota_notified = False  # the daily-quota nudge was already sent this session
         self.live_position: GeoPoint | None = None
@@ -535,6 +543,7 @@ class _SessionRuntime:
         """Generate the end-of-walk structured recap and push it to the client (Stop sheet)."""
         SESSION_ID.set(self.session_id)  # attribute the summary's LLM cost to this session
         SESSION_TIER.set(self.tier)  # tier -> model routing for the recap
+        USER_ADDRESS.set(self.user_address)
         try:
             text = await self.orch.summarize(self.session_id)
         except Exception as e:  # noqa: BLE001 — a failed recap must never break the end flow
@@ -616,6 +625,7 @@ class _SessionRuntime:
             return
         SESSION_ID.set(self.session_id)  # attribute LLM cost to this session
         SESSION_TIER.set(self.tier)  # tier -> model + enrichment for this turn
+        USER_ADDRESS.set(self.user_address)
 
         # 0) Just back from a question or an un-pause? Lead back into the tour with ONE short
         #    spoken bridge. Return to the same topic if it's still relevant (we're within the
@@ -723,6 +733,7 @@ class _SessionRuntime:
     async def _prefetch_area(self) -> tuple[str, str, str | None] | None:
         SESSION_ID.set(self.session_id)  # attribute LLM cost to this session
         SESSION_TIER.set(self.tier)  # tier -> model routing for the warmed beat
+        USER_ADDRESS.set(self.user_address)
         return await self.orch.prefetch_area(self.session_id, self.live_pace)
 
     async def _take_prefetched_area(self) -> OrchestratorOutput | None:
@@ -886,6 +897,7 @@ class _SessionRuntime:
         self.resume.clear()
         SESSION_ID.set(self.session_id)  # attribute the answer's LLM cost to this session
         SESSION_TIER.set(self.tier)  # tier -> model + enrichment for this answer
+        USER_ADDRESS.set(self.user_address)
         if self.step_task is not None and not self.step_task.done():
             self.step_task.cancel()
         # Park whatever we were narrating so the post-answer bridge can return to it (if it's
@@ -1128,6 +1140,7 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
         rt.user_id = user_id
         rt.tier = tier
         rt.tours_today = tours_today
+        rt.user_address = state.user_address  # restore the walker's form-of-address on resume
         rt.quota_notified = False  # re-evaluate the gate for this (re)auth
         await rt.send_json({
             "type": "auth",
@@ -1158,5 +1171,13 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
         state.control_patch = merge_patch(state.control_patch, c.patch)
         await orch.store.save(state)
         await rt.send_json({"type": "state", "state": state.state})
+    elif kind == "address_form":
+        # The user's optional grammatical form of address ("masculine"|"feminine"|"" neutral).
+        af = WSSetAddressForm.model_validate(msg)
+        form = af.form if af.form in ("masculine", "feminine") else ""
+        state = await orch.store.load(rt.session_id)
+        state.user_address = form
+        await orch.store.save(state)
+        rt.user_address = form
     else:
         await rt.send_json({"type": "error", "message": f"unknown type: {kind}"})

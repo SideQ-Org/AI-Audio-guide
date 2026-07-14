@@ -5,6 +5,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../ui/components.dart';
@@ -231,6 +232,65 @@ class AuthOrLine extends StatelessWidget {
             style: caption(context).copyWith(fontWeight: FontWeight.w700, color: c.textFaint)),
       ),
       line(),
+    ]);
+  }
+}
+
+/// A compact 3-way picker for the OPTIONAL grammatical form of address the guide uses for the
+/// LISTENER ("ты прошёл/прошла"). NOT identity — only how narration phrases the 2nd person.
+/// '' = neutral (default), 'masculine' = «ты прошёл», 'feminine' = «ты прошла». If unset the
+/// guide addresses the walker neutrally.
+class AddressFormPicker extends StatelessWidget {
+  final String value;
+  final ValueChanged<String> onChanged;
+  const AddressFormPicker({super.key, required this.value, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    const opts = <(String, String, String?)>[
+      ('', 'Нейтрально', null),
+      ('masculine', 'Он', '«ты прошёл»'),
+      ('feminine', 'Она', '«ты прошла»'),
+    ];
+    return Row(children: [
+      for (final (val, title, sub) in opts) ...[
+        Expanded(
+          child: Pressable(
+            scale: 0.96,
+            onTap: () => onChanged(val),
+            child: AnimatedContainer(
+              duration: Motion.fast,
+              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+              decoration: BoxDecoration(
+                color: value == val ? c.primary : c.glassFill(0.05),
+                borderRadius: BorderRadius.circular(Radii.md),
+                border: Border.all(color: value == val ? c.primary : c.glassBorder),
+              ),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Text(title,
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.manrope(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w700,
+                        color: value == val ? c.onPrimary : c.textPrimary)),
+                if (sub != null) ...[
+                  const SizedBox(height: 2),
+                  Text(sub,
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.manrope(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w500,
+                          color: value == val
+                              ? c.onPrimary.withValues(alpha: 0.82)
+                              : c.textFaint)),
+                ],
+              ]),
+            ),
+          ),
+        ),
+        if (val != 'feminine') const SizedBox(width: 8),
+      ],
     ]);
   }
 }

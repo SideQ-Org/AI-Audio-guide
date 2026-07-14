@@ -12,7 +12,7 @@ import re
 from typing import Protocol
 
 from app.config import settings
-from app.services.llm.client import LLMClient
+from app.services.llm.client import USER_ADDRESS, LLMClient
 from app.services.llm.router import Role
 from app.shared.schemas import AreaInput, NarratorInput, Significance
 
@@ -58,6 +58,33 @@ _CARD_INSTR = (
 # Strip the CARD block off the end (before the HOOK strip, since HOOK's matcher is greedy to
 # end-of-text and would otherwise swallow the card). `CARD:` to end, across newlines.
 _CARD_RE = re.compile(r"(?is)\n?\s*\bCARD\s*[:：]\s*(.*)$")
+
+# How the guide addresses the LISTENER grammatically — the user's optional choice. Appended to
+# the narrator system prompt. Neutral (unset) is the default and ACTIVELY tells the model to
+# sidestep gendered 2nd-person forms (Russian narration otherwise defaults to masculine "ты
+# прошёл"). About ITSELF the guide still follows CORE (assistant-gender) — this is only the walker.
+_USER_ADDRESS_INSTR = {
+    "masculine": (
+        "\n\nОБРАЩЕНИЕ К СЛУШАТЕЛЮ — В МУЖСКОМ РОДЕ: слушатель — мужчина. Формы, обращённые к "
+        "нему, — мужского рода на любом языке, где род есть («ты прошёл», «ты сам видел», «ты "
+        "бы удивился»). (О СЕБЕ правила CORE не меняются.)"
+    ),
+    "feminine": (
+        "\n\nОБРАЩЕНИЕ К СЛУШАТЕЛЮ — В ЖЕНСКОМ РОДЕ: слушатель — женщина. Формы, обращённые к "
+        "ней, — женского рода («ты прошла», «ты сама видела», «ты бы удивилась»). (О СЕБЕ "
+        "правила CORE не меняются.)"
+    ),
+    "neutral": (
+        "\n\nОБРАЩЕНИЕ К СЛУШАТЕЛЮ — НЕЙТРАЛЬНО: пол слушателя НЕИЗВЕСТЕН. НЕ угадывай его и "
+        "ИЗБЕГАЙ форм, требующих рода при обращении к нему («ты прошёл/прошла», «ты сам/сама»): "
+        "переформулируй безлично или в настоящем времени («вот и поворот», «мимо этого места», "
+        "«здесь находится…»). Обращайся нейтрально."
+    ),
+}
+
+
+def _address_instr(user_address: str) -> str:
+    return _USER_ADDRESS_INSTR.get(user_address or "neutral", _USER_ADDRESS_INSTR["neutral"])
 
 
 def split_card(text: str) -> tuple[str, str | None]:
@@ -255,6 +282,7 @@ class LLMNarrator:
             system += _HOOK_INSTR
         if settings.narrator_emit_card:
             system += _CARD_INSTR
+        system += _address_instr(USER_ADDRESS.get())
         user = build_narrator_user(inp)
         text = await self._llm.complete_text(role, system, user)
         return normalize(text)
@@ -265,6 +293,7 @@ class LLMNarrator:
         system = system_for_area(inp.language)
         if settings.narrator_emit_hook:
             system += _HOOK_INSTR
+        system += _address_instr(USER_ADDRESS.get())
         user = build_area_user(inp)
         text = await self._llm.complete_text(Role.NARRATOR, system, user)
         return normalize(text)

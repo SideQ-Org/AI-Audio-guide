@@ -289,6 +289,9 @@ class SessionState(BaseModel):
     walk_id: str | None = None
     walk_last_event_at: float | None = None
     language: str = "ru"
+    # How the guide addresses the LISTENER grammatically: "masculine" | "feminine" | "" (neutral,
+    # the default — avoid gendered 2nd-person forms). The user's optional, self-set choice.
+    user_address: str = ""
     position: GeoPoint | None = None
     # Downsampled GPS breadcrumb of the current walk ([[lat, lon], ...]) so the walk
     # history can draw the real route. Appended in on_position (distance-gated, capped),
@@ -390,6 +393,14 @@ class WSSetLanguage(BaseModel):
 
     type: Literal["language"] = "language"
     language: str  # ISO-639-1: en|ru|es|fr|de|it|pt|zh
+
+
+class WSSetAddressForm(BaseModel):
+    """The user's chosen grammatical form of address (sent on connect / when changed).
+    "masculine" | "feminine" | "" (neutral). Optional — empty means address neutrally."""
+
+    type: Literal["address_form"] = "address_form"
+    form: str = ""
 
 
 class WSAudioInput(BaseModel):

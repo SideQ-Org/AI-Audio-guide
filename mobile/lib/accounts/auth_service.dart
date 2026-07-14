@@ -148,11 +148,16 @@ class AuthService extends ChangeNotifier {
     String? nick,
     String? birthdayIso,
     String? avatarUrl,
+    String? addressForm,
   }) async {
     final data = <String, dynamic>{};
     if (nick != null && nick.isNotEmpty) data['display_name'] = nick;
     if (birthdayIso != null && birthdayIso.isNotEmpty) data['birthday'] = birthdayIso;
     if (avatarUrl != null && avatarUrl.isNotEmpty) data['avatar_url'] = avatarUrl;
+    // Only persist a non-neutral choice up-front; neutral is the default with no key.
+    if (addressForm == 'masculine' || addressForm == 'feminine') {
+      data['address_form'] = addressForm;
+    }
     await Supabase.instance.client.auth
         .signUp(email: email, password: password, data: data.isEmpty ? null : data);
   }
@@ -188,6 +193,15 @@ class AuthService extends ChangeNotifier {
     return v is String && v.isNotEmpty ? v : null;
   }
 
+  /// The user's OPTIONAL form of address — how the guide should address them grammatically
+  /// ("masculine" | "feminine" | "" = neutral, the default). Stored in user_metadata; sent to
+  /// the backend on connect so narration uses "ты прошёл/прошла" or a neutral phrasing.
+  String get addressForm {
+    if (!available) return '';
+    final v = Supabase.instance.client.auth.currentUser?.userMetadata?['address_form'];
+    return (v == 'masculine' || v == 'feminine') ? v as String : '';
+  }
+
   /// The user's chosen avatar, stored in user_metadata as `avatar_url`. Either a real
   /// URL or a `data:image/...;base64,…` thumbnail (see [TravelerAvatar]). Null => the
   /// bundled default backpacker avatar is shown.
@@ -221,12 +235,15 @@ class AuthService extends ChangeNotifier {
   /// Save editable account data. Nick goes to the durable `users.display_name` (drives
   /// /me + the profile) and to user_metadata; birthday goes to user_metadata only.
   /// No-op when signed out. Returns nothing; UI reads back via [refreshEntitlement].
-  Future<void> updateProfile({String? nick, String? birthdayIso, String? avatarUrl}) async {
+  Future<void> updateProfile(
+      {String? nick, String? birthdayIso, String? avatarUrl, String? addressForm}) async {
     if (!available || !isSignedIn) return;
     final meta = <String, dynamic>{};
     if (nick != null) meta['display_name'] = nick;
     if (birthdayIso != null) meta['birthday'] = birthdayIso;
     if (avatarUrl != null) meta['avatar_url'] = avatarUrl;
+    // "" is a valid value (neutral) — persist it so the choice is explicit.
+    if (addressForm != null) meta['address_form'] = addressForm;
     if (meta.isNotEmpty) {
       await Supabase.instance.client.auth.updateUser(UserAttributes(data: meta));
     }

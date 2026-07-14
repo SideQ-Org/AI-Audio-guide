@@ -42,6 +42,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
   _Phase _phase = _Phase.form;
   String? _avatar; // data: URL, optional
   DateTime? _birthday; // optional
+  String _addressForm = ''; // optional form of address: '' neutral | masculine | feminine
   bool _wantPremium = false;
 
   bool _busy = false;
@@ -143,6 +144,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
         nick: _nick.text.trim(),
         birthdayIso: _birthdayIso,
         avatarUrl: _avatar,
+        addressForm: _addressForm,
       );
       if (!mounted) return;
       // Confirmation-off projects sign the user straight in; otherwise go collect the code.
@@ -332,6 +334,15 @@ class _RegisterScreenState extends State<RegisterScreen> {
               _birthdayField(c, l),
             ],
           ),
+        ),
+        const SizedBox(height: Gap.md),
+        Padding(
+          padding: const EdgeInsets.only(left: 4, bottom: 8),
+          child: Text('Как к вам обращаться (необязательно)', style: label(context)),
+        ),
+        AddressFormPicker(
+          value: _addressForm,
+          onChanged: (v) => setState(() => _addressForm = v),
         ),
         const SizedBox(height: Gap.md),
         _premiumToggle(c, l),

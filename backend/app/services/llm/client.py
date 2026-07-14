@@ -32,6 +32,9 @@ SESSION_ID: ContextVar[str] = ContextVar("aiguide_session", default="")
 # full web facts. Set per turn next to SESSION_ID; read by _model_for / _reasoning_for
 # and the enricher. Defaults "free" so guests + any non-WS caller (sims/tests) behave.
 SESSION_TIER: ContextVar[str] = ContextVar("aiguide_tier", default="free")
+# How the guide addresses the LISTENER grammatically this turn: "masculine" | "feminine" | ""
+# (neutral). Set per turn next to SESSION_TIER; read by the Narrator when it builds its prompt.
+USER_ADDRESS: ContextVar[str] = ContextVar("aiguide_user_address", default="")
 
 from .router import Role, model_for  # noqa: E402 — after the ContextVar defs above
 

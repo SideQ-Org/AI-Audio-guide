@@ -1746,6 +1746,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     _send({'type': 'language', 'language': _lang});
     if (_theme.isNotEmpty) _send({'type': 'theme', 'theme': _theme});
     _sendAuth(); // bind the signed-in user to this (resumable) session, if any
+    _sendAddressForm(); // the walker's optional grammatical form of address
     // Replay the last position so the tour resumes immediately on reconnect instead of
     // sitting idle until the next GPS fix. Only a real fix (never the startup default).
     if (_lastPositionMsg != null) _send(_lastPositionMsg!);
@@ -1816,10 +1817,21 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     _send({'type': 'auth', 'token': AuthService.instance.accessToken ?? ''});
   }
 
+  // The walker's OPTIONAL grammatical form of address ("" neutral | masculine | feminine) —
+  // sent on connect and whenever the account changes (e.g. after saving it in the profile), so
+  // narration addresses them as "ты прошёл/прошла" or neutrally. Guest => neutral.
+  void _sendAddressForm() {
+    if (!AccountsConfig.enabled) return;
+    _send({'type': 'address_form', 'form': AuthService.instance.addressForm});
+  }
+
   void _onAuthChanged() {
     if (!mounted) return;
     setState(() {}); // refresh the account tile in settings
-    if (_connected) _sendAuth();
+    if (_connected) {
+      _sendAuth();
+      _sendAddressForm(); // reflect a form-of-address change made in the profile
+    }
     // Bring live presence up/down with the session.
     if (AccountsConfig.enabled && AuthService.instance.isSignedIn) {
       RealtimeService.instance.startPresence();
@@ -2419,55 +2431,73 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => ui.RoundedSheet(
-        child: DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: p.image != null ? 0.6 : 0.44,
-          maxChildSize: 0.92,
-          minChildSize: 0.3,
-          builder: (ctx, controller) => ListView(
-            controller: controller,
-            padding: EdgeInsets.zero,
-            children: [
-              if (p.image != null) _CardHero(url: p.image!),
-              Padding(
-                padding: EdgeInsets.fromLTRB(
-                    ui.Gap.xl, p.image != null ? ui.Gap.lg : ui.Gap.md, ui.Gap.xl, ui.Gap.xxl),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (p.image == null) const Center(child: _SheetGrabber()),
-                    Row(children: [
-                      _CatIconChip(icon: style.icon, color: style.color),
-                      const SizedBox(width: ui.Gap.md),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(p.name.isEmpty ? label : p.name, style: ui.titleS(ctx)),
-                            if (label.isNotEmpty) ...[
-                              const SizedBox(height: 2),
-                              Text(label,
-                                  style: GoogleFonts.manrope(
-                                      fontSize: 13, fontWeight: FontWeight.w600, color: style.color)),
-                            ],
-                          ],
-                        ),
-                      ),
-                    ]),
-                    const SizedBox(height: ui.Gap.lg),
-                    if (factLines.isNotEmpty)
-                      ...factLines.map((f) => _FactRow(text: f, color: style.color))
-                    else if (p.text.trim().isNotEmpty)
-                      Text(p.text.trim(),
-                          style: GoogleFonts.manrope(
-                              fontSize: 15, height: 1.55, color: c.textSecondary)),
+      builder: (ctx) => _cardShell(
+        ctx,
+        // hero photo when present; otherwise NO reserved space — just the grabber.
+        top: p.image != null
+            ? _CardHero(url: p.image!)
+            : const Padding(padding: EdgeInsets.only(top: 10), child: Center(child: _SheetGrabber())),
+        topGap: p.image != null ? ui.Gap.lg : ui.Gap.md,
+        children: [
+          Row(children: [
+            _CatIconChip(icon: style.icon, color: style.color),
+            const SizedBox(width: ui.Gap.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(p.name.isEmpty ? label : p.name, style: ui.titleS(ctx)),
+                  if (label.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(label,
+                        style: GoogleFonts.manrope(
+                            fontSize: 13, fontWeight: FontWeight.w600, color: style.color)),
                   ],
-                ),
+                ],
               ),
-            ],
-          ),
+            ),
+          ]),
+          const SizedBox(height: ui.Gap.lg),
+          if (factLines.isNotEmpty)
+            ...factLines.map((f) => _FactRow(text: f, color: style.color))
+          else if (p.text.trim().isNotEmpty)
+            Text(p.text.trim(),
+                style: GoogleFonts.manrope(fontSize: 15, height: 1.55, color: c.textSecondary)),
+        ],
+      ),
+    );
+  }
+
+  // Content-SIZED object-card sheet: a warm cream sheet (the app's bg gradient, no expanding
+  // mesh/blur — so it sizes to its content and never leaves a big empty area, and stays light
+  // enough not to lag). `top` is the hero photo or grabber; `children` are the body rows.
+  Widget _cardShell(BuildContext ctx, {required Widget top, double topGap = 0, required List<Widget> children}) {
+    final c = ctx.colors;
+    return Container(
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.82),
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+            begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [c.bgTop, c.bgBottom]),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(ui.Radii.xl)),
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            top,
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                  ui.Gap.xl, topGap, ui.Gap.xl, ui.Gap.xl + MediaQuery.of(ctx).padding.bottom),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: children,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -2483,41 +2513,36 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final label = _categoryLabel(o.category, ru: ru);
     showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) {
         final l = AppLocalizations.of(ctx)!;
-        return ui.RoundedSheet(
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(ui.Gap.xl, ui.Gap.md, ui.Gap.xl,
-                ui.Gap.xxl + MediaQuery.of(ctx).padding.bottom),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Center(child: _SheetGrabber()),
-                Row(children: [
-                  _CatIconChip(icon: style.icon, color: style.color),
-                  const SizedBox(width: ui.Gap.md),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(o.name.isEmpty ? label : o.name, style: ui.titleS(ctx)),
-                        const SizedBox(height: 2),
-                        Text(label,
-                            style: GoogleFonts.manrope(
-                                fontSize: 13, fontWeight: FontWeight.w600, color: style.color)),
-                      ],
-                    ),
-                  ),
-                ]),
-                const SizedBox(height: ui.Gap.lg),
-                Text(l.nearbyHint,
-                    style: GoogleFonts.manrope(fontSize: 14, height: 1.5, color: c.textFaint)),
-              ],
-            ),
-          ),
+        return _cardShell(
+          ctx,
+          top: const Padding(padding: EdgeInsets.only(top: 10), child: Center(child: _SheetGrabber())),
+          topGap: ui.Gap.md,
+          children: [
+            Row(children: [
+              _CatIconChip(icon: style.icon, color: style.color),
+              const SizedBox(width: ui.Gap.md),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(o.name.isEmpty ? label : o.name, style: ui.titleS(ctx)),
+                    const SizedBox(height: 2),
+                    Text(label,
+                        style: GoogleFonts.manrope(
+                            fontSize: 13, fontWeight: FontWeight.w600, color: style.color)),
+                  ],
+                ),
+              ),
+            ]),
+            const SizedBox(height: ui.Gap.md),
+            Text(l.nearbyHint,
+                style: GoogleFonts.manrope(fontSize: 14, height: 1.5, color: c.textFaint)),
+          ],
         );
       },
     );

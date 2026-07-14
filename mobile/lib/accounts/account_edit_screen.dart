@@ -11,6 +11,7 @@ import '../ui/components.dart';
 import '../ui/design.dart';
 import '../ui/wheel_picker.dart';
 import 'auth_service.dart';
+import 'auth_widgets.dart';
 
 class AccountEditScreen extends StatefulWidget {
   const AccountEditScreen({super.key});
@@ -24,6 +25,8 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
   final _pw1 = TextEditingController();
   final _pw2 = TextEditingController();
   DateTime? _birthday = _parse(AuthService.instance.birthday);
+  // Optional form of address: '' (neutral) | 'masculine' | 'feminine'.
+  String _addressForm = AuthService.instance.addressForm;
   bool _busy = false;
   bool _pwBusy = false;
   bool _pwHidden = true;
@@ -85,6 +88,7 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
       await AuthService.instance.updateProfile(
         nick: _nick.text.trim().isEmpty ? null : _nick.text.trim(),
         birthdayIso: _birthday == null ? null : DateFormat('yyyy-MM-dd').format(_birthday!),
+        addressForm: _addressForm,
       );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Сохранено')));
@@ -162,6 +166,19 @@ class _AccountEditScreenState extends State<AccountEditScreen> {
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 4),
                     child: Text('Не показывается в профиле — нужна только для поздравления с днём рождения.',
+                        style: GoogleFonts.manrope(fontSize: 12, fontWeight: FontWeight.w500, height: 1.35, color: c.textFaint)),
+                  ),
+                  const SizedBox(height: Gap.lg),
+                  Text('КАК К ВАМ ОБРАЩАТЬСЯ', style: label(context)),
+                  const SizedBox(height: 8),
+                  AddressFormPicker(
+                    value: _addressForm,
+                    onChanged: (v) => setState(() => _addressForm = v),
+                  ),
+                  const SizedBox(height: 6),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Text('Необязательно. Гид будет обращаться к вам в этой форме; по умолчанию — нейтрально.',
                         style: GoogleFonts.manrope(fontSize: 12, fontWeight: FontWeight.w500, height: 1.35, color: c.textFaint)),
                   ),
                   const SizedBox(height: Gap.xxl),
