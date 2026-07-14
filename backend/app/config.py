@@ -167,6 +167,11 @@ class Settings(BaseSettings):
     resume_bridge: bool = True
     resume_bridge_obj_radius_m: float = 70.0
     resume_bridge_area_radius_m: float = 180.0
+    # Anti-repeat: two objects with the SAME name within this distance are treated as the same
+    # real-world thing mapped twice (a park's node label + polygon), so the second isn't narrated
+    # again. Small on purpose — genuinely different same-named places are farther apart. (Rivers/
+    # promenades dedup by name WITHOUT distance — see LINEAR_CATEGORIES; same wikidata QID always.)
+    dedup_name_radius_m: float = 60.0
     # Activate the cross-paragraph "next_hook" baton: the Narrator emits a short
     # internal HOOK: line that we strip from speech and hand to the next paragraph,
     # so transitions are woven rather than improvised cold. Kept on the creative

@@ -9,7 +9,9 @@ Score combines three signals from the business logic:
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
+from app.config import settings
 from app.shared.geo_math import (
     angle_diff,
     bearing_deg,
@@ -25,6 +27,38 @@ from .categories import LINEAR_CATEGORIES, weight_for
 def _norm_name(name: str | None) -> str:
     """Normalize a feature name for cross-segment matching (case/space-insensitive)."""
     return (name or "").strip().lower()
+
+
+@dataclass(frozen=True)
+class Dedup:
+    """Cross-object anti-repeat sets used by build_candidates to drop a candidate that is the
+    SAME real-world thing as one already narrated (id dedup stays the separate `seen`):
+      * wikidata — same `wikidata=Q…` tag ⇒ definitely the same entity (node+way+relation of one
+        landmark), regardless of name/category;
+      * linear_names — a river/promenade split across OSM ways: dedup by NAME only (segments can
+        be far apart), for LINEAR_CATEGORIES;
+      * named — (norm_name, lat, lon) of narrated objects: a NON-linear same-named object within
+        `dedup_name_radius_m` is the same thing mapped twice (a park's label node + polygon)."""
+
+    linear_names: frozenset[str] = frozenset()
+    wikidata: frozenset[str] = frozenset()
+    named: tuple[tuple[str, float, float], ...] = ()
+
+    def blocks(self, place: Place) -> bool:
+        """True if `place` duplicates an already-narrated entity and should be dropped."""
+        qid = (place.tags or {}).get("wikidata")
+        if qid and qid in self.wikidata:
+            return True
+        nm = _norm_name(place.name)
+        if not nm:
+            return False
+        if place.category in LINEAR_CATEGORIES:
+            return nm in self.linear_names
+        r = settings.dedup_name_radius_m
+        return any(
+            nm == n and haversine_m(place.location, GeoPoint(lat=la, lon=lo)) <= r
+            for n, la, lo in self.named
+        )
 
 GAZE_CONE_DEG = 35.0  # narrower cone: only fire for what's clearly ahead, not off to the side
 _GAZE_BOOST_HIGH = 1.5
@@ -62,22 +96,17 @@ def build_candidates(
     places: Iterable[Place],
     radius_m: float,
     seen: Iterable[str] = (),
-    seen_linear_names: Iterable[str] = (),
+    dedup: Dedup | None = None,
 ) -> list[Candidate]:
     seen_ids = set(seen)
-    # Names of already-narrated LINEAR features (river/canal/promenade). A river split across
-    # several OSM ways would otherwise be told once per segment — dedup those by name so the
-    # SAME river isn't re-narrated when the walker crosses onto the next segment.
-    seen_linear = {_norm_name(n) for n in seen_linear_names if _norm_name(n)}
     candidates: list[Candidate] = []
     for place in places:
         if place.id in seen_ids:
             continue
-        if (
-            place.category in LINEAR_CATEGORIES
-            and _norm_name(place.name) in seen_linear
-        ):
-            continue  # another segment of a linear feature already narrated under this name
+        # Drop a candidate that's the SAME real-world thing as one already narrated (same
+        # wikidata QID / a linear segment / a same-named object right next to a narrated one).
+        if dedup is not None and dedup.blocks(place):
+            continue
         # For a polygon/line, measure to the whole shape from the LIVE position (0 when
         # inside) and take direction from the true nearest edge point — not a stale
         # snapped vertex (B1). A point object stays a plain haversine to its location.

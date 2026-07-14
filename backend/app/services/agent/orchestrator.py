@@ -39,7 +39,7 @@ from app.services.agent.walklog import (
 from app.services.geo.categories import LINEAR_CATEGORIES
 from app.services.geo.discovery import Discovery
 from app.services.geo.geocoder import Geocoder
-from app.services.geo.ranking import _norm_name, build_candidates
+from app.services.geo.ranking import Dedup, _norm_name, build_candidates
 from app.services.llm.client import as_background
 from app.services.metrics import GUIDE
 from app.services.state.store import StateStore
@@ -158,6 +158,17 @@ def merge_patch(base: ControlPatch, patch: ControlPatch) -> ControlPatch:
     )
 
 
+def _dedup(st) -> Dedup:
+    """Cross-object anti-repeat set from session state — fed to build_candidates so a duplicate
+    OSM object of an already-narrated real-world thing is dropped (wikidata / linear name /
+    same name nearby). See ranking.Dedup."""
+    return Dedup(
+        linear_names=frozenset(_norm_name(n) for n in st.seen_linear_names),
+        wikidata=frozenset(st.seen_wikidata),
+        named=tuple((n, la, lo) for n, la, lo in st.seen_named),
+    )
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -233,7 +244,7 @@ class Orchestrator:
         st = await self.store.load(session_id)
         cands = build_candidates(
             position, heading, inv.places, settings.narrate_radius_m, st.seen_place_ids,
-            st.seen_linear_names,
+            _dedup(st),
         )
         if not cands:
             return None
@@ -302,7 +313,7 @@ class Orchestrator:
             return await self._finish(st, State.IDLE, "silence")
         cands = build_candidates(
             st.position, st.heading, [place], settings.weave_radius_m, st.seen_place_ids,
-            st.seen_linear_names,
+            _dedup(st),
         )
         if not cands:
             return await self._finish(st, State.IDLE, "silence")
@@ -412,12 +423,11 @@ class Orchestrator:
             # deadline so a slow/blocked Overpass can't stall the tick for minutes.
             discover = (
                 self.discovery.discover_inventory(
-                    session_id, position, heading, st.seen_place_ids, st.seen_linear_names
+                    session_id, position, heading, st.seen_place_ids, _dedup(st)
                 )
                 if settings.inventory_enabled
                 else self.discovery.discover_adaptive(
-                    position, heading, st.seen_place_ids, settings.default_radius_m,
-                    st.seen_linear_names,
+                    position, heading, st.seen_place_ids, settings.default_radius_m, _dedup(st)
                 )
             )
             result = await asyncio.wait_for(discover, timeout=_DISCOVERY_DEADLINE_S)
@@ -675,11 +685,18 @@ class Orchestrator:
         switching = bool(st.last_place_id and out.place.id != st.last_place_id)
         st.narration_history = (st.narration_history + [out.text])[-_HISTORY_CAP:]
         st.seen_place_ids = (st.seen_place_ids + [out.place.id])[-_SEEN_CAP:]
-        # Remember linear features (river/promenade) by NAME too, so the next OSM way-segment
-        # of the same river isn't narrated again as a fresh object (the "Чура twice" bug).
-        if out.place.category in LINEAR_CATEGORIES and _norm_name(out.place.name):
-            st.seen_linear_names = (
-                st.seen_linear_names + [_norm_name(out.place.name)]
+        # Cross-object anti-repeat: remember the narrated ENTITY so a duplicate OSM object of the
+        # same real-world thing isn't narrated again (see ranking.Dedup): a linear feature by name
+        # (the "Чура twice" bug), its wikidata QID, and its name+location (same-named nearby dupes).
+        nm = _norm_name(out.place.name)
+        if out.place.category in LINEAR_CATEGORIES and nm:
+            st.seen_linear_names = (st.seen_linear_names + [nm])[-_SEEN_CAP:]
+        qid = (out.place.tags or {}).get("wikidata")
+        if qid:
+            st.seen_wikidata = (st.seen_wikidata + [qid])[-_SEEN_CAP:]
+        if nm:
+            st.seen_named = (
+                st.seen_named + [(nm, out.place.location.lat, out.place.location.lon)]
             )[-_SEEN_CAP:]
         st.last_place_id = out.place.id
         st.last_place = out.place

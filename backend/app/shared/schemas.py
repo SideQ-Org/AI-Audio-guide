@@ -304,9 +304,14 @@ class SessionState(BaseModel):
     pace: Pace = Pace.SLOW
     address: Address = Field(default_factory=Address)
     seen_place_ids: list[str] = Field(default_factory=list)
-    # Normalized names of narrated LINEAR features (river/canal/promenade) — so a river split
-    # across several OSM way-segments isn't re-narrated per segment (dedup by name, not id).
+    # Cross-object anti-repeat, beyond id dedup (seen_place_ids). Together they stop the SAME
+    # real-world thing (mapped as several OSM objects) being narrated twice:
+    #  * linear features (river/promenade) by NAME (segments can be far apart);
+    #  * same `wikidata=Q…` = the same entity (a landmark mapped as node+way+relation);
+    #  * a same-named object within dedup_name_radius_m of a narrated one (a park's label+polygon).
     seen_linear_names: list[str] = Field(default_factory=list)
+    seen_wikidata: list[str] = Field(default_factory=list)
+    seen_named: list[tuple[str, float, float]] = Field(default_factory=list)  # (name, lat, lon)
     narration_history: list[str] = Field(default_factory=list)
     conversation: list[str] = Field(default_factory=list)
     control_patch: ControlPatch = Field(default_factory=ControlPatch)
