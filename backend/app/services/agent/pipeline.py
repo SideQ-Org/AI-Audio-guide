@@ -40,7 +40,13 @@ from app.shared.schemas import (
 from .director import find_callback
 from .languages import passing_mention
 from .name_localizer import NameLocalizer
-from .narrator import Narrator, split_card, split_hook, split_sentences
+from .narrator import (
+    Narrator,
+    split_card,
+    split_hook,
+    split_sentences,
+    strip_factless_history,
+)
 from .scorer import Scorer
 from .significance import at_least, significance_from_weight, tags_have_wiki
 from .walklog import clip, get_logger
@@ -411,6 +417,13 @@ class TextPipeline:
                 passed=passed, in_view=in_view, lang=lang, nothing_new=not candidates,
                 callback=callback, lookahead=lookahead,
             )
+        # Anti-fabrication backstop: with NO verified facts, any history/date/creation claim the
+        # model slipped in is invented (the "детсад «Ивушка» появился в те годы…" case). Strip
+        # those sentences, keep the naming/visible ones. Applies to the cached pre-gen too (it may
+        # have been warmed with cold facts). If this empties a notable/ambient object, the floor
+        # below still names it deterministically; a plain LOW object correctly falls to silence.
+        if text and not chosen.facts_available:
+            text = strip_factless_history(text, lang)
         # Object photo for the card (Wikipedia thumbnail captured during enrichment); None for
         # non-wiki objects. Read fresh per place — not cached with the narration (id-keyed).
         image = self.enricher.image_for(chosen.place.id)

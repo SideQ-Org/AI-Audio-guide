@@ -5,8 +5,10 @@ opener is gone). See narrator.txt / area.txt + languages._GREETING_TAILS."""
 from app.services.agent.languages import (
     _GREETING_TAILS,
     greeting,
+    opener_repeats,
     recent_openers,
 )
+from app.services.agent.narrator import strip_factless_history
 from app.services.agent.prompts import build_narrator_user
 from app.shared.schemas import (
     GeoPoint,
@@ -59,6 +61,38 @@ def test_greeting_tail_pool_is_wide_and_destaled():
 def test_greeting_varies_across_calls():
     seen = {greeting("ru", place="Тверская", hour=10) for _ in range(40)}
     assert len(seen) >= 4  # random tail => many distinct openers, not one stale line
+
+
+def test_opener_repeats_detects_same_start():
+    """The commit-time guard that drops a (usually pre-generated) beat which reopens the same
+    way as a recent line — the "Вот и сейчас, если присмотреться…" ×2 case."""
+    hist = ["Вот и сейчас, если присмотреться, можно заметить старую водокачку у дороги."]
+    assert opener_repeats(
+        "Вот и сейчас, если присмотреться, можно заметить, как изменился район.", hist, "ru")
+    assert not opener_repeats("Совсем рядом тянется тихая набережная.", hist, "ru")
+    assert not opener_repeats("что угодно", [], "ru")  # empty history -> never repeats
+
+
+def test_strip_factless_history_removes_invention_keeps_naming():
+    """The Ивушка fix: with NO facts, invented history/creation sentences are stripped, but the
+    plain naming/observation sentences survive."""
+    text = ("Справа от тебя как раз проходит детский сад «Ивушка». "
+            "Как и многие сады, он появился в те годы, когда город застраивался под нужды учёных. "
+            "Здесь тихо и зелено.")
+    out = strip_factless_history(text, "ru")
+    assert "Ивушка" in out                       # naming kept
+    assert "появил" not in out and "застраива" not in out  # invented history dropped
+    assert "тихо" in out                         # neutral present observation kept
+
+
+def test_strip_factless_history_drops_year_sentences_and_is_ru_only():
+    assert "1936" not in strip_factless_history(
+        "Тут старое здание. Его построили в 1936 году.", "ru")
+    # No markers -> unchanged; other languages are a no-op (handled by the prompt ban).
+    plain = "Справа небольшой сквер. Тут спокойно."
+    assert strip_factless_history(plain, "ru") == plain
+    en = "It was built in 1936 for the scientists."
+    assert strip_factless_history(en, "en") == en
 
 
 def test_build_narrator_user_carries_avoid_openers():

@@ -473,6 +473,26 @@ def test_cascade_city_allowed_without_facts_but_never_street():
     asyncio.run(run())
 
 
+def test_narrate_reach_tight_for_low_factless_full_for_notable():
+    """The Ивушка distance fix: a LOW-significance, fact-less object only counts as 'passing'
+    within the tight bubble; a notable or fact-bearing one keeps the full narrate bubble."""
+    from app.services.agent.orchestrator import Orchestrator
+    from app.shared.schemas import Candidate, GazeConfidence
+
+    def cand(weight, facts):
+        return Candidate(
+            place=_place("x", "X", "kindergarten"), distance_m=40.0, type_weight=weight,
+            in_gaze_cone=False, gaze_confidence=GazeConfidence.LOW, facts_available=facts,
+        )
+
+    # LOW weight + no facts -> tight bubble (48 m Ивушка would no longer fire)
+    assert Orchestrator._narrate_reach_m(cand(0.3, False)) == settings.narrate_radius_low_m
+    # same LOW object but WITH facts -> full bubble (worth a passing mention)
+    assert Orchestrator._narrate_reach_m(cand(0.3, True)) == settings.narrate_radius_m
+    # MEDIUM+ object -> full bubble even without facts
+    assert Orchestrator._narrate_reach_m(cand(0.6, False)) == settings.narrate_radius_m
+
+
 def test_cityless_fallback_capped_then_rearmed_by_object():
     """The fact-less city fallback fabricates fresh (non-repeating) specifics every tick, so
     is_repeat can't stop it (8 invented monologues down 1-я Советская). It is hard-capped at

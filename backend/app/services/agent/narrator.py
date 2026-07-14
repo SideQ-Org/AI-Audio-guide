@@ -189,6 +189,39 @@ def _strip_attributions(text: str, language: str) -> str:
     return " ".join(kept).strip() if len(kept) != len(sents) else text
 
 
+# Fabrication tells for a FACT-LESS object: with no verified facts, any claim about history,
+# creation, dates or events is invented (the "детсад «Ивушка» появился в те годы, когда город
+# застраивался под нужды учёных" case — LOW, facts=False). We strip such sentences from object
+# narration when facts are empty, keeping the safe naming/visible part. RU only for now (the
+# prod language); the prompt ban covers the rest. A backstop over the prompt (cf. attributions).
+_FACTLESS_HISTORY_MARKERS: dict[str, tuple[str, ...]] = {
+    "ru": (
+        "появил", "постро", "возвел", "возвед", "основа", "открыл", "открыт", "заложен",
+        "воздвиг", "соорудил", "застраива", "застро", "в те годы", "в тот период",
+        "в прошлом веке", "века", "веке", "столети", "в году", "советск", "довоенн",
+        "послевоенн", "дореволюц", "испыт", "эксперимент", "изначально", "первоначально",
+        "в старину", "в былые", "когда-то здесь", "тогда ещё",
+    ),
+}
+_YEAR_RE = re.compile(r"\b(1[5-9]\d\d|20\d\d)\b")
+
+
+def strip_factless_history(text: str, language: str) -> str:
+    """Drop sentences that assert history / creation / dates / events from an object narration
+    that has NO verified facts — such claims are fabricated. Keeps the naming/visible sentences
+    (which carry no such marker). Returns the trimmed text (possibly ''). RU only; other
+    languages rely on the prompt ban."""
+    markers = _FACTLESS_HISTORY_MARKERS.get((language or "").split("-")[0].lower())
+    if not markers or not text:
+        return text
+    sents = _sentences(text)
+    kept = [
+        s for s in sents
+        if not _YEAR_RE.search(s) and not any(m in s.lower() for m in markers)
+    ]
+    return " ".join(kept).strip() if len(kept) != len(sents) else text
+
+
 def split_hook(text: str, language: str = "ru") -> tuple[str, str | None]:
     """Split the trailing `HOOK: ...` baton off the narration and clean the spoken part.
     Returns (spoken, hook). No HOOK -> (cleaned_text, None).

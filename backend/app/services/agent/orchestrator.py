@@ -28,7 +28,11 @@ from app.services.agent.companion import Companion
 from app.services.agent.director import atomize_facts, find_lookahead, find_revisit
 from app.services.agent.narrator import split_hook
 from app.services.agent.pipeline import TextPipeline
-from app.services.agent.significance import significance_from_weight, tags_have_wiki
+from app.services.agent.significance import (
+    at_least,
+    significance_from_weight,
+    tags_have_wiki,
+)
 from app.services.agent.walklog import (
     CURRENT_SID,
     clip,
@@ -195,6 +199,20 @@ class Orchestrator:
     @classmethod
     def _visible_rank(cls, c: Candidate) -> float:
         return c.distance_m * (cls._VISIBLE_BONUS if c.in_gaze_cone else 1.0)
+
+    @staticmethod
+    def _narrate_reach_m(c: Candidate) -> float:
+        """Effective passing-bubble radius for a candidate. A LOW-significance, fact-less
+        object (a plain kindergarten / shop) only counts as "passing" when you're genuinely
+        beside it (narrate_radius_low_m) — not 48 m away, which reads as "over there" and, with
+        no facts, tempts the model to invent history. Notable (MEDIUM+) or fact-bearing objects
+        keep the full narrate_radius_m."""
+        sig = significance_from_weight(
+            c.type_weight, c.facts_available, has_wiki=tags_have_wiki(c.place.tags)
+        )
+        if not c.facts_available and not at_least(sig, Significance.MEDIUM):
+            return settings.narrate_radius_low_m
+        return settings.narrate_radius_m
 
     # -- narration hot-path ------------------------------------------------- #
     @staticmethod
@@ -466,7 +484,7 @@ class Orchestrator:
         # story spine (city/district/street) carries the tour — no far-object
         # fallback, so the guide talks about the district, not about objects across
         # the city.
-        near = [c for c in result.candidates if c.distance_m <= settings.narrate_radius_m]
+        near = [c for c in result.candidates if c.distance_m <= self._narrate_reach_m(c)]
         # Prefer what the user can SEE ahead (in the gaze cone) over something beside/
         # behind them — "говори о том, что вижу и прохожу" (B2/P6). A soft bonus, not a
         # hard group, so a much closer object still wins (you don't skip the thing right
@@ -988,6 +1006,13 @@ class Orchestrator:
             # The street/district beat repeated an earlier one verbatim — the dominant
             # "повторял факты про улицы" symptom. Drop it; the cascade descends a level.
             log.info("suppress-repeat area topic=%r", topic)
+            GUIDE.suppress_repeat()
+            return ""
+        if text and lang.opener_repeats(text, st.memory.narrations, st.language):
+            # Same OPENING as a recent line ("Вот и сейчас, если присмотреться…" ×2). Common
+            # with a pre-generated beat built before the colliding line committed, so its
+            # AVOID_OPENERS couldn't have seen it. Drop it; the cascade/live path re-forms.
+            log.info("suppress-opener-repeat area topic=%r", topic)
             GUIDE.suppress_repeat()
             return ""
         if text:

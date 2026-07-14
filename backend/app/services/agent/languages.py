@@ -296,6 +296,22 @@ def recent_openers(history: list[str], code: str | None, *, k: int = 6,
     return out[-k:]
 
 
+def _opener_key(text: str, words: int = _OPENER_WORDS) -> str:
+    """The lowercased first-`words`-word fragment of a line — its 'way of starting'."""
+    return " ".join(text.strip().split()[:words]).strip(_OPENER_STRIP).lower()
+
+
+def opener_repeats(text: str, history: list[str], code: str | None, *, k: int = 6) -> bool:
+    """True if `text` STARTS the same way as one of the last `k` narration lines — the
+    "Вот и сейчас, если присмотреться…" ×2 case. Used at commit time to drop a beat (often a
+    pre-generated one, built before the colliding line was committed, so AVOID_OPENERS in its
+    prompt couldn't have seen it) that would reopen identically."""
+    key = _opener_key(text)
+    if not key:
+        return False
+    return key in {o.lower() for o in recent_openers(history, code, k=k)}
+
+
 # A warm, instant opener spoken the moment a walk starts — no LLM, so the tour begins
 # immediately while discovery/geocode/the area intro load in the background (the area
 # intro, which names the place properly, follows on the next tick).

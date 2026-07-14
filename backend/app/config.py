@@ -283,6 +283,13 @@ class Settings(BaseSettings):
     # bubble ("не отработал триггер мимо которого я прошёл"). Objects between this and
     # reach_radius_m are still reachable via the gaze-gated reach fallback.
     narrate_radius_m: float = 55.0
+    # A TIGHTER passing bubble for a LOW-significance, fact-less object (a plain
+    # kindergarten / shop / office): 55 m is "right here" for a park or monument, but for a
+    # nondescript building it reads as "way over there" — the guide said "справа как раз
+    # проходишь детский сад «Ивушка»" at 48 m, which felt too far (and, with no facts, it then
+    # invented history). Such objects only fire the bubble when you're genuinely beside them.
+    # Notable (MEDIUM+) or fact-bearing objects keep the full narrate_radius_m.
+    narrate_radius_low_m: float = 32.0
     # The reach fallback (gaze-gated) narrates an object AHEAD only within this radius —
     # much tighter than weave_radius_m so the guide doesn't announce a place 150-200 m
     # away ("triggered several houses off"). It fires only for what you're about to reach.
