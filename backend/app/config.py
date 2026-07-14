@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+import json
+from typing import Annotated
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
+
+    @field_validator("openai_fallback_models", mode="before")
+    @classmethod
+    def _parse_model_list(cls, v: object) -> object:
+        """Accept EITHER a comma-separated string (OPENAI_FALLBACK_MODELS=a,b) OR a JSON array
+        — a bare `a,b` would otherwise crash startup (pydantic-settings JSON-decodes list envs).
+        NoDecode on the field hands us the raw string here so we can split it ourselves."""
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return []
+            return json.loads(s) if s.startswith("[") else [
+                x.strip() for x in s.split(",") if x.strip()
+            ]
+        return v
 
     # Claude API
     anthropic_api_key: str = ""
@@ -31,6 +50,13 @@ class Settings(BaseSettings):
     openai_model_companion: str = ""
     openai_model_landmark: str = ""
     openai_model_enricher: str = ""
+    # OpenRouter server-side fallback: extra equivalent models tried (in order) when the primary
+    # is unavailable/throttled (429) — sent as the `models` array so routing happens in ONE call,
+    # no client round-trip. Keep these SAME-TIER (a different provider of the same/comparable
+    # model) so quality doesn't drop. Empty => feature off (single `model`). Comma-separated OR a
+    # JSON array (see _parse_model_list), e.g.
+    #   OPENAI_FALLBACK_MODELS=deepseek/deepseek-chat,mistralai/mistral-large-2512
+    openai_fallback_models: Annotated[list[str], NoDecode] = []
     # PAID-tier model (feature: account tiers). Paid sessions use this on every role
     # instead of openai_model; empty => paid falls back to openai_model (tiers off).
     #   prod: google/gemini-3.5-flash   free stays deepseek/deepseek-chat
@@ -46,6 +72,21 @@ class Settings(BaseSettings):
     # Prompt caching (OpenRouter): mark the static CORE+ROLE system prefix with
     # cache_control and request cost/cached-token accounting. Off for LM Studio.
     openai_prompt_cache: bool = False
+    # Anti-429 (rate-limit) controls. All roles + STT + TTS share one OpenRouter key, so a
+    # busy walk (area beats + enrichment + prefetch) bursts requests and gets 429-throttled.
+    # `llm_max_concurrency` caps simultaneous chat-completion POSTs so we self-smooth under the
+    # provider's rate ceiling instead of hammering it (companion barge-in streaming is exempt —
+    # it stays the priority path). Retries honour the server's Retry-After; `llm_max_retries`
+    # (429/5xx/timeout) rides out a throttling window; backoff gets jitter to de-sync a herd.
+    llm_max_concurrency: int = 4
+    # Background LLM work (narration pre-gen, area-beat prefetch, enrichment prefetch) is capped
+    # to this many concurrent calls IN ADDITION to the global cap — so under throttling the LIVE
+    # narrator/scorer/companion path keeps slots and never starves behind pre-warming. Should be
+    # < llm_max_concurrency to leave live headroom. 0 disables the two-tier split.
+    llm_bg_concurrency: int = 2
+    llm_max_retries: int = 4
+    llm_retry_backoff_s: float = 1.5  # base 429 backoff (×attempt, +jitter); capped by Retry-After
+    llm_retry_after_cap_s: float = 20.0  # never wait longer than this even if the header says so
 
     # Narration sampling (variety — A1). Higher temperature + frequency/presence
     # penalties fight templated openings and repeated connectors ("а ещё…", same

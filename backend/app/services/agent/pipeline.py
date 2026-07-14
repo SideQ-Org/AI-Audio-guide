@@ -18,7 +18,7 @@ from app.services.enrichment.enricher import (
     attach_facts,
     prefetch,
 )
-from app.services.llm.client import SESSION_TIER
+from app.services.llm.client import SESSION_TIER, as_background
 from app.services.metrics import GUIDE
 from app.shared.schemas import (
     Address,
@@ -165,12 +165,12 @@ class TextPipeline:
                 None,
             )
             if target is not None:
-                t2 = asyncio.ensure_future(self.warm_narration(
+                t2 = asyncio.ensure_future(as_background(self.warm_narration(
                     target, seen=seen, history=history or [], address=address,
                     heading=heading, pace=pace, preferences=preferences, language=lang,
                     theme=theme, told=told or [], next_hook=next_hook,
                     recall=recall, lookahead=lookahead,
-                ))
+                )))
                 self._warm_tasks.add(t2)
                 t2.add_done_callback(self._warm_tasks.discard)
 
@@ -186,7 +186,7 @@ class TextPipeline:
         addr = address or Address()
         ctx = ", ".join(p for p in (addr.city, addr.country) if p) or None
         task = asyncio.ensure_future(
-            prefetch(
+            as_background(prefetch(
                 ahead,
                 self.enricher,
                 self.cache,
@@ -194,7 +194,7 @@ class TextPipeline:
                 timeout_s=self.enrich_timeout_s,
                 context=ctx,
                 language=lang,
-            )
+            ))
         )
         self._warm_tasks.add(task)
         task.add_done_callback(self._warm_tasks.discard)
@@ -237,29 +237,35 @@ class TextPipeline:
             return
         addr = address or Address()
         ctx = ", ".join(p for p in (addr.city, addr.country) if p) or None
-        await prefetch(
-            [chosen], self.enricher, self.cache, top_k=1,
-            timeout_s=self.enrich_timeout_s, context=ctx, language=lang,
-        )
-        enriched = attach_facts([chosen], self.cache, lang)[0]
-        place = enriched.place.model_copy(update={"name": await self.name_localizer.localize(
-            enriched.place.tags, enriched.place.name, lang)})
-        sig = significance_from_weight(
-            enriched.type_weight, enriched.facts_available,
-            has_wiki=tags_have_wiki(enriched.place.tags),
-        )
-        # Pre-gen runs minutes before arrival — a baked "справа" would be wrong once the
-        # user turns or passes (violating "never a wrong left/right"). Generate side-neutral
-        # and not-yet-visible, so the blurb uses neutral framing; the live step() re-derives
-        # the true side/in_view when a fresh candidate arrives with facts already cached.
-        neutral = enriched.model_copy(update={"side": None})
-        callback = find_callback(recall or [], place) if recall else None
-        text, hook = await self._render_object(
-            neutral, place, sig, addr=addr, heading=heading, pace=pace, switching=False,
-            theme=theme, told=told, next_hook=next_hook, history=history,
-            preferences=preferences, passing=True, in_view=False,
-            lang=lang, nothing_new=False, callback=callback, lookahead=lookahead,
-        )
+        try:
+            await prefetch(
+                [chosen], self.enricher, self.cache, top_k=1,
+                timeout_s=self.enrich_timeout_s, context=ctx, language=lang,
+            )
+            enriched = attach_facts([chosen], self.cache, lang)[0]
+            place = enriched.place.model_copy(update={"name": await self.name_localizer.localize(
+                enriched.place.tags, enriched.place.name, lang)})
+            sig = significance_from_weight(
+                enriched.type_weight, enriched.facts_available,
+                has_wiki=tags_have_wiki(enriched.place.tags),
+            )
+            # Pre-gen runs minutes before arrival — a baked "справа" would be wrong once the
+            # user turns or passes (violating "never a wrong left/right"). Generate side-neutral
+            # and not-yet-visible, so the blurb uses neutral framing; the live step() re-derives
+            # the true side/in_view when a fresh candidate arrives with facts already cached.
+            neutral = enriched.model_copy(update={"side": None})
+            callback = find_callback(recall or [], place) if recall else None
+            text, hook = await self._render_object(
+                neutral, place, sig, addr=addr, heading=heading, pace=pace, switching=False,
+                theme=theme, told=told, next_hook=next_hook, history=history,
+                preferences=preferences, passing=True, in_view=False,
+                lang=lang, nothing_new=False, callback=callback, lookahead=lookahead,
+            )
+        except Exception as e:  # noqa: BLE001 — prefetch is an optimization, never fatal
+            # A failed pre-gen (e.g. a 429 under rate-limit) just means step() renders live on
+            # arrival — swallow it so the fire-and-forget task doesn't dump a traceback per miss.
+            log.debug("warm_narration skipped for %r: %r", chosen.place.id, e)
+            return
         if text:
             self._narr_cache[key] = (text, hook)
             if len(self._narr_cache) > 32:  # bound: keep the freshest handful
@@ -272,10 +278,10 @@ class TextPipeline:
         async recovery), so the enriched narration is delivered later by elaborate() / a re-open
         WITHOUT blocking this tick on a ~9 s web search."""
         task = asyncio.ensure_future(
-            prefetch(
+            as_background(prefetch(
                 candidates, self.enricher, self.cache,
                 top_k=1, timeout_s=self.enrich_timeout_s, context=ctx, language=lang,
-            )
+            ))
         )
         self._warm_tasks.add(task)
         task.add_done_callback(self._warm_tasks.discard)

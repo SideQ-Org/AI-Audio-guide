@@ -39,7 +39,7 @@ from app.services.agent.orchestrator import (
 )
 from app.services.agent.walklog import get_logger
 from app.services.billing.api import router as billing_router
-from app.services.llm.client import METER, SESSION_ID, SESSION_TIER
+from app.services.llm.client import METER, SESSION_ID, SESSION_TIER, as_background
 from app.services.metrics import GUIDE
 from app.services.stt.stt import STTClient, build_stt
 from app.shared.geo_math import haversine_m
@@ -713,7 +713,7 @@ class _SessionRuntime:
             return
         if self._area_prefetch is not None and not self._area_prefetch.done():
             return  # one already in flight
-        self._area_prefetch = asyncio.ensure_future(self._prefetch_area())
+        self._area_prefetch = asyncio.ensure_future(as_background(self._prefetch_area()))
 
     async def _prefetch_area(self) -> tuple[str, str, str | None] | None:
         SESSION_ID.set(self.session_id)  # attribute LLM cost to this session

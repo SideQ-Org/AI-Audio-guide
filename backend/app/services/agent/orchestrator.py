@@ -39,6 +39,7 @@ from app.services.agent.walklog import (
 from app.services.geo.discovery import Discovery
 from app.services.geo.geocoder import Geocoder
 from app.services.geo.ranking import build_candidates
+from app.services.llm.client import as_background
 from app.services.metrics import GUIDE
 from app.services.state.store import StateStore
 from app.shared.geo_math import haversine_m
@@ -273,7 +274,7 @@ class Orchestrator:
             except Exception:  # noqa: BLE001 — a warm failure must never disturb the tour
                 pass
 
-        task = asyncio.ensure_future(_run())
+        task = asyncio.ensure_future(as_background(_run()))
         self._bg.add(task)
         task.add_done_callback(self._bg.discard)
 

@@ -13,8 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 from contextvars import ContextVar
 from typing import Any, Protocol
 
@@ -32,6 +34,72 @@ SESSION_ID: ContextVar[str] = ContextVar("aiguide_session", default="")
 SESSION_TIER: ContextVar[str] = ContextVar("aiguide_tier", default="free")
 
 from .router import Role, model_for  # noqa: E402 — after the ContextVar defs above
+
+# Global cap on simultaneous chat-completion POSTs (all roles, all client instances) so a
+# bursty walk self-smooths under the provider's rate ceiling instead of tripping 429s. Lazy so
+# it binds to the running loop; shared module-wide (the router builds a client per role).
+_llm_sem: asyncio.Semaphore | None = None
+_llm_bg_sem: asyncio.Semaphore | None = None
+
+# True inside a background LLM call (narration pre-gen, area/enrichment prefetch). Such calls
+# ALSO hold a slot in the smaller background semaphore, so under throttling they're bounded and
+# the LIVE narrator/scorer/companion path keeps global slots (never starves behind pre-warming).
+LLM_BACKGROUND: ContextVar[bool] = ContextVar("aiguide_llm_bg", default=False)
+
+
+def _get_llm_sem() -> asyncio.Semaphore:
+    global _llm_sem
+    if _llm_sem is None:
+        _llm_sem = asyncio.Semaphore(max(1, settings.llm_max_concurrency))
+    return _llm_sem
+
+
+def _get_bg_sem() -> asyncio.Semaphore:
+    global _llm_bg_sem
+    if _llm_bg_sem is None:
+        _llm_bg_sem = asyncio.Semaphore(max(1, settings.llm_bg_concurrency))
+    return _llm_bg_sem
+
+
+def as_background(coro):
+    """Wrap a coroutine so every LLM call it makes is marked background (lower-priority
+    sub-budget). Set inside the coroutine so it lands in the spawned task's own context copy —
+    use at fire-and-forget launch sites: ensure_future(as_background(warm_narration(...)))."""
+
+    async def _runner():
+        LLM_BACKGROUND.set(True)
+        return await coro
+
+    return _runner()
+
+
+def _retry_after_seconds(resp: Any, fallback: float) -> float:
+    """How long to wait before retrying a 429/503, honouring the server's hint. Prefer the
+    standard `Retry-After` header (seconds), then OpenRouter's `X-RateLimit-Reset` (epoch ms),
+    else the caller's computed backoff. Capped so a bad header can't stall a walk."""
+    hdr = resp.headers if resp is not None else {}
+    ra = hdr.get("retry-after")
+    if ra:
+        try:
+            return min(float(ra), settings.llm_retry_after_cap_s)
+        except ValueError:
+            pass
+    reset = hdr.get("x-ratelimit-reset")
+    if reset:
+        try:
+            # epoch milliseconds -> seconds from now (best-effort; clamp to a sane window)
+            secs = float(reset) / 1000.0 - _now_s()
+            if 0 < secs < settings.llm_retry_after_cap_s:
+                return secs
+        except ValueError:
+            pass
+    return min(fallback, settings.llm_retry_after_cap_s)
+
+
+def _now_s() -> float:
+    import time
+
+    return time.time()
 
 
 def _prices_for(model: str) -> tuple[float, float]:
@@ -376,6 +444,13 @@ class OpenAICompatLLM:
         reasoning = self._reasoning_for(role)
         if reasoning:
             payload["reasoning"] = reasoning
+        if settings.openai_fallback_models:
+            # OpenRouter tries these in order server-side when the primary is throttled/down —
+            # one call, no client round-trip. Keep same-tier so quality holds. The primary leads;
+            # drop it from the tail so a shared free/paid fallback list can't list it twice.
+            payload["models"] = [
+                model, *[m for m in settings.openai_fallback_models if m != model]
+            ]
         if settings.openai_prompt_cache:
             # ask OpenRouter to return cost + cached-token accounting in usage
             payload["usage"] = {"include": True}
@@ -389,27 +464,49 @@ class OpenAICompatLLM:
 
     async def _post_with_retry(self, payload: dict, role: Role) -> dict:
         """POST with retries on a transient failure (timeout / 5xx / 429). A 429 (rate limit —
-        common now that STT+TTS+LLM share one OpenRouter key) clears with backoff, so it IS
-        retried; other 4xx (region block / bad request) is not — that just wastes a call."""
-        attempts = 3
+        common as STT+TTS+LLM share one OpenRouter key) clears with backoff, so it IS retried;
+        other 4xx (region block / bad request) is not — that just wastes a call.
+
+        The POST holds a slot in the global concurrency semaphore (self-smooths bursts under the
+        provider's rate ceiling); the slot is RELEASED during inter-attempt backoff so a sleeping
+        retry never starves a fresh call. A 429/503 honours the server's Retry-After header, so a
+        retry lands right after the limit resets rather than hammering blindly; the fallback
+        backoff carries jitter to de-sync a herd of calls that all got throttled together."""
+        attempts = max(1, settings.llm_max_retries)
+        sem = _get_llm_sem()
+        # A background call ALSO holds a slot in the smaller bg semaphore for its WHOLE life
+        # (incl. retries/backoff), so under throttling background work queues on the bg budget
+        # while the live path keeps the global slots.
+        async with AsyncExitStack() as stack:
+            if settings.llm_bg_concurrency > 0 and LLM_BACKGROUND.get():
+                await stack.enter_async_context(_get_bg_sem())
+            return await self._retry_loop(payload, role, sem, attempts)
+
+    async def _retry_loop(
+        self, payload: dict, role: Role, sem: asyncio.Semaphore, attempts: int
+    ) -> dict:
         for attempt in range(attempts):
             try:
-                resp = await self._client.post(self._url, json=payload)
-                resp.raise_for_status()
-                return resp.json()
+                async with sem:  # cap concurrent in-flight POSTs; freed during backoff below
+                    resp = await self._client.post(self._url, json=payload)
+                    resp.raise_for_status()
+                    return resp.json()
             except (httpx.TimeoutException, httpx.TransportError) as e:
                 if attempt == attempts - 1:
                     raise
                 _log.warning("LLM %s transient error, retrying: %s", role, e)
-                await asyncio.sleep(0.6 * (attempt + 1))
+                await asyncio.sleep(0.6 * (attempt + 1) + random.uniform(0, 0.4))
             except httpx.HTTPStatusError as e:
                 code = e.response.status_code
                 retryable = code >= 500 or code == 429
                 if attempt == attempts - 1 or not retryable:
                     raise  # 4xx (except 429) won't get better on retry
                 _log.warning("LLM %s %s, retrying", role, code)
-                # 429 = rate limit; back off harder than a 5xx blip.
-                await asyncio.sleep((1.5 if code == 429 else 0.6) * (attempt + 1))
+                base = settings.llm_retry_backoff_s if code == 429 else 0.6
+                wait = _retry_after_seconds(
+                    e.response, base * (attempt + 1) + random.uniform(0, 0.5)
+                )
+                await asyncio.sleep(wait)
         raise RuntimeError("unreachable")
 
     @staticmethod
