@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     model_scorer: str = "claude-haiku-4-5"
     model_narrator: str = "claude-sonnet-4-6"
     model_companion: str = "claude-sonnet-4-6"
+    model_answer_fast: str = ""  # Anthropic-path fast-tier model (usually the OpenAI path is used)
     model_landmark: str = "claude-opus-4-8"
     model_enricher: str = "claude-haiku-4-5"
 
@@ -50,6 +51,13 @@ class Settings(BaseSettings):
     openai_model_companion: str = ""
     openai_model_landmark: str = ""
     openai_model_enricher: str = ""
+    # Two-tier answer: a FAST model gives ONE instant sentence, then the Companion (strong tier)
+    # continues/deepens without repeating it (see docs/MODEL_LATENCY_RESEARCH.md). Empty model or
+    # answer_two_tier=False => single-tier (Companion only, the old behaviour). Reachable pick from
+    # the geoblocked region: a Groq-routed open model via OpenRouter (TTFT <1s), pinned with
+    # openai_provider_answer_fast (comma-separated OpenRouter provider order, e.g. "Groq,Cerebras").
+    openai_model_answer_fast: str = ""
+    openai_provider_answer_fast: str = ""  # OpenRouter provider order for the fast tier (optional)
     # OpenRouter server-side fallback: extra equivalent models tried (in order) when the primary
     # is unavailable/throttled (429) — sent as the `models` array so routing happens in ONE call,
     # no client round-trip. Keep these SAME-TIER (a different provider of the same/comparable
@@ -166,6 +174,9 @@ class Settings(BaseSettings):
     # backend (stream_text). Off => the single-shot JSON reply path. On this path tour-steering
     # (skip shops / shorter / mute) is derived heuristically from the question, not the LLM.
     companion_stream: bool = True
+    # Two-tier barge-in answer: fast model speaks one instant sentence, then the Companion
+    # continues without repeating it. Needs a fast model configured (openai_model_answer_fast).
+    answer_two_tier: bool = True
     # After a voice question or an un-pause, speak a short "back to the tour" bridge before
     # continuing (languages.tour_bridge) — returning to the SAME topic if it's still relevant
     # (we're still near where we paused) or leading into fresh nearby material if we've walked
@@ -175,6 +186,10 @@ class Settings(BaseSettings):
     resume_bridge: bool = True
     resume_bridge_obj_radius_m: float = 70.0
     resume_bridge_area_radius_m: float = 180.0
+    # Speak a short neutral "let me think" filler the instant a question arrives, so the STT
+    # (~3 s) + answer LLM (~2 s) gap after the user asks isn't dead silence. The real answer
+    # follows as the next reply. Off => answer with no filler (the old behaviour).
+    thinking_filler: bool = True
     # Anti-repeat: two objects with the SAME name within this distance are treated as the same
     # real-world thing mapped twice (a park's node label + polygon), so the second isn't narrated
     # again. Small on purpose — genuinely different same-named places are farther apart. (Rivers/
@@ -206,6 +221,11 @@ class Settings(BaseSettings):
     # before you arrive — narration on approach is then instant, not a cold web search.
     enrich_lookahead_k: int = 4
     enrich_timeout_s: float = 9.0  # web search needs ~5-7s; give it time so facts arrive
+    # When ELABORATING (going deeper on one object across follow-ups) and the cached facts are
+    # thinner than this, fetch a bit MORE (angle-focused web search) so the deeper angles have
+    # fresh material instead of running dry after a detail or two ("будет больше фактов искать").
+    # Once per object; 0 disables the deepen fetch. Latency lands during a lull, so it's OK.
+    elaborate_deepen_below_chars: int = 260
     # Wiki facts are always free; this only gates the PAID web-search fallback for
     # places WITHOUT a wiki article: search them iff type_weight >= this. 0 = full
     # quality (search every non-wiki place); raise it to trade some facts for cost.
@@ -273,6 +293,11 @@ class Settings(BaseSettings):
     # window no longer means being narrated — that's gated by the much smaller
     # narrate_radius_m bubble below (the "passing by" trigger).
     weave_radius_m: float = 300.0
+    # How far the walker may move and still RESUME a line we paused to weave an object in.
+    # Tighter than weave_radius_m (300): a resumed line whose remaining sentences would land
+    # only after the walker has moved a couple hundred metres reads as orphaned ("keeps talking
+    # but I forgot what about"). Past this, drop the parked line instead of resuming it stale.
+    resume_weave_radius_m: float = 120.0
     # The "passing by" bubble: an object is narrated ONLY when the user comes this
     # close to it. Outside the bubble the area story spine (city/district/street)
     # carries the tour — the guide doesn't narrate objects scattered across the
@@ -337,16 +362,29 @@ class Settings(BaseSettings):
     # first log setup, so set them via env before the process starts.
     walk_log_verbose: bool = True
     walk_log_dir: str = ""
-    # GPS outlier gate (main.py `accept_fix`): drop a fix that implies an impossible
-    # speed vs. the last accepted one — a phone in dense/suburban cover spikes 100-200 m
-    # and snaps back, which otherwise narrates objects near a phantom position and churns
-    # topics. A jump under gps_jump_floor_m is always kept (normal jitter); after
-    # gps_max_rejects consecutive drops we accept anyway (recover from a real relocation
-    # / GPS re-lock). Set gps_max_speed_mps<=0 to disable. 15 m/s ≈ 54 km/h — well above
-    # walking/running, below a teleport.
+    # GPS outlier / spoofing gate (main.py `accept_fix`): drop a fix that implies an impossible
+    # speed vs. the last TRUSTED one — a phone in dense/suburban cover (central Moscow jammers)
+    # spikes/drifts hundreds of metres to the city centre, which otherwise narrates objects near
+    # a phantom position ("10 min about Sheremetyevo"). A jump under gps_jump_floor_m is always
+    # kept (normal jitter). Recovery is TIME-based, not tick-based: while a far fix is held the
+    # allowed window grows on its own (the implied speed = dist/dt falls as dt since the trusted
+    # point grows), so a CONSISTENT relocation is accepted once it's plausible; gps_max_hold_s is
+    # the hard backstop after which any persistent far fix is accepted (a real teleport / GPS
+    # re-lock must eventually win). A count-based cap (the old gps_max_rejects) followed a
+    # sustained spoof after just ~3 fixes — the phone sends dozens during a multi-minute jam.
+    # Set gps_max_speed_mps<=0 to disable. 15 m/s ≈ 54 km/h — above walking, below a teleport.
     gps_max_speed_mps: float = 15.0
     gps_jump_floor_m: float = 40.0
-    gps_max_rejects: int = 3
+    gps_max_hold_s: float = 120.0  # hold an implausible fix at most this long, then recover
+    gps_max_rejects: int = 3  # legacy/unused (kept so old .env files load); see gps_max_hold_s
+    # Inertial dead-reckoning while a spoof is held: instead of FREEZING the tour at the last
+    # trusted point during a multi-minute jam, advance the anchor along the heading at a walking
+    # pace so it roughly tracks where the walker actually is. ONLY when the heading is trustworthy
+    # (gaze_confidence=high — a compass / steady course, which GPS spoofing does NOT corrupt), and
+    # capped at gps_dr_max_m so a bad heading can't run away. Off => hold at the trusted point.
+    gps_dead_reckon: bool = True
+    gps_dr_speed_mps: float = 1.2  # assumed walking pace while dead-reckoning
+    gps_dr_max_m: float = 150.0    # cap on total dead-reckoned displacement from the trusted point
     # Trust X-Forwarded-For for the client IP. OFF by default (dev/direct exposure, where
     # XFF is client-spoofable). Set TRUE in prod where Caddy terminates TLS and appends
     # the real peer — then per-IP limits see real addresses, not the proxy's.

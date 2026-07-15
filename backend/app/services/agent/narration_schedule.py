@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-from app.services.agent.languages import resume_connective
+from app.services.agent.languages import resume_connective, resume_reanchor
 from app.services.agent.narrator import split_sentences
 from app.services.agent.orchestrator import OrchestratorOutput
 from app.services.agent.significance import rank
@@ -91,9 +91,16 @@ class NarrationScheduler:
             ):
                 continue  # walked too far — don't resume a line about somewhere behind us
             if add_connective and not item.resumed:
-                item.sentences.insert(
-                    item.cursor, resume_connective(self.language, self._resume_i)
-                )
+                # For an OBJECT line, NAME it on the way back ("вернёмся к <name>…") so the
+                # listener re-grasps the thread — the resumed sentences may land a while later.
+                # Area lines keep the generic connective (nothing specific to re-anchor to).
+                if item.is_object and item.out.place_name:
+                    connective = resume_reanchor(
+                        self.language, item.out.place_name, self._resume_i
+                    )
+                else:
+                    connective = resume_connective(self.language, self._resume_i)
+                item.sentences.insert(item.cursor, connective)
                 self._resume_i += 1
                 item.resumed = True
             self.current = item

@@ -17,6 +17,7 @@ def _heuristic_app(stt_text: str = "А когда его построили?"):
     settings.stt_backend = "mock"
     settings.stt_mock_text = stt_text
     settings.session_greeting = False  # test the narration flow without the one-time opener
+    settings.thinking_filler = False  # the instant "let me think" filler has its own test
     main_module._orchestrator = build_orchestrator()
     main_module._stt = build_stt()
     return TestClient(main_module.app)
@@ -64,6 +65,27 @@ def test_ws_audio_transcribes_then_replies():
         reply = _recv(ws)
         assert reply["type"] == "reply"
         assert reply["text"]
+
+
+def test_ws_thinking_filler_precedes_answer():
+    # With the filler on, a question is met INSTANTLY with a short neutral "let me think" reply,
+    # before the real answer — so the user isn't left in silence during STT + the answer LLM.
+    client = _heuristic_app(stt_text="пропускай магазины")
+    settings.thinking_filler = True
+    try:
+        with client.websocket_connect("/ws") as ws:
+            ws.send_json({"type": "utterance", "text": "а что это за здание?"})
+            # Two replies now arrive: the instant filler, then the real answer.
+            replies = []
+            for _ in range(8):
+                m = _recv(ws)
+                if m["type"] == "reply" and m["text"]:
+                    replies.append(m["text"])
+                if len(replies) >= 2:
+                    break
+            assert len(replies) >= 2  # filler + answer
+    finally:
+        settings.thinking_filler = False
 
 
 def test_ws_audio_empty_transcript_errors():

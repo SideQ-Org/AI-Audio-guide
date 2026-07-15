@@ -84,3 +84,21 @@ def test_passing_mention_localized_and_side_keyed():
     # an unknown language falls back to English
     assert lang.passing_mention("xx", "Tower", "ahead") == \
         lang.passing_mention("en", "Tower", "ahead")
+
+
+def test_thinking_filler_rotates_and_localizes():
+    # Rotates through the per-language pool so a repeat question doesn't get the same filler.
+    ru0 = lang.thinking_filler("ru", 0)
+    ru1 = lang.thinking_filler("ru", 1)
+    assert ru0 and ru1 and ru0 != ru1
+    # Wraps by modulo.
+    assert lang.thinking_filler("ru", 0) == lang.thinking_filler("ru", 4)
+    # Unknown language falls back to English.
+    assert lang.thinking_filler("xx", 0) == lang.thinking_filler("en", 0)
+
+
+def test_resume_reanchor_names_object_or_falls_back():
+    named = lang.resume_reanchor("ru", "усадьба Пашкова", 0)
+    assert "усадьба Пашкова" in named
+    # Empty name -> the generic connective (nothing to re-anchor to).
+    assert lang.resume_reanchor("ru", "", 0) == lang.resume_connective("ru", 0)

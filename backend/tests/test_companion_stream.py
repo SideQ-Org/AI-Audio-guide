@@ -103,3 +103,73 @@ def test_answer_streaming_actually_sends_reply_frames() -> None:
     assert any(o.get("type") == "state" and o.get("state") == "answering" for o in sent)
     # the whole answer is finalized into session state
     assert finalized is not None and finalized[0] == "Первое предложение. Второе."
+
+
+# --- two-tier answer: fast one-sentence tier + strong continuation ------------------------- #
+
+
+class _FakeCompleteLLM:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    async def complete_text(self, role, system, user, *, max_tokens=1024) -> str:
+        return self._text
+
+
+def test_respond_fast_returns_one_sentence() -> None:
+    comp = LLMCompanion(_FakeCompleteLLM("Это Казанский собор. И ещё что-то лишнее."))
+
+    async def run():
+        return await comp.respond_fast(CompanionInput(user_message="что это?"))
+
+    assert asyncio.run(run()) == "Это Казанский собор."  # clamped to one sentence
+
+
+def test_respond_fast_silence_is_empty() -> None:
+    comp = LLMCompanion(_FakeCompleteLLM("[SILENCE]"))
+
+    async def run():
+        return await comp.respond_fast(CompanionInput(user_message="?"))
+
+    assert asyncio.run(run()) == ""
+
+
+class _FakeTwoTierCompanion:
+    """Fast tier gives one sentence; strong tier continues and must receive ALREADY_SAID."""
+
+    def __init__(self) -> None:
+        self.seen_already_said: str | None = "UNSET"
+
+    async def respond_fast(self, inp) -> str:
+        return "Это старая усадьба."
+
+    async def respond_stream(self, inp) -> AsyncIterator[str]:
+        self.seen_already_said = inp.already_said
+        for s in ["Её построил купец.", "Позже тут был театр."]:
+            yield s
+
+
+def test_two_tier_fast_sentence_then_continuation(monkeypatch) -> None:
+    import app.main as m
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "answer_two_tier", True)
+    monkeypatch.setattr(settings, "openai_model_answer_fast", "fast/model")
+
+    async def run():
+        orch = _FakeOrch()
+        orch.companion = _FakeTwoTierCompanion()
+        ws = _FakeWS()
+        rt = m._SessionRuntime(ws, orch, "sid")
+        handled = await rt._answer_streaming("что это за дом?")
+        return handled, ws.sent, orch.finalized, orch.companion.seen_already_said
+
+    handled, sent, finalized, already = asyncio.run(run())
+    replies = [o["text"] for o in sent if o.get("type") == "reply"]
+    assert handled is True
+    # the FAST sentence is spoken first, then the strong tier's continuation
+    assert replies == ["Это старая усадьба.", "Её построил купец.", "Позже тут был театр."]
+    # the strong tier was told what was already said, so it can continue without repeating
+    assert already == "Это старая усадьба."
+    # the finalized reply includes the fast sentence + the continuation
+    assert finalized[0] == "Это старая усадьба. Её построил купец. Позже тут был театр."

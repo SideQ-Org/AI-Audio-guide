@@ -98,15 +98,32 @@ def system_for_planner(language: str) -> str:
 _COMPANION_STREAM_BLOCK = (
     "Пользователь прервал экскурсию вопросом. Ответь как тот же гид — тот же голос, стиль,\n"
     "память; после ответа экскурсия продолжится сама.\n\n"
-    "ВХОД: USER_MESSAGE, CONTEXT (окружение, LAST_NARRATION, ADDRESS), HISTORY.\n\n"
+    "ВХОД: USER_MESSAGE, CONTEXT (окружение, LAST_NARRATION, ADDRESS), HISTORY, ALREADY_SAID.\n\n"
     "ПОВЕДЕНИЕ:\n"
     "• Сначала ответь на сам вопрос по существу, опираясь на CONTEXT (last_narration) и факты.\n"
     "  Ответ есть в контексте — дай его, не отделывайся «давай продолжим прогулку».\n"
+    "• ALREADY_SAID — если не пусто, первое предложение ответа УЖЕ произнесено (быстрый ответ).\n"
+    "  ПРОДОЛЖИ с него: добавь новые детали, НЕ повторяй и НЕ перефразируй его. Начни СРАЗУ с\n"
+    "  нового (без «итак», без повтора темы). Добавить нечего — верни ровно [SILENCE].\n"
     "• Коротко и по делу, для аудио, на языке пользователя. Действуют все правила CORE:\n"
     "  только проверенные факты, без выдумок/клише; не знаешь — скажи честно, без «я ИИ».\n"
     "• Заканчивай ответ УТВЕРЖДЕНИЕМ, а не встречным вопросом или предложением действий.\n\n"
     "ВЫХОД: только сам текст ответа — обычной речью, без JSON, разметки и служебных полей."
 )
+
+# Tier-1 fast answer: ONE short sentence, instant. Kept minimal so a tiny fast model nails it.
+_ANSWER_FAST_BLOCK = (
+    "Пользователь прервал экскурсию вопросом. Ты — тот же гид. Дай МГНОВЕННЫЙ ответ — РОВНО\n"
+    "ОДНО короткое предложение, по существу вопроса, опираясь на CONTEXT (LAST_NARRATION) и\n"
+    "факты. Обычная речь, язык пользователя. Только правда: не знаешь — так и скажи одним\n"
+    "предложением, без выдумок и без «я ИИ». Никаких вступлений, списков, разметки — одно\n"
+    "предложение и всё (продолжение придёт следом отдельно)."
+)
+
+
+def system_for_answer_fast(language: str) -> str:
+    """CORE(language) + the tier-1 fast one-sentence answer block."""
+    return f"{_core(language)}\n\n---\n\n{_ANSWER_FAST_BLOCK}"
 
 
 def system_for_companion_stream(language: str) -> str:
@@ -170,11 +187,24 @@ def build_narrator_user(inp: NarratorInput) -> str:
                 {"name": inp.callback.name, "type": inp.callback.category}
                 if inp.callback else None
             ),
-            # A notable object coming up ahead — you MAY tease it (see LOOKAHEAD), sparingly.
+            # A notable object coming up ahead — you MAY tease it (see LOOKAHEAD), sparingly, and
+            # say WHERE it is: side (left/right only when present, else ahead) + rounded distance.
             "LOOKAHEAD": (
-                {"name": inp.lookahead.name, "type": inp.lookahead.category}
+                {
+                    "name": inp.lookahead.name,
+                    "type": inp.lookahead.category,
+                    # left/right only when the facing is trustworthy; else None/ahead
+                    "side": inp.lookahead.side,
+                    "distance_m": (
+                        round(inp.lookahead.distance_m / 10) * 10
+                        if inp.lookahead.distance_m is not None else None
+                    ),
+                }
                 if inp.lookahead else None
             ),
+            # When elaborating, the facet to take THIS follow-up from (see ПРОДОЛЖЕНИЕ block) so
+            # deeper details come from a different angle, not a reworded repeat. Null on first tell.
+            "ELABORATE_ANGLE": inp.elaborate_angle if inp.flags.elaborate else None,
             # The last 1-2 SUBSTANTIVE paragraphs — CONTINUE this voice/thread (A1), a
             # POSITIVE continuity signal, distinct from HISTORY (the do-not-repeat ledger).
             # Terse bridges/floor lines are filtered so we don't seed on "Пройдём дальше."
@@ -235,5 +265,8 @@ def build_companion_user(inp: CompanionInput) -> str:
             "LAST_NARRATION": inp.last_narration,
             "ADDRESS": inp.address.model_dump(exclude_none=True),
             "HISTORY": inp.history,
+            # The fast tier already spoke this first sentence — CONTINUE from it, add NEW detail,
+            # do NOT repeat/rephrase it; nothing to add -> [SILENCE]. Null on a single-tier answer.
+            "ALREADY_SAID": inp.already_said,
         }
     )

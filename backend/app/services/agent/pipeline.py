@@ -37,7 +37,7 @@ from app.shared.schemas import (
     Significance,
 )
 
-from .director import find_callback
+from .director import atomize_facts, find_callback
 from .languages import passing_mention
 from .name_localizer import NameLocalizer
 from .narrator import (
@@ -130,6 +130,14 @@ class TextPipeline:
         # the greeting (while it's being spoken) so the first area intro is instant, not a cold
         # planner LLM wait after the opener. Read+popped by the orchestrator's _maybe_area_intro.
         self._plan_cache: dict[str, object] = {}
+        # Pre-fetched area FACTS: (area_key, lang) -> facts ("" for a warmed-but-dry area). Warmed
+        # in the background at area entry so the FIRST area beat doesn't block ~9 s on web search
+        # (the "медленно переключался между блоками" gap). Peeked by the orchestrator's _area_line.
+        # Keyed by language too: facts are written in the session language (pipeline is shared).
+        self._area_facts_cache: dict[tuple[str, str], str] = {}
+        # Objects we've already run the elaborate "deepen" fetch for (one extra web search per
+        # object, keyed (place_id, lang)), so going deeper doesn't re-hit the web every follow-up.
+        self._deepened: set[tuple[str, str]] = set()
 
     def warm_ahead(
         self,
@@ -491,9 +499,10 @@ class TextPipeline:
         pace: Pace = Pace.SLOW,
         language: str | None = None,
         revisit: bool = False,
+        angle: str | None = None,
     ) -> str:
-        """Tell MORE about an already-covered place (nothing new nearby). Reuses
-        cached facts; the narrator adds a fresh detail, avoiding HISTORY."""
+        """Tell MORE about an already-covered place (nothing new nearby). Reuses cached facts;
+        the narrator adds a fresh detail from a given `angle` (facet), avoiding HISTORY."""
         lang = language or self.language
         # Re-localize in case the language changed since this place was first narrated
         # (idempotent when it didn't); cached, so a repeat is free.
@@ -520,6 +529,16 @@ class TextPipeline:
         # invented dates/experiments in both the step and the elaborate follow-up).
         if not facts:
             return ""
+        # Going deeper: if the cached facts are thin, fetch a bit MORE (angle-focused) so the
+        # deeper angles have fresh material instead of running dry. Once per object; best-effort.
+        if (
+            angle
+            and settings.elaborate_deepen_below_chars > 0
+            and len(facts) < settings.elaborate_deepen_below_chars
+            and (place.id, lang) not in self._deepened
+        ):
+            self._deepened.add((place.id, lang))
+            facts = await self._deepen_facts(place, facts, angle=angle, addr=addr, lang=lang)
         raw = await self.narrator.narrate(
             NarratorInput(
                 place=place,
@@ -531,11 +550,40 @@ class TextPipeline:
                 context=_context(addr),
                 history=history,
                 flags=NarratorFlags(elaborate=True, revisit=revisit),
+                elaborate_angle=angle,
                 language=lang,
             )
         )
         text, _ = split_hook(raw, lang)  # elaborate stays on the same place; drop the hook
         return text
+
+    async def _deepen_facts(
+        self, place: Place, existing: str, *, angle: str, addr: Address, lang: str
+    ) -> str:
+        """Fetch a bit MORE about `place`, biased toward `angle`, and MERGE any genuinely-new
+        sentences into the cached facts (so a deeper follow-up isn't a reworded repeat). Returns
+        the merged facts (or `existing` unchanged on timeout / nothing new). Enricher gating still
+        applies (wiki free; paid web fallback only), so free tier just keeps its wiki facts."""
+        # Bias the query toward the not-yet-covered facet via the context hint; wiki ignores it
+        # (same lead -> deduped away), the paid web search uses it to surface fresh detail.
+        ctx = ", ".join(
+            p for p in (addr.city, addr.country, f"focus: {angle}") if p
+        ) or None
+        try:
+            more = await asyncio.wait_for(
+                self.enricher.facts_for(place, ctx, lang), timeout=self.enrich_timeout_s
+            )
+        except Exception:  # noqa: BLE001 — deepen is best-effort (incl. timeout); keep existing
+            return existing
+        if not more:
+            return existing
+        have = existing.lower()
+        fresh = [s for s in atomize_facts(more) if s.lower() not in have]
+        if not fresh:
+            return existing
+        merged = (existing.rstrip() + " " + " ".join(fresh)).strip()
+        self.cache.put(place.id, merged, lang)  # so later ticks reuse the richer facts
+        return merged
 
     async def narrate_area(
         self,
@@ -640,3 +688,25 @@ class TextPipeline:
         if not cleaned or _is_no_data(cleaned):
             return None
         return cleaned
+
+    async def warm_area_facts(
+        self, area_key: str | None, address: Address, point: GeoPoint | None,
+        *, timeout_s: float | None = None, language: str | None = None,
+    ) -> None:
+        """Background: fetch the area facts once and cache them by `area_key`, so the FIRST area
+        beat serves them instantly instead of blocking ~9 s on web search. Caches "" for a dry
+        area too (so it isn't refetched). Best-effort — safe to call repeatedly / concurrently."""
+        if not area_key:
+            return
+        key = (area_key, language or self.language)
+        if key in self._area_facts_cache:
+            return
+        facts = await self.enrich_area(address, point, timeout_s=timeout_s, language=language)
+        self._area_facts_cache.setdefault(key, facts or "")
+
+    def take_area_facts(self, area_key: str | None, language: str | None = None) -> str | None:
+        """Peek warmed area facts for (`area_key`, language) — a string ("" = warmed-but-dry), or
+        None when not warmed yet (the caller then fetches inline). Peek, not pop: serves beats."""
+        if not area_key:
+            return None
+        return self._area_facts_cache.get((area_key, language or self.language))

@@ -466,6 +466,53 @@ def resume_connective(code: str | None, index: int = 0) -> str:
     return variants[index % len(variants)]
 
 
+# Like `resume_connective`, but for a paused OBJECT line: it NAMES the object so the listener
+# re-grasps the thread after a weave-in ("вернёмся к <name>…") instead of a generic "на чём я
+# остановилась" that dangles when the resumed sentences come minutes later. {name} = the object.
+_RESUME_REANCHORS: dict[str, tuple[str, ...]] = {
+    "ru": ("Так вот, вернёмся к {name}.", "Возвращаясь к {name}…", "Ну а {name} — продолжим."),
+    "en": ("So, back to {name}.", "Returning to {name}…", "Anyway — {name}, where we were."),
+    "es": ("Bueno, volvamos a {name}.", "Volviendo a {name}…", "En fin, sigamos con {name}."),
+    "fr": ("Bref, revenons à {name}.", "Pour en revenir à {name}…", "Bon, continuons avec {name}."),
+    "de": ("Also, zurück zu {name}.", "Um auf {name} zurückzukommen…", "Gut, weiter mit {name}."),
+    "it": ("Dunque, torniamo a {name}.", "Tornando a {name}…", "Bene, avanti con {name}."),
+    "pt": ("Então, voltando a {name}.", "Voltando a {name}…", "Enfim, continuando com {name}."),
+    "zh": ("好，我们回到{name}。", "说回{name}……", "好，接着说{name}。"),
+}
+
+
+def resume_reanchor(code: str | None, name: str, index: int = 0) -> str:
+    """Spoken before resuming a paused OBJECT line — names the object so the thread is clear.
+    Falls back to the generic connective when `name` is empty."""
+    name = (name or "").strip()
+    if not name:
+        return resume_connective(code, index)
+    variants = _RESUME_REANCHORS.get(normalize(code), _RESUME_REANCHORS[FALLBACK])
+    return variants[index % len(variants)].format(name=name)
+
+
+# Spoken THE INSTANT a question is received, before the answer is computed (STT ~3 s + LLM ~2 s
+# would otherwise be dead silence after the user asks). A short, neutral "let me think" that buys
+# time and feels alive; the real answer follows as the next reply. Rotated so it doesn't repeat.
+_THINKING_FILLERS: dict[str, tuple[str, ...]] = {
+    "ru": ("Так, секунду…", "Хороший вопрос, дай подумать…", "Сейчас, минутку…", "Так-так…"),
+    "en": ("Let me think…", "Good question, one sec…", "Hmm, just a moment…", "Right, let's see…"),
+    "es": ("Déjame pensar…", "Buena pregunta, un segundo…", "Mmm, un momento…", "A ver…"),
+    "fr": ("Voyons voir…", "Bonne question, un instant…", "Hmm, une seconde…", "Alors…"),
+    "de": ("Moment, lass mich überlegen…", "Gute Frage, einen Augenblick…", "Hmm, kurz…", "Also…"),
+    "it": ("Fammi pensare…", "Bella domanda, un attimo…", "Mmm, un momento…", "Allora…"),
+    "pt": ("Deixa eu pensar…", "Boa pergunta, um segundo…", "Hmm, um momento…", "Então…"),
+    "zh": ("让我想想……", "好问题，稍等……", "嗯，稍等一下……", "这个嘛……"),
+}
+
+
+def thinking_filler(code: str | None, index: int = 0) -> str:
+    """A short neutral phrase spoken immediately when a question arrives, to fill the STT+LLM gap
+    before the real answer. `index` rotates the per-language variants so it doesn't repeat."""
+    variants = _THINKING_FILLERS.get(normalize(code), _THINKING_FILLERS[FALLBACK])
+    return variants[index % len(variants)]
+
+
 # Higher-level "let's get back to the tour" bridges spoken after a voice question OR after
 # un-pausing — one short line before the guide picks the tour back up. Two moods, chosen by
 # whether what we paused is still relevant (see NarrationScheduler): `continue` returns to the
@@ -757,6 +804,17 @@ _BEAT_MODES = ("observation", "history", "human", "sensory", "transition")
 def beat_mode(index: int) -> str:
     """The rhetorical angle for the area beat at this rotation index."""
     return _BEAT_MODES[index % len(_BEAT_MODES)]
+
+
+# Facets to go DEEPER on ONE object across successive elaborate follow-ups, so each covers a
+# DIFFERENT side of it instead of rewording the same fact. English steering; the beat is written
+# in {language} by core.txt. Still bounded (_MAX_ELABORATE) and still [SILENCE] when no new fact.
+_ELABORATE_ANGLES = ("history", "people", "function", "detail", "context")
+
+
+def elaborate_angle(index: int) -> str:
+    """The facet to approach an object from on this elaborate follow-up (rotated by index)."""
+    return _ELABORATE_ANGLES[index % len(_ELABORATE_ANGLES)]
 
 
 def solicit_markers(code: str | None) -> tuple[str, ...]:

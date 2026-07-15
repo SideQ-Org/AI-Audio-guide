@@ -17,6 +17,7 @@ class Role(StrEnum):
     COMPANION = "companion"
     LANDMARK = "landmark"  # high-end narrator for LANDMARK-significance places
     ENRICHER = "enricher"  # web-search fact gathering (off the hot-path)
+    ANSWER_FAST = "answer_fast"  # tier-1 instant one-sentence answer (two-tier barge-in)
 
 
 def model_for(role: Role) -> str:
@@ -26,4 +27,5 @@ def model_for(role: Role) -> str:
         Role.COMPANION: settings.model_companion,
         Role.LANDMARK: settings.model_landmark,
         Role.ENRICHER: settings.model_enricher,
+        Role.ANSWER_FAST: settings.model_answer_fast or settings.model_companion,
     }[role]

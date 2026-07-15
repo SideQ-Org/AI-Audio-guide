@@ -34,6 +34,17 @@ def angle_diff(a: float, b: float) -> float:
     return d if d <= 180.0 else 360.0 - d
 
 
+def offset_point(origin: GeoPoint, bearing_deg_: float, dist_m: float) -> GeoPoint:
+    """The point `dist_m` metres from `origin` along `bearing_deg_` (clockwise from north).
+    Used for GPS dead-reckoning: advance the anchor along a trusted heading during a jam."""
+    ang = radians(bearing_deg_)
+    la1, lo1 = radians(origin.lat), radians(origin.lon)
+    dr = dist_m / EARTH_RADIUS_M
+    la2 = asin(sin(la1) * cos(dr) + cos(la1) * sin(dr) * cos(ang))
+    lo2 = lo1 + atan2(sin(ang) * sin(dr) * cos(la1), cos(dr) - sin(la1) * sin(la2))
+    return GeoPoint(lat=degrees(la2), lon=degrees(lo2))
+
+
 def _point_in_ring(p: GeoPoint, ring: list[list[float]]) -> bool:
     """Ray-casting point-in-polygon for a ring given as [[lat, lon], ...] (lon=x, lat=y)."""
     inside = False

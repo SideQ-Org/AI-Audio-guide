@@ -29,7 +29,12 @@ from app.services.accounts.auth import verify_token
 from app.services.accounts.community_api import router as community_router
 from app.services.agent.companion import heuristic_patch
 from app.services.agent.factory import build_orchestrator
-from app.services.agent.languages import normalize, stt_unclear, tour_bridge
+from app.services.agent.languages import (
+    normalize,
+    stt_unclear,
+    thinking_filler,
+    tour_bridge,
+)
 from app.services.agent.narration_schedule import NarrationScheduler
 from app.services.agent.orchestrator import (
     Orchestrator,
@@ -48,8 +53,9 @@ from app.services.llm.client import (
 )
 from app.services.metrics import GUIDE
 from app.services.stt.stt import STTClient, build_stt
-from app.shared.geo_math import haversine_m
+from app.shared.geo_math import haversine_m, offset_point
 from app.shared.schemas import (
+    GazeConfidence,
     GeoPoint,
     Heading,
     Pace,
@@ -438,6 +444,7 @@ class _SessionRuntime:
         # rotates the phrase so it doesn't repeat.
         self._break_bridge = False
         self._bridge_i = 0
+        self._filler_i = 0  # rotates the instant "thinking" filler spoken while an answer computes
         self.resume = asyncio.Event()  # a barge-in finished; producer may continue
         self.barging = False
         self.listening = False  # mic open: hold the producer so it can't talk over the user
@@ -475,12 +482,13 @@ class _SessionRuntime:
         return True
 
     def accept_fix(self, fix: GeoPoint) -> bool:
-        """GPS outlier gate. Reject a fix that implies an impossible speed since the last
-        accepted one — a teleport-and-snap-back spike that would move the tour to a
-        phantom position. A small jump (< jump floor) is always accepted so normal
-        jitter isn't gated; after a run of rejects we accept anyway so a genuine
-        relocation or GPS re-lock recovers instead of freezing on a stale point. Gate
-        off => `gps_max_speed_mps <= 0`."""
+        """GPS outlier / spoofing gate. Reject a fix that implies an impossible speed since the
+        last TRUSTED one — a teleport (jammer drift to the city centre) that would move the tour
+        to a phantom position. A small jump (< jump floor) is always accepted so normal jitter
+        isn't gated. Recovery is TIME-based: because dt (time since the trusted point) grows while
+        we keep rejecting, a CONSISTENT relocation soon looks plausible (dist/dt <= max_speed) and
+        is accepted on its own; `gps_max_hold_s` is the hard backstop so a real teleport / GPS
+        re-lock still wins after that long. Gate off => `gps_max_speed_mps <= 0`."""
         max_speed = settings.gps_max_speed_mps
         now = time.monotonic()
         if max_speed <= 0 or self._fix_pos is None:
@@ -491,15 +499,43 @@ class _SessionRuntime:
         implausible = (
             dist > settings.gps_jump_floor_m and dist / dt > max_speed
         )
-        if implausible and self._gps_rejects < settings.gps_max_rejects:
+        # Hold an implausible fix only up to a TIME cap since the trusted point — NOT a fixed tick
+        # count: a phone spoofed for minutes sends dozens of fixes, so a count of 3 followed the
+        # phantom after ~3 s. Keep anchoring narration to the last trusted point until either the
+        # relocation becomes plausible (dt grew enough) or we've held gps_max_hold_s.
+        if implausible and dt < settings.gps_max_hold_s:
             self._gps_rejects += 1
             _walk.info(
-                "gps reject #%d: %.0fm in %.1fs (%.0f m/s > %.0f) -> drop fix",
+                "gps reject #%d: %.0fm in %.1fs (%.0f m/s > %.0f) held -> anchor to trusted point",
                 self._gps_rejects, dist, dt, dist / dt, max_speed,
             )
             return False
+        if self._gps_rejects:
+            _walk.info(
+                "gps recover: accepting fix after %d rejects (%.0fm, %.1fs held)",
+                self._gps_rejects, dist, dt,
+            )
         self._fix_pos, self._fix_t, self._gps_rejects = fix, now, 0
         return True
+
+    def dead_reckoned(self, heading: Heading) -> GeoPoint | None:
+        """During a HELD spoof, estimate where the walker actually is by advancing the last
+        trusted point along a TRUSTWORTHY heading at a walking pace (capped) — so a long jam
+        tracks the walk instead of freezing the tour at a stale point. None when we can't
+        dead-reckon (disabled / no trusted point / heading not trustworthy) => the caller keeps
+        the last trusted position. GPS spoofing does NOT corrupt a compass/steady-course heading,
+        which is why this is gated on gaze_confidence=high."""
+        if (
+            not settings.gps_dead_reckon
+            or self._fix_pos is None
+            or heading.gaze_confidence != GazeConfidence.HIGH
+        ):
+            return None
+        dt = max(time.monotonic() - self._fix_t, 0.0)
+        dist = min(settings.gps_dr_speed_mps * dt, settings.gps_dr_max_m)
+        if dist < 1.0:
+            return None
+        return offset_point(self._fix_pos, heading.direction_deg, dist)
 
     async def send_out(self, out: OrchestratorOutput) -> None:
         # Synthesize neural audio BEFORE taking the send lock — an ~sub-second HTTP call must
@@ -676,7 +712,7 @@ class _SessionRuntime:
         # 2) Speak the next sentence of the current line (never cut — it always finishes),
         #    else resume a paused line, else cover a deferred newcomer.
         frame = self.sched.next_frame()
-        if frame is None and self.sched.resume(self.live_position, settings.weave_radius_m):
+        if frame is None and self.sched.resume(self.live_position, settings.resume_weave_radius_m):
             _walk.info("resume: continuing a paused line")
             frame = self.sched.next_frame()
         if frame is None and self.deferred_object is not None:
@@ -872,6 +908,23 @@ class _SessionRuntime:
         if not settings.companion_stream or not hasattr(companion, "respond_stream"):
             return False
         st, cinp = await self.orch.prepare_utterance(self.session_id, text)
+        # Two-tier: a FAST model speaks ONE instant sentence, then the strong Companion continues
+        # from it (ALREADY_SAID) without repeating — so first audio lands in ~1 s. Only when a fast
+        # model is actually configured; otherwise single-tier (Companion only), unchanged.
+        fast_said = ""
+        two_tier = settings.answer_two_tier and bool(
+            settings.openai_model_answer_fast or settings.model_answer_fast
+        )
+        if two_tier and hasattr(companion, "respond_fast"):
+            try:
+                fast_said = await companion.respond_fast(cinp)
+            except Exception as e:  # noqa: BLE001 — degrade to the strong tier alone
+                _log.warning("fast-tier answer failed (%s): %r", self.session_id, e)
+                fast_said = ""
+            if fast_said:
+                await self.send_out(OrchestratorOutput(
+                    state=State.ANSWERING.value, kind="reply", text=fast_said))
+                cinp.already_said = fast_said  # strong tier continues without repeating it
         sentences: list[str] = []
         try:
             async for sent in companion.respond_stream(cinp):
@@ -880,11 +933,11 @@ class _SessionRuntime:
                     OrchestratorOutput(state=State.ANSWERING.value, kind="reply", text=sent)
                 )
         except Exception as e:  # noqa: BLE001 — degrade to the fallback / partial answer
-            if not sentences:
+            if not sentences and not fast_said:
                 _log.warning("companion stream failed pre-token (%s): %r", self.session_id, e)
                 return False  # nothing spoken yet -> safe to fall back to the JSON path
             _log.warning("companion stream cut mid-reply (%s): %r", self.session_id, e)
-        reply = " ".join(sentences).strip()
+        reply = " ".join(([fast_said] if fast_said else []) + sentences).strip()
         if not reply:
             return False
         await self.orch.finalize_utterance(st, text, reply, heuristic_patch(text))
@@ -904,6 +957,18 @@ class _SessionRuntime:
         # still relevant) instead of jump-cutting back into the middle of a topic.
         if settings.resume_bridge:
             self.sched.pause_current(self.live_position)
+        # Speak an instant "let me think" filler so the user isn't met with silence during STT
+        # (~3 s) + the answer LLM (~2 s). Best-effort; the real answer follows as the next reply.
+        if settings.thinking_filler:
+            try:
+                st0 = await self.orch.store.load(self.session_id)
+                await self.send_out(OrchestratorOutput(
+                    state=State.ANSWERING.value, kind="reply",
+                    text=thinking_filler(st0.language, self._filler_i),
+                ))
+                self._filler_i += 1
+            except Exception:  # noqa: BLE001 — a filler must never block the real answer
+                pass
         try:
             if kind == "audio":
                 a = WSAudioInput.model_validate(msg)
@@ -1073,7 +1138,17 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
         # would drive discovery/narration. While paused nothing generates, so keep the
         # raw fix for the breadcrumb track + the resume position.
         if not rt.paused and not rt.accept_fix(fix):
-            return  # GPS outlier — drop it (don't move the tour to a phantom position)
+            # Held as a spoof. Dead-reckon along a trustworthy heading so a long jam TRACKS the
+            # real walk instead of freezing; otherwise keep the last trusted position (narration
+            # keeps running there). Never let the phantom fix itself drive discovery.
+            heading = Heading(direction_deg=p.direction_deg, gaze_confidence=p.gaze_confidence)
+            dr = rt.dead_reckoned(heading)
+            if dr is not None:
+                rt.live_position = dr
+                rt.live_heading = heading
+                rt.live_pace = p.pace
+                rt.wake.set()
+            return
         rt.live_position = fix
         rt.live_heading = Heading(
             direction_deg=p.direction_deg, gaze_confidence=p.gaze_confidence

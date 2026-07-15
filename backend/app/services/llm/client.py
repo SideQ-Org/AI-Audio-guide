@@ -374,7 +374,7 @@ class OpenAICompatLLM:
         if (
             SESSION_TIER.get() == "paid"
             and settings.openai_model_paid
-            and role is not Role.COMPANION
+            and role not in (Role.COMPANION, Role.ANSWER_FAST)
         ):
             return settings.openai_model_paid
         override = {
@@ -383,11 +383,25 @@ class OpenAICompatLLM:
             Role.LANDMARK: settings.openai_model_landmark,
             Role.COMPANION: settings.openai_model_companion,
             Role.ENRICHER: settings.openai_model_enricher,
+            # Fast tier-1 answer: its own (fast, Groq-routed) model; falls back to the base model.
+            Role.ANSWER_FAST: settings.openai_model_answer_fast,
         }.get(role, "")
         model = override or self._default
         if not model:
             raise RuntimeError("No OpenAI-compatible model configured (set OPENAI_MODEL)")
         return model
+
+    @staticmethod
+    def _provider_for(role: Role) -> dict[str, Any] | None:
+        """OpenRouter provider routing for a role (None => let OpenRouter choose). Only the fast
+        tier pins a provider (e.g. Groq/Cerebras) so its <1s TTFT is guaranteed and it stays
+        reachable past the OpenAI/Google/Anthropic geoblock. Ignored by plain-OpenAI backends."""
+        if role is Role.ANSWER_FAST and settings.openai_provider_answer_fast:
+            raw = settings.openai_provider_answer_fast
+            order = [p.strip() for p in raw.split(",") if p.strip()]
+            if order:
+                return {"order": order}
+        return None
 
     # Roles where reasoning (on a reasoning-capable model) can be safely capped: the
     # narration roles (Narrator and Landmark) just write prose for an already-chosen
@@ -447,6 +461,9 @@ class OpenAICompatLLM:
         reasoning = self._reasoning_for(role)
         if reasoning:
             payload["reasoning"] = reasoning
+        provider = self._provider_for(role)
+        if provider:
+            payload["provider"] = provider
         if settings.openai_fallback_models:
             # OpenRouter tries these in order server-side when the primary is throttled/down —
             # one call, no client round-trip. Keep same-tier so quality holds. The primary leads;
@@ -577,6 +594,9 @@ class OpenAICompatLLM:
         reasoning = self._reasoning_for(role)
         if reasoning:
             payload["reasoning"] = reasoning
+        provider = self._provider_for(role)
+        if provider:
+            payload["provider"] = provider
         usage: dict[str, Any] | None = None
         try:
             async with self._client.stream("POST", self._url, json=payload) as resp:

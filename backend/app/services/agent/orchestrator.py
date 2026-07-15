@@ -50,6 +50,7 @@ from app.services.state.store import StateStore
 from app.shared.geo_math import haversine_m
 from app.shared.memory import ObjectMemo
 from app.shared.schemas import (
+    Address,
     Candidate,
     CompanionInput,
     ControlPatch,
@@ -72,10 +73,12 @@ _TOLD_CAP = 80  # cap the arc's covered-topics ledger
 _CONVO_CAP = 20
 _PATH_STEP_M = 12.0  # min spacing between stored breadcrumb points (walk-history route)
 _PATH_MAX_POINTS = 3000  # cap the stored path so a long walk stays bounded
-# Follow-ups per place when nothing new is nearby. Kept low: a couple of extra
-# details is enough — beyond that the guide starts mussing the same place, which
-# is exactly the "цепляет одну тему и мусолит её" complaint.
-_MAX_ELABORATE = 2
+# Follow-ups per place when nothing new is nearby. Each takes a DIFFERENT angle
+# (lang.elaborate_angle: history/people/function/detail/context) so the guide goes DEEPER
+# from a fresh side instead of mussing the same fact — the walker keeps learning about the
+# place until a new object arrives. Still bounded, and the Narrator returns [SILENCE] the
+# moment FACTS have nothing genuinely new, so a facts-thin place still stops quickly.
+_MAX_ELABORATE = 4
 # The gap-filler monologue is a city -> district -> street CASCADE: at each level the
 # guide tells atypical facts until that level runs out of NEW ones (the Narrator
 # returns [SILENCE]), then descends a level; after the street is exhausted it goes
@@ -305,6 +308,33 @@ class Orchestrator:
                     await self.pipeline.warm_plan(
                         key, addr, facts=None, theme_override=theme_override, language=language
                     )
+                    # Also warm the area FACTS so the first beat after the intro doesn't block.
+                    await self.pipeline.warm_area_facts(
+                        key, addr, position,
+                        timeout_s=settings.enrich_timeout_s, language=language,
+                    )
+            except Exception:  # noqa: BLE001 — a warm failure must never disturb the tour
+                pass
+
+        task = asyncio.ensure_future(as_background(_run()))
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
+    def _warm_area_facts_bg(
+        self, area_key: str | None, address: Address, point: GeoPoint | None, language: str
+    ) -> None:
+        """Non-blocking: warm the new area's facts (cached in the pipeline by area_key) so the
+        first beat there serves them instantly instead of blocking on web search. Read-only wrt
+        session state — writes only the pipeline's area-facts cache."""
+        if not area_key:
+            return
+
+        async def _run() -> None:
+            try:
+                await self.pipeline.warm_area_facts(
+                    area_key, address, point,
+                    timeout_s=settings.enrich_timeout_s, language=language,
+                )
             except Exception:  # noqa: BLE001 — a warm failure must never disturb the tour
                 pass
 
@@ -641,6 +671,8 @@ class Orchestrator:
             # fresh area => fresh story arc, but keep the user's chosen theme (if any)
             st.narrative_plan = NarrativePlan(theme_override=st.narrative_plan.theme_override)
             st.last_street = addr.street  # adopt silently; the area opener covers arrival
+            # Warm this new area's facts in the background so its first beat doesn't block ~9 s.
+            self._warm_area_facts_bg(new_key, addr, st.position, st.language)
         elif addr.street and addr.street != st.last_street and st.area_intro_done:
             # Same district, but the user just stepped onto a NEW street. Don't reset
             # the arc — weave a smooth transition into the running monologue via the
@@ -777,6 +809,7 @@ class Orchestrator:
                     heading=heading,
                     pace=pace,
                     language=st.language,
+                    angle=lang.elaborate_angle(st.elaboration_count),
                 )
             except Exception:
                 text = ""
@@ -870,14 +903,22 @@ class Orchestrator:
     # "go down a level". After the street is exhausted the caller bridges + goes quiet.
     async def _area_line(self, st, pace: Pace) -> str:
         plan = st.narrative_plan
-        # Fetch verified area facts once, up front (used to ground every beat).
+        # Fetch verified area facts once, up front (used to ground every beat). Prefer the
+        # background-warmed facts (from area entry) so the first beat doesn't block ~9 s on web
+        # search; fall back to an inline fetch only when the warm hasn't landed yet.
         if settings.area_enrich and st.area_facts is None:
-            facts = await self.pipeline.enrich_area(
-                st.address, st.position, timeout_s=settings.enrich_timeout_s,
-                language=st.language,
-            )
-            st.area_facts = facts or ""  # cache "" so we don't refetch every beat
-            log.info("area enrich key=%r -> %s", st.area_key, "facts" if facts else "empty")
+            warmed = self.pipeline.take_area_facts(st.area_key, st.language)
+            if warmed is not None:
+                st.area_facts = warmed
+                log.info("area enrich key=%r -> %s (warmed)",
+                         st.area_key, "facts" if warmed else "empty")
+            else:
+                facts = await self.pipeline.enrich_area(
+                    st.address, st.position, timeout_s=settings.enrich_timeout_s,
+                    language=st.language,
+                )
+                st.area_facts = facts or ""  # cache "" so we don't refetch every beat
+                log.info("area enrich key=%r -> %s", st.area_key, "facts" if facts else "empty")
 
         # (1)/(2) user focus, else the planned outline.
         focus = plan.pending_focus[0] if plan.pending_focus else None

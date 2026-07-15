@@ -156,11 +156,15 @@ class CallbackRef(BaseModel):
 
 
 class LookaheadRef(BaseModel):
-    """A notable object coming up ahead — lets the narrator tease it ('впереди — усадьба, к ней
-    вернёмся') so the tour reads as a forward-leaning story, not a stream of arrivals."""
+    """A notable object coming up ahead — lets the narrator tease it ('впереди справа, метрах в
+    ста — усадьба') so the tour reads as a forward-leaning story AND the walker knows where to
+    look. `distance_m`/`side` come from the candidate; `side` is left/right only when the facing
+    is trustworthy (else "ahead"/None), so the narrator never invents a direction."""
 
     name: str
     category: str = ""
+    distance_m: float | None = None
+    side: str | None = None
 
 
 class NarratorInput(BaseModel):
@@ -187,6 +191,10 @@ class NarratorInput(BaseModel):
     callback: CallbackRef | None = None
     # A notable object coming up ahead — the narrator may tease it so the tour leans forward.
     lookahead: LookaheadRef | None = None
+    # When elaborating (FLAGS.elaborate), the facet to approach the object from this time
+    # (history/people/function/detail/context) so successive follow-ups go DEEPER from a
+    # DIFFERENT angle instead of rewording the same fact. None on a normal first narration.
+    elaborate_angle: str | None = None
     language: str = "ru"
 
 
@@ -238,6 +246,9 @@ class CompanionInput(BaseModel):
     address: Address = Field(default_factory=Address)
     history: list[str] = Field(default_factory=list)
     language: str = "ru"
+    # Two-tier answer: the fast tier already spoke this first sentence. The strong tier CONTINUES
+    # from it (adds detail), must NOT repeat it — or returns [SILENCE] if nothing to add.
+    already_said: str | None = None
 
 
 class CompanionOutput(BaseModel):

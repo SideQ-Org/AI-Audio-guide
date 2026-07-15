@@ -37,6 +37,24 @@ def test_object_woven_at_boundary_then_line_resumes_from_cursor():
     assert s.next_frame().text == "Третье."
 
 
+def test_object_line_resumes_with_named_reanchor():
+    # A paused OBJECT line names the object on the way back so the listener re-grasps the thread.
+    s = NarrationScheduler("ru")
+    s.set_current(OrchestratorOutput(
+        state="narrating", kind="narration",
+        text="Это старая усадьба. Её построил купец. Тут был театр.",
+        place_id="p1", significance="HIGH", place_name="усадьба Пашкова",
+    ))
+    assert s.next_frame().text == "Это старая усадьба."
+    s.pause_current(GeoPoint(lat=55.0, lon=37.0))
+    s.set_current(_narr("Вот фонтан.", place_id="p2", sig="LOW"))
+    s.next_frame()
+    assert s.resume(GeoPoint(lat=55.0, lon=37.0), 300.0) is True
+    reanchor = s.next_frame().text
+    assert "усадьба Пашкова" in reanchor  # named, not a generic "на чём я остановилась"
+    assert s.next_frame().text == "Её построил купец."  # then the REMAINING sentences
+
+
 def test_resume_discards_a_line_we_walked_away_from():
     s = NarrationScheduler("ru")
     s.set_current(_narr("Первое. Второе."))

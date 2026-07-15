@@ -17,6 +17,7 @@ from app.shared.schemas import CompanionInput, CompanionOutput, ControlPatch
 from .prompts import (
     build_companion_user,
     system_for,
+    system_for_answer_fast,
     system_for_companion_stream,
 )
 
@@ -95,6 +96,21 @@ class LLMCompanion:
         user = build_companion_user(inp)
         data = await self._llm.complete_json(Role.COMPANION, system, user, COMPANION_SCHEMA)
         return CompanionOutput.model_validate(data)
+
+    async def respond_fast(self, inp: CompanionInput) -> str:
+        """Tier-1: ONE short sentence, as fast as possible (a small/fast model), so the user hears
+        a real answer within ~1 s. The strong tier (respond_stream, with ALREADY_SAID set) then
+        continues without repeating it. Returns the single sentence, or '' on any failure / a bare
+        [SILENCE]. Best-effort — the caller must degrade to the strong tier alone if this is ''."""
+        system = system_for_answer_fast(inp.language)
+        user = build_companion_user(inp)
+        raw = await self._llm.complete_text(Role.ANSWER_FAST, system, user, max_tokens=80)
+        text = raw.strip()
+        if not text or text.upper().startswith("[SILENCE]"):
+            return ""
+        # Keep only the first sentence (the model is told to give one, but clamp to be safe).
+        m = _SENT_END.search(text)
+        return text[: m.end()].strip() if m else text
 
     async def respond_stream(self, inp: CompanionInput) -> AsyncIterator[str]:
         """Yield the reply one sentence at a time as the LLM streams it, so the client can

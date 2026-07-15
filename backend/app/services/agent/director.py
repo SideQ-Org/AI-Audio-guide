@@ -78,7 +78,12 @@ def find_lookahead(
             best = c
     if best is None:
         return None
-    return LookaheadRef(name=best.place.name, category=best.place.category)
+    # Carry the distance and side so the narrator can say WHERE it is ("впереди справа, метрах в
+    # ста"). `best.side` is left/right only when the facing is trustworthy (else ahead/None).
+    return LookaheadRef(
+        name=best.place.name, category=best.place.category,
+        distance_m=best.distance_m, side=best.side,
+    )
 
 
 def find_revisit(

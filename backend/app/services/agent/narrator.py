@@ -53,7 +53,10 @@ _CARD_INSTR = (
     "а под ней 2–3 КОРОТКИХ факта об этом объекте на языке ответа — сухо, по делу, для "
     "чтения потом. КАЖДЫЙ факт с новой строки. БЕЗ обращений и рамок экскурсии: слова "
     "«ты», «вы», «проходишь мимо», «слева/справа», «сейчас», «перед тобой» — ЗАПРЕЩЕНЫ. "
-    "Только проверенные факты (как в озвучке; из FACTS). Нет фактов — блок CARD НЕ добавляй."
+    "НЕ включай справочные данные: почтовый адрес, номер телефона, часы работы, цены, "
+    "сайт/e-mail — это не факт об объекте, а карточка не справочник. "
+    "Только содержательные проверенные факты (как в озвучке; из FACTS). "
+    "Нет фактов — блок CARD НЕ добавляй."
 )
 # Strip the CARD block off the end (before the HOOK strip, since HOOK's matcher is greedy to
 # end-of-text and would otherwise swallow the card). `CARD:` to end, across newlines.
@@ -222,6 +225,50 @@ def strip_factless_history(text: str, language: str) -> str:
     return " ".join(kept).strip() if len(kept) != len(sents) else text
 
 
+# Empty "elemental/atemporal" poetic filler — what the guide reaches for when it has nothing
+# factual to say ("время застыло", "здесь дышит история", abstract вода/воздух/огонь/камень as
+# "стихии"). Not a fact and not about THIS place — a "nothing to say" tell. Backstop over the CORE
+# prompt ban (cf. attributions / factless-history). RU only (prod language); other languages rely
+# on the prompt. Phrase markers are unambiguous; single element words are deliberately NOT markers
+# (a fountain / fire station / stone monument are legitimate) — an abstract elemental *cluster*
+# (≥3 distinct elements in one fact-less sentence) is caught separately below.
+_CLICHE_FILLER_MARKERS: dict[str, tuple[str, ...]] = {
+    "ru": (
+        "время застыл", "время останов", "время замер", "замерло время", "остановилось время",
+        "здесь застыл", "будто застыл", "словно застыл", "как будто застыл",
+        "дышит истори", "дышат истори", "дышит прошл", "дышит времен", "дыхание вечности",
+        "пропитан атмосфер", "пропитана атмосфер", "пропитано атмосфер", "пропитаны атмосфер",
+        "пропитан истори", "пропитана истори", "пропитано истори", "пропитаны истори",
+        "энергетик мест", "энергетика мест", "энергетику мест", "энергетикой мест",
+        "особая энергетик", "особую энергетик", "особой энергетик",
+        "четыре стихи", "стихии природы", "первозданн", "дух места", "душа мест",
+        "хранит память веков", "эхо прошлого", "здесь дышит",
+    ),
+}
+_ELEMENTS = ("вода", "воздух", "огонь", "камень", "земля", "стихи")
+
+
+def strip_cliche_filler(text: str, language: str) -> str:
+    """Drop empty poetic-filler sentences ("время застыло", "дышит историей", abstract elemental
+    metaphors) — a "nothing to say" tell. Keeps factual sentences (they carry no such marker).
+    Returns the trimmed text (possibly ''). RU only; other languages rely on the prompt ban."""
+    markers = _CLICHE_FILLER_MARKERS.get((language or "").split("-")[0].lower())
+    if not markers or not text:
+        return text
+    sents = _sentences(text)
+    kept = []
+    for s in sents:
+        low = s.lower()
+        if any(m in low for m in markers):
+            continue
+        # abstract elemental listing ("вода, воздух, огонь, камень"): ≥3 distinct element words in
+        # one sentence with no date — a real object almost never lists three; the poetry does.
+        if not _YEAR_RE.search(s) and sum(1 for e in _ELEMENTS if e in low) >= 3:
+            continue
+        kept.append(s)
+    return " ".join(kept).strip() if len(kept) != len(sents) else text
+
+
 def split_hook(text: str, language: str = "ru") -> tuple[str, str | None]:
     """Split the trailing `HOOK: ...` baton off the narration and clean the spoken part.
     Returns (spoken, hook). No HOOK -> (cleaned_text, None).
@@ -232,7 +279,8 @@ def split_hook(text: str, language: str = "ru") -> tuple[str, str | None]:
       2. normalize() — blanks the [SILENCE] sentinel (the model often appends `HOOK:` to
          a bare `[SILENCE]`, so normalizing AFTER the split is what actually blanks it);
       3. strip unverifiable folk attributions (fabrication backstop, A3);
-      4. desolicit — drop a trailing question/offer to the listener (A2).
+      4. desolicit — drop a trailing question/offer to the listener (A2);
+      5. strip empty poetic/elemental filler ("время застыло", "дышит историей").
     These apply to narration/area ONLY; Companion replies never pass through here."""
     if not text:
         return text, None
@@ -240,6 +288,7 @@ def split_hook(text: str, language: str = "ru") -> tuple[str, str | None]:
     spoken = normalize(body.strip())
     if spoken:
         spoken = _desolicit(_strip_attributions(spoken, language), language)
+        spoken = strip_cliche_filler(spoken, language)
     return spoken, hook
 
 # very rough per-category openers for the template fallback (no facts case)

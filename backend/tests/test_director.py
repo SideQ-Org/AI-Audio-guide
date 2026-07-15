@@ -103,6 +103,16 @@ def test_lookahead_none_when_nothing_ahead():
     assert find_lookahead([], seen=[], min_ahead_m=55) is None
 
 
+def test_lookahead_carries_distance_and_side():
+    # The look-ahead must carry WHERE it is so the narrator can say "впереди справа, метрах в ста".
+    c = _cand("c", "Церковь", "church", 90)
+    c.side = "right"
+    la = find_lookahead([c], seen=[], min_ahead_m=55)
+    assert la is not None
+    assert la.distance_m == 90
+    assert la.side == "right"
+
+
 def _memo_at(pid, lat, lon, said_route) -> ObjectMemo:
     return ObjectMemo(id=pid, name="Церковь", category="church", lat=lat, lon=lon,
                       said_route_m=said_route)
