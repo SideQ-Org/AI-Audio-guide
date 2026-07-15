@@ -15,6 +15,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:audioplayers/audioplayers.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -2357,17 +2358,6 @@ class _HomePageState extends State<HomePage>
     }
   }
 
-  // Play a short UI cue for the mic button (associative "recording on/sent" feedback).
-  // Fire-and-forget on the dedicated _cue player so it never blocks the mic or narration.
-  void _playCue(String asset) {
-    if (kIsWeb) return;
-    () async {
-      try {
-        await _cue.stop();
-        await _cue.play(AssetSource(asset), volume: 0.6);
-      } catch (_) {/* a cue is non-critical */}
-    }();
-  }
 
   Future<void> _startRec() async {
     if (_ch == null) return;
@@ -2376,7 +2366,11 @@ class _HomePageState extends State<HomePage>
       _toast(l.metaMicNoPermission);
       return;
     }
-    _playCue('sfx/rec_start.wav'); // instant press feedback, before the mic opens
+    // Recording-start feedback: a HAPTIC tap, NOT an audio cue. An audioplayers cue here starves
+    // the AudioRecord stream on Android (its playback grabs the audio session ~80 ms in, cutting
+    // capture to a single 2604-byte buffer -> STT hears silence -> "не расслышал"). Haptics never
+    // touch the audio session, so the mic keeps capturing.
+    HapticFeedback.mediumImpact();
     _hush(); // barge-in: stop the guide locally...
     _send({'type': 'listen', 'on': true}); // ...and tell the server to hold the tour
     _audioBuf.clear();
@@ -2391,14 +2385,14 @@ class _HomePageState extends State<HomePage>
         const RecordConfig(
           encoder: AudioEncoder.pcm16bits, sampleRate: 16000, numChannels: 1),
       );
-      // Heal a mic stream torn down out from under us (e.g. the OS killing capture when the
-      // app is backgrounded mid-question): finalize the recording so `_recording` can't stick
-      // true and leave the server holding `listen` forever.
+      // Keep capturing through a transient stream error — do NOT cancelOnError and do NOT
+      // auto-stop here. A single transient error (an audio-focus blip) with cancelOnError:true
+      // cancelled the subscription after the FIRST ~80 ms buffer, so only 2604 bytes reached the
+      // server and STT heard nothing ("не расслышал"). Backgrounding mid-question is handled by
+      // the app-lifecycle observer, which closes the mic there.
       _audioSub = stream.listen(
         _audioBuf.addAll,
-        onError: (_) { if (_recording) _stopRecAndSend(); },
-        onDone: () { if (_recording) _stopRecAndSend(); },
-        cancelOnError: true,
+        onError: (_) {/* swallow — a transient error must not stop the recording */},
       );
       setState(() => _recording = true);
     } catch (e) {
@@ -2425,7 +2419,7 @@ class _HomePageState extends State<HomePage>
     }
     final wav = _wavFromPcm16(_audioBuf, sampleRate: 16000, channels: 1);
     _audioBuf.clear();
-    _playCue('sfx/rec_stop.wav'); // "sent" cue
+    HapticFeedback.lightImpact(); // "sent" — haptic, not audio (keep the audio session clean)
     // The audio frame is itself the barge-in; the server answers then resumes.
     _send({'type': 'audio', 'data_b64': base64Encode(wav), 'format': 'wav'});
   }
