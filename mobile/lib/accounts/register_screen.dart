@@ -294,10 +294,8 @@ class _RegisterScreenState extends State<RegisterScreen> {
           fill: authBlockFill(context),
           sheen: false,
           padding: const EdgeInsets.all(14),
-          // AutofillGroup: iOS treats the credential fields as one set, so the autofill
-          // accessory doesn't eat the first keystroke of the password.
-          child: AutofillGroup(
-            child: Column(
+          // Autofill fully disabled on purpose (iOS AutoFill ate the password's first keystroke).
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               AuthGlassField(
@@ -313,7 +311,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 hint: l.emailLabel,
                 keyboard: TextInputType.emailAddress,
                 action: TextInputAction.next,
-                autofillHints: const [AutofillHints.email],
               ),
               const SizedBox(height: 10),
               AuthGlassField(
@@ -322,7 +319,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 hint: l.passwordLabel,
                 obscure: true,
                 action: TextInputAction.next,
-                autofillHints: const [AutofillHints.newPassword],
               ),
               const SizedBox(height: 10),
               AuthGlassField(
@@ -331,12 +327,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 hint: l.confirmPasswordLabel,
                 obscure: true,
                 action: TextInputAction.next,
-                autofillHints: const [AutofillHints.newPassword],
               ),
               const SizedBox(height: 10),
               _birthdayField(c, l),
             ],
-          ),
           ),
         ),
         const SizedBox(height: Gap.md),

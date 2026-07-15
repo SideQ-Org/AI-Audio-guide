@@ -310,32 +310,29 @@ class _LoginScreenState extends State<LoginScreen> {
                       fill: authBlockFill(context),
                       sheen: false,
                       padding: const EdgeInsets.all(14),
-                      // AutofillGroup: lets iOS treat email+password as one credential set, so
-                      // the autofill accessory doesn't eat the first keystroke of the password.
-                      child: AutofillGroup(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            AuthGlassField(
-                              controller: _email,
-                              icon: Icons.mail_outline_rounded,
-                              hint: l.emailLabel,
-                              keyboard: TextInputType.emailAddress,
-                              action: TextInputAction.next,
-                              autofillHints: const [AutofillHints.username, AutofillHints.email],
-                            ),
-                            const SizedBox(height: 10),
-                            AuthGlassField(
-                              controller: _password,
-                              icon: Icons.lock_outline_rounded,
-                              hint: l.passwordLabel,
-                              obscure: true,
-                              action: TextInputAction.done,
-                              onSubmit: _emailSignIn,
-                              autofillHints: const [AutofillHints.password],
-                            ),
-                          ],
-                        ),
+                      // Autofill fully disabled here on purpose: iOS AutoFill / "Strong Password"
+                      // was eating the first keystroke of the password ("нельзя ввести первую
+                      // букву"). No autofillHints => no textContentType => no autofill overlay.
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          AuthGlassField(
+                            controller: _email,
+                            icon: Icons.mail_outline_rounded,
+                            hint: l.emailLabel,
+                            keyboard: TextInputType.emailAddress,
+                            action: TextInputAction.next,
+                          ),
+                          const SizedBox(height: 10),
+                          AuthGlassField(
+                            controller: _password,
+                            icon: Icons.lock_outline_rounded,
+                            hint: l.passwordLabel,
+                            obscure: true,
+                            action: TextInputAction.done,
+                            onSubmit: _emailSignIn,
+                          ),
+                        ],
                       ),
                     ),
                     // ── forgot password (revealed after a rejected attempt) ──
