@@ -286,6 +286,16 @@ Services (`backend/app/services/`):
 
 `shared/schemas.py` is the single source of truth for domain models **and** the WebSocket contract.
 `config.py` is the env/`.env`-driven `Settings` — the dial-board for the whole backend.
+`agent/factory.py` builds the `Orchestrator` from settings (picks Geo source, enricher, and the
+heuristic/openai/anthropic backend), keeping the WS handler thin.
+
+**Live-walk debugging** (`agent/walklog.py`): one structured logger (`aiguide.agent`, INFO,
+`propagate=False`) reconstructs a whole walk end-to-end — the actual TEXT the agents produced
+(narration/area beats/replies), coords walked, every external call + count, and **why the guide
+stayed silent**. Pull it with `docker logs ai-guide | grep aiguide.agent`; each line is stamped
+`sid=<id>` (a `CURRENT_SID` ContextVar) so concurrent walks stay separable. Set `walk_log_dir` for
+a rotating file sink that survives the docker-logs ring buffer. Complements `llm.client.METER`
+(token/cost) and `metrics.GUIDE` (counters) — reach for this first when a live walk misbehaves.
 
 ### The agent loop (core domain logic)
 
