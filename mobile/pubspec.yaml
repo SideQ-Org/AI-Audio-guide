@@ -1,7 +1,7 @@
 name: ai_audio_guide
 description: AI Audio Guide — real-time autonomous walking tour client.
 publish_to: "none"
-version: 0.1.1+3
+version: 0.1.1+4
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -47,3 +47,10 @@ flutter:
     # Default profile avatar (illustrated backpacker) shown when the user hasn't
     # picked one of their own.
     - assets/avatar_traveler.png
+    # Short UI cues for the mic button (recording start / send) — associative feedback
+    # the instant you press to ask, played on a dedicated short-lived AudioPlayer.
+    - assets/sfx/rec_start.wav
+    - assets/sfx/rec_stop.wav
+    # Silent loop: keeps the iOS audio session alive across inter-sentence pauses so the OS
+    # doesn't suspend the app screen-locked (background audio lives only while sound plays).
+    - assets/sfx/silence.wav

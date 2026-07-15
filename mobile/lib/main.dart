@@ -1102,7 +1102,8 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
+class _HomePageState extends State<HomePage>
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   final _askCtrl = TextEditingController();
   final _scroll = ScrollController();
   WebSocketChannel? _ch;
@@ -1128,9 +1129,21 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   // On-device TTS — the free tier speaks the narration aloud.
   final FlutterTts _tts = FlutterTts();
+  // Completes when _initTts has finished applying the best installed voice. The first on-device
+  // utterance awaits this so it never speaks in the default "compact" (robotic) voice while the
+  // async getVoices->setVoice chain is still resolving (the "first line sounds bad" bug).
+  final Completer<void> _ttsReady = Completer<void>();
   // Plays server-synthesized neural audio (paid tier). One reused instance; barge-in and
   // pause stop it just like _tts.stop().
   final AudioPlayer _audio = AudioPlayer();
+  // Separate short-lived player for UI cue sounds (mic press start/send) so a cue never
+  // disturbs the narration audio session on _audio / _tts.
+  final AudioPlayer _cue = AudioPlayer();
+  // iOS keep-alive: a SILENT looping clip keeps the audio session active during the pauses
+  // BETWEEN sentences, so iOS doesn't suspend the app while screen-locked (background audio is
+  // alive only while sound is actually playing). Android relies on the foreground LOCATION
+  // service instead. Runs only for the duration of an active tour.
+  final AudioPlayer _keepAlive = AudioPlayer();
   // Completed when the current neural clip finishes OR is stopped (barge-in/pause/mute),
   // so _speakNext's await never hangs when playback is cut short.
   Completer<void>? _audioDone;
@@ -1207,6 +1220,9 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    // Observe app lifecycle so we can heal audio/mic state on return from background —
+    // iOS suspends the app in the inter-sentence pause and can leave TTS/mic gates stuck.
+    WidgetsBinding.instance.addObserver(this);
     _lang = normLang(widget.locale.languageCode);
     // React to sign-in / sign-out: refresh the settings UI and (re)send the auth
     // token to the backend so the running tour binds/unbinds the user id live.
@@ -1269,45 +1285,13 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     await _tts.setSpeechRate(kIsWeb ? 1.0 : 0.5);
     await _tts.setPitch(1.0);
     await _tts.awaitSpeakCompletion(true);
-    // iOS: a playback audio session lets narration keep playing with the screen
-    // locked (paired with the `audio` UIBackgroundMode) and routes to a Bluetooth
-    // earbud while ducking any music the user has on.
-    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
-      await _tts.setIosAudioCategory(
-        IosTextToSpeechAudioCategory.playback,
-        [
-          IosTextToSpeechAudioCategoryOptions.mixWithOthers,
-          IosTextToSpeechAudioCategoryOptions.duckOthers,
-          IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
-          IosTextToSpeechAudioCategoryOptions.allowAirPlay,
-        ],
-        IosTextToSpeechAudioMode.spokenAudio,
-      );
-    }
-    // Neural-audio player: mirror the flutter_tts session so paid-tier playback also keeps
-    // going with the screen locked, ducks music, and routes to a Bluetooth earbud. Both
-    // engines use the SAME .playback category so switching between them (per sentence,
-    // paid vs. fallback) never re-negotiates a conflicting session.
     if (!kIsWeb) {
       await _audio.setReleaseMode(ReleaseMode.stop);
-      if (defaultTargetPlatform == TargetPlatform.iOS) {
-        // NB: with the `.playback` category, A2DP Bluetooth output and AirPlay are ON by
-        // default — the explicit `allowBluetoothA2DP`/`allowAirPlay` options are ONLY valid
-        // for `playAndRecord`/`record`, and setting them here trips an audioplayers assert
-        // (debug-only, so release/TestFlight silently ignored it — but it crashed the sim).
-        await _audio.setAudioContext(
-          AudioContext(
-            iOS: AudioContextIOS(
-              category: AVAudioSessionCategory.playback,
-              options: const {
-                AVAudioSessionOptions.mixWithOthers,
-                AVAudioSessionOptions.duckOthers,
-              },
-            ),
-          ),
-        );
-      }
+      await _cue.setReleaseMode(ReleaseMode.stop);
     }
+    // iOS playback audio session (screen-locked playback, duck music, Bluetooth). Also
+    // re-applied on resume from background, since iOS can drop the category across a suspend.
+    await _applyIosAudioSession();
     // The queue is driven by awaiting speak() in _speakNext (reliable across
     // platforms). On web the browser's SpeechSynthesis 'end' event is sometimes
     // dropped mid-utterance (a known Chrome bug, easy to hit when an overlay opens),
@@ -1319,6 +1303,41 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     _tts.setCancelHandler(() {
       if (mounted) setState(() => _speaking = false);
     });
+    // Voice is now selected — release the first-utterance gate in _speakNext.
+    if (!_ttsReady.isCompleted) _ttsReady.complete();
+  }
+
+  // Apply the iOS playback audio session to every player (TTS + neural + cue) so narration
+  // keeps going with the screen locked, ducks music, and routes to Bluetooth. Idempotent —
+  // called at init AND on resume from background (iOS can drop the category across a suspend).
+  Future<void> _applyIosAudioSession() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return;
+    try {
+      await _tts.setIosAudioCategory(
+        IosTextToSpeechAudioCategory.playback,
+        [
+          IosTextToSpeechAudioCategoryOptions.mixWithOthers,
+          IosTextToSpeechAudioCategoryOptions.duckOthers,
+          IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
+          IosTextToSpeechAudioCategoryOptions.allowAirPlay,
+        ],
+        IosTextToSpeechAudioMode.spokenAudio,
+      );
+      // NB: with the `.playback` category, A2DP Bluetooth output and AirPlay are ON by default —
+      // the explicit allowBluetoothA2DP/allowAirPlay options are ONLY valid for playAndRecord/
+      // record and trip an audioplayers assert here (crashed the sim), so they're omitted.
+      final ctx = AudioContext(
+        iOS: AudioContextIOS(
+          category: AVAudioSessionCategory.playback,
+          options: const {
+            AVAudioSessionOptions.mixWithOthers,
+            AVAudioSessionOptions.duckOthers,
+          },
+        ),
+      );
+      await _audio.setAudioContext(ctx);
+      await _cue.setAudioContext(ctx); // same session so a cue never re-negotiates iOS audio
+    } catch (_) {/* best-effort — playback still works with the default session */}
   }
 
   // Decode the optional neural-audio payload on a narration/reply frame (paid tier).
@@ -1331,6 +1350,47 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     } catch (_) {
       return null; // malformed payload — fall back to on-device TTS
     }
+  }
+
+  // Heal audio/mic state on return from background. iOS suspends the app during the pause
+  // BETWEEN sentences (background audio is alive only while sound is actually playing), so an
+  // awaited `_tts.speak` can fail to start and leave `_speaking` stuck true — after which
+  // `_speakNext` is never called again and the guide is silent though text keeps updating
+  // ("вернулся и всё равно молчит, думает что говорит"). And a question left open when the app
+  // was backgrounded can strand `_recording=true` with the server still holding `listen`.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (kIsWeb) return;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      // Backgrounded mid-question: close the mic and release the server hold so the tour
+      // isn't stuck "listening" forever (the stream can be torn down without _stopRecAndSend).
+      if (_recording) {
+        _audioSub?.cancel();
+        _audioSub = null;
+        _audioBuf.clear();
+        _recording = false;
+        _rec.stop().catchError((_) => null);
+        if (_connected) _send({'type': 'listen', 'on': false});
+      }
+      return;
+    }
+    if (state != AppLifecycleState.resumed) return;
+    // Back in the foreground: clear a stuck speaking gate and restart the queue. Any TTS future
+    // still "awaited" from before the suspend is effectively dead (the engine stopped), so
+    // resetting can't cause overlap — stop first to be safe, then drive the next sentence.
+    () async {
+      try {
+        await _tts.stop();
+      } catch (_) {/* best-effort */}
+      if (!mounted) return;
+      _speaking = false;
+      // Re-assert the audio session (iOS can drop the category across a suspend) so playback
+      // routes correctly and keeps going with the screen locked.
+      await _applyIosAudioSession();
+      if (!mounted) return;
+      if (_voice && _speakQueue.isNotEmpty && (!_paused)) _speakNext();
+    }();
   }
 
   // Queue a paragraph/reply for TTS (never cut a line mid-sentence). Narration
@@ -1405,6 +1465,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       // _audioDone so this can't hang when the clip is cut short.
       await _playNeural(s);
     } else {
+      // Wait for the good voice to be selected before the very first line, so it never speaks in
+      // the default robotic voice (no-op after init; completes instantly on every later call).
+      // Timeout so a stalled/failed init can never hang the queue — just speak with whatever's set.
+      if (!kIsWeb) {
+        await _ttsReady.future
+            .timeout(const Duration(seconds: 4), onTimeout: () {});
+      }
+      if (!mounted) return;
+      if (!_voice) { setState(() => _speaking = false); return; }
       // Chrome's SpeechSynthesis clips an utterance at ~15s, cutting long lines off
       // mid-phrase. Speak in sentence-sized chunks so each stays well under that.
       final chunks = kIsWeb ? _chunkForTts(s.text) : [s.text];
@@ -1420,7 +1489,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               Future<void>.delayed(Duration(milliseconds: estMs + 4000)),
             ]);
           } else {
-            await _tts.speak(c); // mobile: awaitSpeakCompletion is reliable
+            // Mobile watchdog: awaitSpeakCompletion is usually reliable, but if the engine
+            // drops the completion callback (e.g. an iOS interruption/suspend around this
+            // utterance) the await would hang and wedge `_speaking` forever. Race it against a
+            // GENEROUS timeout (well above a real sentence at 0.5 rate) so the queue recovers.
+            final estMs = (c.length / 5.0 * 1000).clamp(8000, 60000).toInt();
+            await Future.any([
+              _tts.speak(c),
+              Future<void>.delayed(Duration(milliseconds: estMs + 8000)),
+            ]);
           }
         } catch (_) {/* keep the queue moving even if one chunk fails */}
       }
@@ -1520,6 +1597,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     List<dynamic> voices;
     try {
       voices = (await _tts.getVoices) as List<dynamic>;
+      // A cold engine sometimes returns an empty/partial list on the first call — retry once
+      // after a short beat so we don't leave the robotic default in place for the whole session.
+      if (voices.isEmpty) {
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+        voices = (await _tts.getVoices) as List<dynamic>;
+      }
     } catch (_) {
       return; // platform doesn't expose voices (e.g. some web engines)
     }
@@ -2091,9 +2174,36 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   // The notification with the Pause button lives in a foreground LOCATION service;
   // while it runs the OS keeps our process alive with the screen off and grants
   // background location. Android/iOS only — a no-op on web.
+  // Start/stop the iOS silent keep-alive loop (no-op elsewhere). Tied to the active tour.
+  Future<void> _startKeepAlive() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return;
+    try {
+      await _keepAlive.setReleaseMode(ReleaseMode.loop);
+      await _keepAlive.setAudioContext(AudioContext(
+        iOS: AudioContextIOS(
+          category: AVAudioSessionCategory.playback,
+          options: const {
+            AVAudioSessionOptions.mixWithOthers,
+            AVAudioSessionOptions.duckOthers,
+          },
+        ),
+      ));
+      // The clip is pure silence, so volume 1.0 is inaudible; it just keeps the session live.
+      await _keepAlive.play(AssetSource('sfx/silence.wav'), volume: 1.0);
+    } catch (_) {/* best-effort — narration still works, may just pause screen-locked */}
+  }
+
+  Future<void> _stopKeepAlive() async {
+    if (kIsWeb) return;
+    try {
+      await _keepAlive.stop();
+    } catch (_) {/* already stopped */}
+  }
+
   Future<void> _startForegroundService() async {
     if (kIsWeb) return;
     final l = AppLocalizations.of(context)!;
+    await _startKeepAlive(); // iOS: keep the audio session alive across inter-sentence pauses
     // Android 13+ needs the notification permission for the card to show; the
     // service still runs without it. Aggressive-battery OEMs (Samsung et al.) can
     // freeze even a foreground service, so nudge battery-optimization off once.
@@ -2153,6 +2263,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   Future<void> _stopForegroundService() async {
     if (kIsWeb) return;
+    await _stopKeepAlive();
     try {
       if (await FlutterForegroundTask.isRunningService) {
         await FlutterForegroundTask.stopService();
@@ -2246,6 +2357,18 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
   }
 
+  // Play a short UI cue for the mic button (associative "recording on/sent" feedback).
+  // Fire-and-forget on the dedicated _cue player so it never blocks the mic or narration.
+  void _playCue(String asset) {
+    if (kIsWeb) return;
+    () async {
+      try {
+        await _cue.stop();
+        await _cue.play(AssetSource(asset), volume: 0.6);
+      } catch (_) {/* a cue is non-critical */}
+    }();
+  }
+
   Future<void> _startRec() async {
     if (_ch == null) return;
     final l = AppLocalizations.of(context)!; // capture before awaits
@@ -2253,6 +2376,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       _toast(l.metaMicNoPermission);
       return;
     }
+    _playCue('sfx/rec_start.wav'); // instant press feedback, before the mic opens
     _hush(); // barge-in: stop the guide locally...
     _send({'type': 'listen', 'on': true}); // ...and tell the server to hold the tour
     _audioBuf.clear();
@@ -2263,7 +2387,15 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         const RecordConfig(
           encoder: AudioEncoder.pcm16bits, sampleRate: 16000, numChannels: 1),
       );
-      _audioSub = stream.listen(_audioBuf.addAll);
+      // Heal a mic stream torn down out from under us (e.g. the OS killing capture when the
+      // app is backgrounded mid-question): finalize the recording so `_recording` can't stick
+      // true and leave the server holding `listen` forever.
+      _audioSub = stream.listen(
+        _audioBuf.addAll,
+        onError: (_) { if (_recording) _stopRecAndSend(); },
+        onDone: () { if (_recording) _stopRecAndSend(); },
+        cancelOnError: true,
+      );
       setState(() => _recording = true);
     } catch (e) {
       _send({'type': 'listen', 'on': false}); // mic failed — let the tour resume
@@ -2282,6 +2414,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
     final wav = _wavFromPcm16(_audioBuf, sampleRate: 16000, channels: 1);
     _audioBuf.clear();
+    _playCue('sfx/rec_stop.wav'); // "sent" cue
     // The audio frame is itself the barge-in; the server answers then resumes.
     _send({'type': 'audio', 'data_b64': base64Encode(wav), 'format': 'wav'});
   }
@@ -2320,6 +2453,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   @override
   void dispose() {
     _disposed = true;
+    WidgetsBinding.instance.removeObserver(this);
     AuthService.instance.removeListener(_onAuthChanged);
     _walkTimer?.cancel();
     _gpsSub?.cancel();
@@ -2335,6 +2469,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
     _tts.stop();
     _audio.dispose(); // neural-voice player (paid tier)
+    _cue.dispose(); // mic-cue player
+    _keepAlive.dispose(); // iOS silent keep-alive loop
     _summaryTimer?.cancel();
     _walkSummary.dispose();
     _rec.dispose();
@@ -2414,6 +2550,22 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       borderRadius: BorderRadius.vertical(top: Radius.circular(28)));
 
   // Tap a narrated pin -> a card with the place's name and its accumulated story.
+  // A phone number anywhere in the line, or a URL/e-mail.
+  static final _phoneRe = RegExp(r'\+?\d[\d\-\s()]{6,}\d');
+  static final _urlRe = RegExp(r'https?://|www\.|\b[\w.]+@[\w.]+\.\w', caseSensitive: false);
+  // A directory-field LABEL at the very start of the line ("Адрес: …", "Телефон: …", "Часы …").
+  // Anchored to line-start so a legit fact that merely mentions a street ("улица названа …") stays.
+  static final _dirLabelRe = RegExp(
+      r'^\s*(адрес|тел\.?|телефон|факс|моб\.?|часы\s+работы|время\s+работы|режим\s+работы|график\s+работы|сайт|веб-?сайт|e-?mail|почта|индекс|address|phone|tel|hours|website)\b\s*[:：]?',
+      caseSensitive: false);
+
+  // Drop CARD lines that are really a directory field (address / phone / hours / url / email)
+  // rather than a fact about the object. Backstop over the narrator prompt; also cleans cards
+  // generated before that prompt change. Conservative: only bare phones/urls and start-anchored
+  // labels, so legitimate facts that mention a street/number survive.
+  bool _looksInformational(String s) =>
+      !_phoneRe.hasMatch(s) && !_urlRe.hasMatch(s) && !_dirLabelRe.hasMatch(s);
+
   void _showPlaceInfo(PlaceMark p) {
     final c = context.colors;
     final style = _categoryStyle(p.category);
@@ -2426,6 +2578,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         .split('\n')
         .map((s) => s.trim().replaceFirst(RegExp(r'^[-•*·—]\s*'), '').trim())
         .where((s) => s.isNotEmpty)
+        .where(_looksInformational) // drop leaked address/phone/hours lines (backstop over the prompt)
         .toList();
     showModalBottomSheet<void>(
       context: context,
@@ -2637,7 +2790,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             point: _here,
             width: 52,
             height: 52,
-            child: _UserPuck(heading: _heading),
+            // Marker stays screen-upright (no rotate flag), so subtract the map bearing to keep
+            // the arrow pointing at the true absolute heading when the map is rotated off north
+            // (same correction the compass FAB applies).
+            child: _UserPuck(heading: (_heading - _mapRotation) % 360),
           ),
         ]),
         RichAttributionWidget(
@@ -3213,7 +3369,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
               ),
             );
         return ui.CardSheet(
-          scrollable: false,  // holds a Flexible>ListView (places) + a scrollable recap; CardSheet bounds it
+          scrollable: true,  // one scroll region for the whole summary (stats+map+recap+places)
           child: Padding(
             padding: EdgeInsets.fromLTRB(20, 14, 20, MediaQuery.of(ctx).padding.bottom + 18),
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -3261,20 +3417,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                       );
                     }
                     if (summary.isEmpty) return const SizedBox.shrink();
+                    // No inner scroll / height cap: the whole sheet scrolls (scrollable:true),
+                    // so the recap flows inline and a nested scroll view would conflict.
                     return Container(
                       width: double.infinity,
-                      constraints: const BoxConstraints(maxHeight: 190),
                       padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
                       decoration: BoxDecoration(
                         color: uc.glassFill(0.05),
                         borderRadius: BorderRadius.circular(ui.Radii.md),
                         border: Border.all(color: uc.glassBorder),
                       ),
-                      child: SingleChildScrollView(
-                        child: Text(summary, style: GoogleFonts.manrope(
-                          fontSize: 13.5, height: 1.5, fontWeight: FontWeight.w600,
-                          color: uc.textSecondary)),
-                      ),
+                      child: Text(summary, style: GoogleFonts.manrope(
+                        fontSize: 13.5, height: 1.5, fontWeight: FontWeight.w600,
+                        color: uc.textSecondary)),
                     );
                   },
                 ),
@@ -3300,34 +3455,28 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                 const SizedBox(height: 18),
                 Align(alignment: Alignment.centerLeft, child: Text(l.summaryTold, style: ui.label(context))),
                 const SizedBox(height: 8),
-                Flexible(
-                  child: ListView.separated(
-                    shrinkWrap: true,
-                    padding: EdgeInsets.zero,
-                    itemCount: places.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
-                    itemBuilder: (ctx, i) {
-                      final p = places[i];
-                      return Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: uc.glassFill(0.05),
-                          borderRadius: BorderRadius.circular(ui.Radii.md),
-                          border: Border.all(color: uc.glassBorder),
-                        ),
-                        child: Row(children: [
-                          Container(
-                            width: 26, height: 26, alignment: Alignment.center,
-                            decoration: BoxDecoration(shape: BoxShape.circle, color: uc.primary.withValues(alpha: 0.16)),
-                            child: Text('${i + 1}', style: GoogleFonts.manrope(fontSize: 12, fontWeight: FontWeight.w800, color: uc.primary)),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(child: Text(p.name.isEmpty ? '—' : p.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ui.titleS(ctx))),
-                        ]),
-                      );
-                    },
+                // Non-scrolling list: the outer CardSheet (scrollable:true) owns the scroll, so
+                // the places flow inline and grow the single scroll region rather than nesting.
+                for (var i = 0; i < places.length; i++) ...[
+                  if (i > 0) const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: uc.glassFill(0.05),
+                      borderRadius: BorderRadius.circular(ui.Radii.md),
+                      border: Border.all(color: uc.glassBorder),
+                    ),
+                    child: Row(children: [
+                      Container(
+                        width: 26, height: 26, alignment: Alignment.center,
+                        decoration: BoxDecoration(shape: BoxShape.circle, color: uc.primary.withValues(alpha: 0.16)),
+                        child: Text('${i + 1}', style: GoogleFonts.manrope(fontSize: 12, fontWeight: FontWeight.w800, color: uc.primary)),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(child: Text(places[i].name.isEmpty ? '—' : places[i].name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ui.titleS(ctx))),
+                    ]),
                   ),
-                ),
+                ],
               ],
               const SizedBox(height: 18),
               ui.AppButton(l.summaryDone, onTap: () => Navigator.pop(ctx)),
