@@ -128,9 +128,11 @@ class _AuthGlassFieldState extends State<AuthGlassField> {
               obscureText: _hidden,
               autocorrect: false,
               enableSuggestions: !widget.obscure,
-              // Obscure fields: force the full password keyboard. Without this iOS can fall
-              // back to the numeric passcode keypad (only digits) for secure fields.
-              keyboardType: widget.obscure ? TextInputType.visiblePassword : widget.keyboard,
+              // Obscured fields use plain `text`, NOT `visiblePassword`: on iOS the
+              // visiblePassword keyboard drops the FIRST typed character of a secure field
+              // (a long-standing Flutter bug — "нельзя ввести первую букву пароля"). Plain
+              // `text` shows the same full alphanumeric keyboard without the drop.
+              keyboardType: widget.obscure ? TextInputType.text : widget.keyboard,
               autofillHints: widget.autofillHints,
               textInputAction: widget.action,
               cursorColor: c.primary,

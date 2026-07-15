@@ -310,28 +310,32 @@ class _LoginScreenState extends State<LoginScreen> {
                       fill: authBlockFill(context),
                       sheen: false,
                       padding: const EdgeInsets.all(14),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          AuthGlassField(
-                            controller: _email,
-                            icon: Icons.mail_outline_rounded,
-                            hint: l.emailLabel,
-                            keyboard: TextInputType.emailAddress,
-                            action: TextInputAction.next,
-                            autofillHints: const [AutofillHints.username, AutofillHints.email],
-                          ),
-                          const SizedBox(height: 10),
-                          AuthGlassField(
-                            controller: _password,
-                            icon: Icons.lock_outline_rounded,
-                            hint: l.passwordLabel,
-                            obscure: true,
-                            action: TextInputAction.done,
-                            onSubmit: _emailSignIn,
-                            autofillHints: const [AutofillHints.password],
-                          ),
-                        ],
+                      // AutofillGroup: lets iOS treat email+password as one credential set, so
+                      // the autofill accessory doesn't eat the first keystroke of the password.
+                      child: AutofillGroup(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            AuthGlassField(
+                              controller: _email,
+                              icon: Icons.mail_outline_rounded,
+                              hint: l.emailLabel,
+                              keyboard: TextInputType.emailAddress,
+                              action: TextInputAction.next,
+                              autofillHints: const [AutofillHints.username, AutofillHints.email],
+                            ),
+                            const SizedBox(height: 10),
+                            AuthGlassField(
+                              controller: _password,
+                              icon: Icons.lock_outline_rounded,
+                              hint: l.passwordLabel,
+                              obscure: true,
+                              action: TextInputAction.done,
+                              onSubmit: _emailSignIn,
+                              autofillHints: const [AutofillHints.password],
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                     // ── forgot password (revealed after a rejected attempt) ──

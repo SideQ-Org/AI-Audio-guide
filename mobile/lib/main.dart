@@ -2380,6 +2380,10 @@ class _HomePageState extends State<HomePage>
     _hush(); // barge-in: stop the guide locally...
     _send({'type': 'listen', 'on': true}); // ...and tell the server to hold the tour
     _audioBuf.clear();
+    // CRITICAL (iOS): release the silent keep-alive loop's `.playback` session before opening
+    // the mic — an active playback session starves the recording input, so the mic captures
+    // SILENCE and STT returns "" ("не расслышал"). Restored in _stopRecAndSend.
+    await _stopKeepAlive();
     try {
       // Stream PCM into memory — works on web AND mobile (no path_provider /
       // dart:io File, which throw on web and made the mic button do nothing there).
@@ -2399,6 +2403,8 @@ class _HomePageState extends State<HomePage>
       setState(() => _recording = true);
     } catch (e) {
       _send({'type': 'listen', 'on': false}); // mic failed — let the tour resume
+      await _applyIosAudioSession();
+      _startKeepAlive(); // mic didn't open — restore the background keep-alive
       _toast(l.metaMicNoPermission);
     }
   }
@@ -2408,6 +2414,11 @@ class _HomePageState extends State<HomePage>
     await _audioSub?.cancel();
     _audioSub = null;
     setState(() => _recording = false);
+    // Mic released: the `record` plugin left the iOS session in `.playAndRecord` (routes to the
+    // earpiece), so re-assert `.playback` for narration/answer through the speaker, and resume
+    // the silent keep-alive loop for screen-locked background playback.
+    await _applyIosAudioSession();
+    _startKeepAlive();
     if (_audioBuf.isEmpty) {
       _send({'type': 'listen', 'on': false}); // nothing captured — resume the tour
       return;

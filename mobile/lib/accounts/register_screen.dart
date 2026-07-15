@@ -294,7 +294,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
           fill: authBlockFill(context),
           sheen: false,
           padding: const EdgeInsets.all(14),
-          child: Column(
+          // AutofillGroup: iOS treats the credential fields as one set, so the autofill
+          // accessory doesn't eat the first keystroke of the password.
+          child: AutofillGroup(
+            child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               AuthGlassField(
@@ -333,6 +336,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
               const SizedBox(height: 10),
               _birthdayField(c, l),
             ],
+          ),
           ),
         ),
         const SizedBox(height: Gap.md),
