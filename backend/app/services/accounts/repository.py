@@ -12,6 +12,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -47,24 +48,44 @@ async def get_or_create_user(
     the JWT ``sub`` == ``auth.uid()``). Setting it makes ``walks.user_id`` equal
     ``auth.uid()`` so the Postgres RLS policies (db/rls.sql) match directly.
     """
-    existing = await session.scalar(
-        select(Identity)
-        .where(Identity.provider == provider, Identity.provider_uid == provider_uid)
-        .options(selectinload(Identity.user))
-    )
+    existing = await _resolve_identity(session, provider, provider_uid)
     if existing is not None:
         return existing.user
 
     user = User(email=email, display_name=display_name)
     if user_id is not None:
         user.id = _as_uuid(user_id)
-    session.add(user)
-    await session.flush()  # assign user.id before linking the identity
-    session.add(
-        Identity(user_id=user.id, provider=provider, provider_uid=provider_uid)
+    try:
+        # SAVEPOINT so that if we LOSE a create race the rollback undoes only THIS insert (not the
+        # caller's whole transaction) and leaves the session usable to re-read the winner's row.
+        # The Community tab fires ~10 requests at once, all calling get-or-create for the same
+        # Supabase sub — without this the losers hit a duplicate pk_users and 500 the whole tab.
+        async with session.begin_nested():
+            session.add(user)
+            await session.flush()  # assign user.id before linking the identity
+            session.add(Identity(user_id=user.id, provider=provider, provider_uid=provider_uid))
+            await session.flush()
+        return user
+    except IntegrityError:
+        # A concurrent request created the same user/identity first — re-read it.
+        existing = await _resolve_identity(session, provider, provider_uid)
+        if existing is not None:
+            return existing.user
+        if user_id is not None:
+            got = await session.get(User, _as_uuid(user_id))
+            if got is not None:
+                return got
+        raise
+
+
+async def _resolve_identity(
+    session: AsyncSession, provider: str, provider_uid: str
+) -> Identity | None:
+    return await session.scalar(
+        select(Identity)
+        .where(Identity.provider == provider, Identity.provider_uid == provider_uid)
+        .options(selectinload(Identity.user))
     )
-    await session.flush()
-    return user
 
 
 async def get_user(session: AsyncSession, *, user_id: uuid.UUID | str) -> User | None:

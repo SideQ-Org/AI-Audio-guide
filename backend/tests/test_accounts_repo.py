@@ -84,6 +84,29 @@ def test_user_id_seeded_from_provider():
     assert asyncio.run(run()) == "11111111-1111-1111-1111-111111111111"
 
 
+def test_get_or_create_user_survives_existing_id():
+    # Prod race outcome: the user row for this seeded id already exists (a concurrent request
+    # won). A second get-or-create for the SAME id must re-read it, not raise a duplicate
+    # pk_users — the bug that 500'd the whole Community tab for returning users.
+    async def run():
+        engine, Session = await _setup()
+        seed = "22222222-2222-2222-2222-222222222222"
+        async with Session() as s:
+            await repo.get_or_create_user(
+                s, provider="supabase", provider_uid="sub-A", user_id=seed
+            )
+            await s.commit()
+        async with Session() as s:  # same seeded id, insert path hits the pk conflict -> re-read
+            u = await repo.get_or_create_user(
+                s, provider="supabase", provider_uid="sub-B", user_id=seed
+            )
+            await s.commit()
+        await engine.dispose()
+        return str(u.id)
+
+    assert asyncio.run(run()) == "22222222-2222-2222-2222-222222222222"
+
+
 def test_walk_lifecycle_events_and_counts():
     async def run():
         engine, Session = await _setup()
