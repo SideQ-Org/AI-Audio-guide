@@ -13,10 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import io
-import logging
 from typing import Protocol
 
-_log = logging.getLogger("aiguide.stt")
+from app.services.agent.walklog import get_logger
+
+# Route STT failures through the walk logger (aiguide.agent) so an empty transcript's REAL cause
+# (e.g. `stt http 402`) is visible in `docker logs | grep aiguide.agent`, tagged with the sid —
+# a plain `logging.getLogger("aiguide.stt")` is silenced by uvicorn and vanished (the "два
+# 'не расслышал'" debugging that had no server-side trace).
+_log = get_logger()
 
 
 class STTClient(Protocol):
