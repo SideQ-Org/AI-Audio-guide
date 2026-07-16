@@ -550,6 +550,11 @@ class OpenAICompatLLM:
             if settings.openai_narrator_presence_penalty:
                 params["presence_penalty"] = settings.openai_narrator_presence_penalty
             return params
+        # The JUDGE is an evaluator, not a writer: it must be as DETERMINISTIC as possible so the
+        # same blurb scores the same every time (a gold standard can't flip-flop on borderline
+        # cases). Low temp; the text default (hotter, for variety) would make it inconsistent.
+        if role is Role.JUDGE:
+            return {"temperature": settings.openai_judge_temperature}
         return {"temperature": settings.openai_text_temperature}
 
     async def complete_text(

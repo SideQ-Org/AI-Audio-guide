@@ -116,6 +116,9 @@ class Settings(BaseSettings):
     # use the narrator knobs; other text roles (Companion) use openai_text_temperature.
     openai_text_temperature: float = 0.8       # baseline for text roles
     openai_narrator_temperature: float = 0.9   # narration/area — a touch hotter for variety
+    # The interestingness JUDGE (Block 4) must be deterministic — a gold-standard evaluator can't
+    # give different verdicts on the same blurb. Near-0 so borderline cases score consistently.
+    openai_judge_temperature: float = 0.0
     openai_narrator_frequency_penalty: float = 0.3
     openai_narrator_presence_penalty: float = 0.3
 
