@@ -240,9 +240,11 @@ are the **built** slice (the doc's "design only" note is stale — Phases 1-5 sh
 narration corpus — one post-walk LLM call fired on `end` (kept walks), delivered async as a `summary`
 WS message and rendered in the client's Stop sheet (spinner → text).
 
-**Interestingness metric & self-improvement (Block 4** — design in
-`Блок4_Интересность_метрики_и_луп_самоулучшения.md`). Narration quality is scored as a **number**,
-reference-free, in a **separate sidecar container** so it can't destabilize the live tour. The
+**Interestingness metric & self-improvement (Block 4** — full feature doc + ops runbook in
+`BLOCK4_SELF_IMPROVEMENT.md`; failure-mode model + deploy runbook in `BLOCK4_FIXER_HARDENING.md`;
+original design in `Блок4_Интересность_метрики_и_луп_самоулучшения.md`). Narration quality is scored
+as a **number**, reference-free, in a **separate sidecar container** so it can't destabilize the live
+tour. **Deployed to prod** (capture on, worker scoring with a validated judge, canary armed). The
 **analysis foundation + offline optimization loop (Phases 0–5) are built**; only the canary
 auto-apply (Phase 6) stays design. Pieces:
 - **Instrumentation (Phase 0, additive, flag-gated — `capture_narration_samples` /

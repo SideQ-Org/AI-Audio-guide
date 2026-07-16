@@ -192,8 +192,10 @@ fixes — safely, in a **separate sidecar container** that never touches the liv
   and every version is reversible via the **PromptRegistry** (memory + immutable versions + active
   pointer + rollback). It only produces validated candidates — it never writes the live prompt.
 
-See [`BLOCK4_FIXER_HARDENING.md`](BLOCK4_FIXER_HARDENING.md) for the full failure-mode model +
-mechanics, and `Блок4_Интересность_метрики_и_луп_самоулучшения.md` for the original design/research.
+See [`BLOCK4_SELF_IMPROVEMENT.md`](BLOCK4_SELF_IMPROVEMENT.md) for the full feature doc (architecture,
+the judge/evaluator, the autonomous loop, config knobs, and the operations runbook),
+[`BLOCK4_FIXER_HARDENING.md`](BLOCK4_FIXER_HARDENING.md) for the failure-mode model + deploy runbook,
+and `Блок4_Интересность_метрики_и_луп_самоулучшения.md` for the original design/research.
 
 ## Docs
 
@@ -201,7 +203,8 @@ mechanics, and `Блок4_Интересность_метрики_и_луп_са
 - [`ACCOUNTS_DESIGN.md`](ACCOUNTS_DESIGN.md) — the optional accounts / walk-history layer.
 - [`MODEL_COMPARISON.md`](MODEL_COMPARISON.md) — model choice & cost.
 - [`E2E_REGIONS.md`](E2E_REGIONS.md) — regional evaluation results.
-- [`BLOCK4_FIXER_HARDENING.md`](BLOCK4_FIXER_HARDENING.md) — self-improvement: failure modes + mechanics.
+- [`BLOCK4_SELF_IMPROVEMENT.md`](BLOCK4_SELF_IMPROVEMENT.md) — self-improvement: full feature doc + ops runbook.
+- [`BLOCK4_FIXER_HARDENING.md`](BLOCK4_FIXER_HARDENING.md) — self-improvement: failure modes + deploy runbook.
 - [`MVP_PITCH.md`](MVP_PITCH.md) · [`PRIVACY_POLICY.md`](PRIVACY_POLICY.md) · [`TERMS.md`](TERMS.md)
 
 ---
