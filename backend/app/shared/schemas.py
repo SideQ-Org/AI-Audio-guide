@@ -301,6 +301,10 @@ class NavStop(BaseModel):
     order: int
     status: NavStopStatus = NavStopStatus.PENDING
     leg_distance_m: float = 0.0  # walking distance from the previous stop to this one
+    teased: bool = False  # the "coming up" teaser for this stop was already spoken
+    # The full place — kept so the stop can be narrated even when it's outside the narrow
+    # live inventory disc (the route is fetched over a wider radius than inventory_radius_m).
+    place: Place | None = None
 
 
 class NavState(BaseModel):

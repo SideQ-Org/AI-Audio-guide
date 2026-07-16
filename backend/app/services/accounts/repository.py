@@ -334,6 +334,21 @@ async def get_narration_samples(
     return list(rows)
 
 
+async def recent_walk_quality(
+    session: AsyncSession, *, tier: str, limit: int = 60
+) -> list[tuple[float, str, int]]:
+    """Recent scored walks for a tier as ``(score, sid, n_blurbs)`` — the canary monitor splits
+    these into canary/control by the walk's ``sid`` (Phase 6). Only content walks (n_blurbs>0)."""
+    rows = await session.execute(
+        select(WalkQuality.score, Walk.sid, WalkQuality.n_blurbs)
+        .join(Walk, Walk.id == WalkQuality.walk_id)
+        .where(WalkQuality.tier == tier, WalkQuality.n_blurbs > 0)
+        .order_by(WalkQuality.computed_at.desc())
+        .limit(limit)
+    )
+    return [(float(s), str(sid), int(n)) for s, sid, n in rows.all()]
+
+
 async def append_walk_quality(
     session: AsyncSession, *, walk_id: uuid.UUID | str, user_id: uuid.UUID | str, **fields
 ) -> WalkQuality:

@@ -161,6 +161,31 @@ class PromptRegistry:
             self._write_active(state, target, tier)
             return target_id
 
+    # -- canary (Phase 6): a version staged for a FRACTION of live traffic ---- #
+    def set_canary(self, target: str, tier: str, version_id: str) -> None:
+        """Stage a version as the canary (tested on a traffic fraction, distinct from ``active``
+        = full rollout). The candidate must already be a saved version."""
+        with self._lock(target, tier):
+            state = self._active_state(target, tier)
+            state["canary"] = version_id
+            state["updated_at"] = _now_iso()
+            self._write_active(state, target, tier)
+
+    def clear_canary(self, target: str, tier: str) -> None:
+        with self._lock(target, tier):
+            state = self._active_state(target, tier)
+            if "canary" in state:
+                state.pop("canary")
+                state["updated_at"] = _now_iso()
+                self._write_active(state, target, tier)
+
+    def canary_version(self, target: str, tier: str) -> str | None:
+        return self._active_state(target, tier).get("canary")
+
+    def canary_text(self, target: str, tier: str) -> str | None:
+        vid = self.canary_version(target, tier)
+        return self.version_text(target, tier, vid) if vid else None
+
     def kill_switch(self, target: str, tier: str) -> str | None:
         """Force the active pointer back to the pinned baseline (the one-flag emergency revert)."""
         with self._lock(target, tier):
@@ -171,6 +196,7 @@ class PromptRegistry:
             if state.get("active") != base:
                 state.setdefault("history", []).append(state["active"])
             state["active"] = base
+            state.pop("canary", None)  # kill any in-flight canary experiment too
             state["updated_at"] = _now_iso()
             self._write_active(state, target, tier)
             return base

@@ -235,6 +235,25 @@ async def run_forever(*, use_judge: bool = False, interval_s: float = 60.0) -> N
             n = await sweep_once(use_judge=use_judge)
             if n:
                 _log.info("sweep scored %d walk(s)", n)
+            await _canary_monitor_tick()
         except Exception as e:  # noqa: BLE001 — keep the loop alive across transient failures
             _log.warning("sweep failed: %s", e)
         await asyncio.sleep(interval_s)
+
+
+async def _canary_monitor_tick() -> None:
+    """Phase 6: after each sweep, let the canary monitor auto-rollback/promote. No-op unless
+    canary is enabled + a version is staged (dormant by default)."""
+    from app.config import settings
+    if not settings.canary_enabled:
+        return
+    try:
+        from .canary import monitor_and_rollback
+        from .registry import PromptRegistry
+        reg = PromptRegistry(settings.prompt_registry_dir)
+        for tier in ("free", "paid"):
+            action = await monitor_and_rollback(reg, target="narrator", tier=tier)
+            if action:
+                _log.info("canary monitor (narrator/%s): %s", tier, action)
+    except Exception as e:  # noqa: BLE001 — monitoring must never crash the worker
+        _log.warning("canary monitor failed: %s", e)

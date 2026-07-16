@@ -8,6 +8,7 @@ separate from the volatile RUNTIME_CONTEXT so it can be prompt-cached later.
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
 from functools import cache
 from pathlib import Path
 
@@ -48,10 +49,30 @@ def _load_file(name: str) -> str:
 # around a single evaluation, or per-session at the canary boundary.
 _overrides: dict[str, str] = {}
 
+# PER-SESSION overrides (Block 4 Phase 6 canary). A ContextVar so a fraction of live sessions can
+# use a CANARY prompt while everyone else uses the file — set at the session boundary, auto-scoped
+# to that request's context, never leaking across sessions. Empty ⇒ no effect (dormant by default).
+_session_overrides: ContextVar[dict[str, str] | None] = ContextVar(
+    "prompt_session_overrides", default=None
+)
+
 
 def _load(name: str) -> str:
+    so = _session_overrides.get()
+    if so and name in so:
+        return so[name]
     ov = _overrides.get(name)
     return ov if ov is not None else _load_file(name)
+
+
+def set_session_prompt_override(mapping: dict[str, str] | None) -> None:
+    """Set the per-session prompt overrides for the current context (Phase 6 canary). Pass a
+    ``{name: text}`` map for this session, or None to clear. Auto-scoped to the ContextVar."""
+    _session_overrides.set(mapping or None)
+
+
+def clear_session_prompt_override() -> None:
+    _session_overrides.set(None)
 
 
 def set_prompt_override(name: str, text: str | None) -> None:

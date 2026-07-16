@@ -4,18 +4,24 @@ accept/reject/skip mutate it correctly. Uses the fixture orchestrator (offline).
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from app.services.agent.factory import build_orchestrator
+from app.services.geo.providers import StaticPlaceProvider
 from app.services.geo.route_planner import RoutePlanner
 from app.services.geo.routing import StraightLineRouting
 from app.services.state.store import InMemoryStateStore
 from app.shared.schemas import GeoPoint, NavStopStatus
 
+_FIX = Path(__file__).resolve().parent / "fixtures" / "places_red_square.json"
+
 
 def _orch():
     orch = build_orchestrator(store=InMemoryStateStore())
-    # Force straight-line routing so the test needs no OSRM (fixture provider already offline).
-    orch.route_planner = RoutePlanner(StraightLineRouting(), orch.discovery.provider)
+    # Force straight-line routing + the offline fixture POIs so this test never hits the
+    # network (the .env may set GEO_SOURCE=overpass, which would make discovery.provider live).
+    provider = StaticPlaceProvider.from_json(_FIX)
+    orch.route_planner = RoutePlanner(StraightLineRouting(), provider)
     return orch
 
 

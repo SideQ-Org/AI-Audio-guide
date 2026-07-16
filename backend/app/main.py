@@ -116,6 +116,28 @@ def get_orchestrator() -> Orchestrator:
     return _orchestrator
 
 
+_canary_registry = None
+
+
+def _apply_canary(session_id: str, tier: str) -> None:
+    """Phase 6: route a canary fraction of sessions to the staged canary narrator prompt for this
+    turn. DORMANT unless ``canary_enabled`` — returns immediately (zero overhead) by default, so it
+    can never affect a normal session. Best-effort: any hiccup falls back to the file prompt."""
+    if not settings.canary_enabled:
+        return
+    global _canary_registry
+    try:
+        from app.services.agent.prompts import set_session_prompt_override
+        from app.services.quality.canary import canary_prompt_for
+        from app.services.quality.registry import PromptRegistry
+
+        if _canary_registry is None:
+            _canary_registry = PromptRegistry(settings.prompt_registry_dir)
+        set_session_prompt_override(canary_prompt_for(_canary_registry, session_id, tier))
+    except Exception:  # noqa: BLE001 — canary must never disturb a live session
+        pass
+
+
 async def _load_entitlement(user_id: str) -> tuple[str, int]:
     """Resolve (effective_tier, tours_today) for a signed-in user from the durable
     store — the WS side of the /me entitlements. Degrades to ("free", 0) for guests,
@@ -673,6 +695,7 @@ class _SessionRuntime:
         SESSION_ID.set(self.session_id)  # attribute LLM cost to this session
         SESSION_TIER.set(self.tier)  # tier -> model + enrichment for this turn
         USER_ADDRESS.set(self.user_address)
+        _apply_canary(self.session_id, self.tier)  # Phase 6 canary (dormant unless enabled)
 
         # 0) Just back from a question or an un-pause? Lead back into the tour with ONE short
         #    spoken bridge. Return to the same topic if it's still relevant (we're within the
@@ -754,6 +777,10 @@ class _SessionRuntime:
                 self.session_id, self.live_position, self.live_heading, self.live_pace
             )
         await self._maybe_send_places()
+        # Guided-mode side events (stop_reached / route_done / reroute) ride out here, BEFORE
+        # the stop's narration frame, so the client marks the arrival then hears the blurb.
+        if out.nav_event:
+            await self.send_json(out.nav_event)
         if out.kind == "narration" and out.text:
             self._present(out)
             if out.place_id is None:  # an area beat (not an object) -> warm the next one

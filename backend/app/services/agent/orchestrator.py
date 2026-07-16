@@ -134,6 +134,9 @@ class OrchestratorOutput:
     card: str | None = None  # structured, re-readable facts for the object card (not spoken)
     image: str | None = None  # object photo URL (Wikipedia lead image) for the card, if any
     category: str | None = None  # OSM-derived category (card icon + label on the client)
+    # Guided mode side event to forward to the client alongside this output (a dict ready to
+    # send: stop_reached / route_done / reroute). None for the reactive path.
+    nav_event: dict | None = None
 
 
 def fingerprint(candidates: list[Candidate], cache=None, language: str = "ru") -> str:
@@ -203,6 +206,7 @@ def _nav_from_route(
                 significance=s.significance,
                 order=s.order,
                 leg_distance_m=max(0.0, s.cum_distance_m - prev),
+                place=s.place,
             )
         )
         prev = s.cum_distance_m
@@ -304,6 +308,134 @@ class Orchestrator:
             if s.order == stop_index and s.status == NavStopStatus.PENDING:
                 s.status = NavStopStatus.SKIPPED
         await self.store.save(st)
+
+    # -- guided-mode per-tick leading ------------------------------------- #
+    async def _guided_tick(
+        self, st: SessionState, position: GeoPoint, heading: Heading, pace: Pace
+    ) -> OrchestratorOutput:
+        """One tick of leading the walker along an accepted route: skip past handled stops,
+        narrate the current one on arrival, otherwise tease it / stay quiet en route."""
+        nav = st.nav
+        stops = nav.stops
+        idx = nav.current_index
+        while idx < len(stops) and stops[idx].status != NavStopStatus.PENDING:
+            idx += 1
+        nav.current_index = idx
+        if idx >= len(stops):
+            return await self._finish_guided_route(st)
+
+        stop = stops[idx]
+        dist = haversine_m(position, GeoPoint(lat=stop.lat, lon=stop.lon))
+        if dist <= settings.nav_arrival_radius_m:
+            return await self._arrive_stop(st, stop, position, heading, pace)
+        return await self._guided_between(st, stop, dist, heading, pace)
+
+    async def _finish_guided_route(self, st: SessionState) -> OrchestratorOutput:
+        """The last stop is done — end the guided route (client shows the summary on Stop)."""
+        was_active = st.nav.active
+        st.nav.active = False
+        out = await self._finish(st, State.IDLE, "silence")
+        if was_active:
+            out.nav_event = {"type": "route_done"}
+            log.info("guided route done (%d stops)", len(st.nav.stops))
+        return out
+
+    async def _arrive_stop(
+        self, st: SessionState, stop: NavStop, position: GeoPoint, heading: Heading, pace: Pace
+    ) -> OrchestratorOutput:
+        """Walker reached a stop: mark it reached, warm the next one, and narrate this one
+        with the SAME pipeline the reactive path uses (choice dictated by the plan, not the
+        nearest-object bubble)."""
+        stop.status = NavStopStatus.REACHED
+        st.nav.current_index += 1
+        self._warm_next_stop(st, heading, pace)
+        nav_event = {"type": "stop_reached", "stop_index": stop.order, "place_id": stop.place_id}
+        log.info("guided arrive stop #%d %r", stop.order, stop.name)
+
+        place = stop.place
+        cands = (
+            build_candidates(
+                position, heading, [place], settings.weave_radius_m,
+                st.seen_place_ids, _dedup(st),
+            )
+            if place is not None
+            else []
+        )
+        if not cands:
+            out = await self._finish(st, State.AT_STOP, "silence")
+            out.nav_event = nav_event
+            return out
+        plan = st.narrative_plan
+        try:
+            step = await self.pipeline.step(
+                cands, seen=st.seen_place_ids, history=st.narration_history,
+                address=st.address, heading=heading, pace=pace,
+                preferences=st.control_patch, language=st.language,
+                theme=plan.active_theme() or None, told=plan.told,
+                next_hook=plan.next_hook, passing=True, recall=st.memory.objects,
+            )
+        except Exception:
+            out = await self._finish(st, State.ERROR, "error")
+            out.nav_event = nav_event
+            return out
+        if step.text and step.place:
+            out = await self._commit_step(st, step)
+        else:
+            out = await self._finish(st, State.AT_STOP, "silence")
+        out.nav_event = nav_event
+        return out
+
+    async def _guided_between(
+        self, st: SessionState, stop: NavStop, dist: float, heading: Heading, pace: Pace
+    ) -> OrchestratorOutput:
+        """Between stops: tease the upcoming stop once (name + distance, no facts), else stay
+        quiet — the client's direction chip/arrow carries the leading."""
+        if (
+            settings.nav_between_mode == "teaser"
+            and not stop.teased
+            and dist <= settings.nav_teaser_radius_m
+        ):
+            stop.teased = True
+            text = lang.nav_teaser(st.language, stop.name, dist)
+            if text:
+                st.narration_history = (st.narration_history + [text])[-_HISTORY_CAP:]
+                log.info("guided teaser stop #%d %r @%.0fm", stop.order, stop.name, dist)
+                return await self._finish(st, State.EN_ROUTE, "narration", text)
+        return await self._finish(st, State.EN_ROUTE, "silence")
+
+    def _warm_next_stop(self, st: SessionState, heading: Heading, pace: Pace) -> None:
+        """Fire-and-forget pre-generation of the NEXT stop's blurb (like warm_ahead on the
+        reactive path), so its narration is instant on arrival instead of a cold LLM wait."""
+        nav = st.nav
+        nxt = next(
+            (
+                s for s in nav.stops[nav.current_index:]
+                if s.status == NavStopStatus.PENDING and s.place is not None
+            ),
+            None,
+        )
+        if nxt is None:
+            return
+        cands = build_candidates(
+            GeoPoint(lat=nxt.lat, lon=nxt.lon), heading, [nxt.place],
+            settings.weave_radius_m, st.seen_place_ids, _dedup(st),
+        )
+        if not cands:
+            return
+        plan = st.narrative_plan
+
+        async def _run() -> None:
+            await self.pipeline.warm_narration(
+                cands[0], seen=st.seen_place_ids, history=st.narration_history,
+                address=st.address, heading=heading, pace=pace,
+                preferences=st.control_patch, language=st.language,
+                theme=plan.active_theme() or None, told=plan.told,
+                next_hook=plan.next_hook, recall=st.memory.objects,
+            )
+
+        task = asyncio.ensure_future(as_background(_run()))
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
 
     # Ranking of in-bubble candidates: distance, with a bonus for objects in the gaze
     # cone (visible ahead). 0.6 => a 70 m object ahead ranks like ~42 m, so it beats a
@@ -550,6 +682,12 @@ class Orchestrator:
             # server can't reach the cloud — degrade to silence (cached replay
             # is the client's job offline). Stay until GO_ONLINE.
             return await self._finish(st, State.OFFLINE, "offline")
+
+        # Proactive guided mode: once the user accepted a planned route, a dedicated tick
+        # leads them along it (arrival + narrate the stop) instead of the reactive
+        # nearest-object logic below. The reactive path stays entirely untouched.
+        if st.guide_mode == "guided" and st.nav.active and st.nav.accepted:
+            return await self._guided_tick(st, position, heading, pace)
 
         # Greet FIRST, INSTANTLY — before the (possibly slow) geocode, so a degraded
         # Overpass can't stall the opener for 15+ s. It's a varied, time-of-day opener;

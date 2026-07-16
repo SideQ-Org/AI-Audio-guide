@@ -22,8 +22,14 @@ services:
       # Set to "0" to keep the pre-Block-4 behaviour.
       CAPTURE_NARRATION_SAMPLES: "1"
       CAPTURE_INTEREST_SIGNALS: "1"
+      # Phase 6 canary: the prompt registry (versions + memory + active/canary pointer) lives on a
+      # SHARED volume so backend (reads the canary prompt per session), quality-worker (monitors +
+      # rolls back), and the on-demand optimizer (writes candidates) all see the same state. Canary
+      # is DORMANT until CANARY_ENABLED=1 + a version is staged + CANARY_FRACTION>0.
+      PROMPT_REGISTRY_DIR: /registry
     volumes:
       - guide-data:/data
+      - registry-data:/registry
     expose:
       - "8000"                   # internal only — Caddy fronts it; not published
     healthcheck:
@@ -54,8 +60,10 @@ services:
       # Followable decision log: what the worker decides after each walk. Read live with
       # `docker logs -f ai-guide-quality`, or from the rotating file at /data/quality/quality.log.
       QUALITY_LOG_DIR: /data/quality
+      PROMPT_REGISTRY_DIR: /registry   # shared with backend for the Phase 6 canary monitor
     volumes:
       - quality-data:/data       # own volume — remove the container + this volume to wipe cleanly
+      - registry-data:/registry  # shared prompt registry (canary monitor reads/writes here)
     command: ["python", "-m", "app.services.quality"]
 
   # Proactive "guided" mode: self-hosted pedestrian routing (foot profile). Internal-only,
@@ -93,5 +101,6 @@ services:
 volumes:
   guide-data:
   quality-data:      # quality-worker's decision log (Block 4); removable with the container
+  registry-data:     # shared prompt registry (Phase 6 canary: versions + memory + pointers)
   caddy-data:
   caddy-config:

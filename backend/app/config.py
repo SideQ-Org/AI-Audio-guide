@@ -477,6 +477,15 @@ class Settings(BaseSettings):
     # Self-improvement durability (Block 4 hardening): where prompt versions + the experiment
     # ledger (memory) + active pointer live. File-based, git-friendly.
     prompt_registry_dir: str = "prompt_registry"
+    # Phase 6 canary auto-apply (DORMANT by default — no live prompt change until BOTH
+    # canary_enabled AND a canary version is staged in the registry AND fraction>0). A fraction
+    # of sessions (by stable sid-hash) use the staged canary narrator prompt; the worker monitors
+    # canary vs control walk_quality and auto-rolls-back on regression / promotes on a clear win.
+    canary_enabled: bool = False
+    canary_fraction: float = 0.0        # 0.0–1.0 of sessions routed to the canary prompt
+    canary_min_walks: int = 8           # min scored walks per arm before a promote/rollback call
+    canary_margin: float = 0.05         # canary must beat/lose control by this (0–1) to act
+    canary_window: int = 60             # recent walks considered by the monitor
     # Aggressive-research knobs (fix #3): widen when the pipeline fetches facts for a facts-less
     # object (_start_fact_warm), so the fix for "no facts" is research, not fabrication/silence.
     # Defaults preserve today's behaviour (paid + MEDIUM+); broaden to research more.

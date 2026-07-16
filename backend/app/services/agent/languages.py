@@ -757,6 +757,28 @@ def area_intro_told(code: str | None) -> str:
     return _AREA_INTRO_TOLD.get(normalize(code), _AREA_INTRO_TOLD_EN)
 
 
+# Guided mode: a one-line "coming up ahead" teaser for the next planned stop. No LLM and
+# no facts — just its name + rounded distance, so it can never fabricate history.
+_NAV_TEASER: dict[str, str] = {
+    "ru": "Впереди — {name}, метрах в {dist}.",
+    "en": "Coming up ahead — {name}, about {dist} metres.",
+    "es": "Más adelante — {name}, a unos {dist} metros.",
+    "fr": "Devant nous — {name}, à environ {dist} mètres.",
+    "de": "Voraus — {name}, etwa {dist} Meter.",
+    "it": "Più avanti — {name}, a circa {dist} metri.",
+    "pt": "À frente — {name}, a cerca de {dist} metros.",
+    "zh": "前方就是{name}，大约{dist}米。",
+}
+_NAV_TEASER_EN = _NAV_TEASER["en"]
+
+
+def nav_teaser(code: str | None, name: str, dist_m: float) -> str:
+    """A no-LLM teaser for the next guided stop: its name + distance rounded to 10 m."""
+    d = max(10, int(round(dist_m / 10.0)) * 10)
+    tmpl = _NAV_TEASER.get(normalize(code), _NAV_TEASER_EN)
+    return tmpl.format(name=name, dist=d)
+
+
 # --- Code-level narration guards (backstops over the prompt, which models disobey) --
 # Lowercased substrings that mark a listener-directed offer/solicitation ("if you want,
 # I'll tell you more"). A trailing sentence containing one — or ending in a question mark
