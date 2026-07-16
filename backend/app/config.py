@@ -220,7 +220,13 @@ class Settings(BaseSettings):
     # cone, within the live window) are fetched in the background so they're cached
     # before you arrive — narration on approach is then instant, not a cold web search.
     enrich_lookahead_k: int = 4
-    enrich_timeout_s: float = 9.0  # web search needs ~5-7s; give it time so facts arrive
+    # Web-search timeout. MUST exceed the real round-trip or EVERY area comes back factless and
+    # the guide goes silent (cityless cap). Measured on prod: deepseek + the OpenRouter web plugin
+    # distils ~3000 tokens of injected search results, which takes ~14-16 s for an area query — so
+    # the old 9.0 s (and even 15 s) timed out on essentially every call (Долгопрудный: 32 empty /
+    # 1 facts). 25 s clears it with margin under load; the area fetch is warmed in the background
+    # behind the intro so the extra seconds don't delay the first beat.
+    enrich_timeout_s: float = 25.0
     # When ELABORATING (going deeper on one object across follow-ups) and the cached facts are
     # thinner than this, fetch a bit MORE (angle-focused web search) so the deeper angles have
     # fresh material instead of running dry after a detail or two ("будет больше фактов искать").

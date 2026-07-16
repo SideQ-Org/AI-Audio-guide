@@ -7,6 +7,7 @@ Stage 3). The caller owns seen-list and history across ticks.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 
 from app.config import settings
@@ -87,6 +88,11 @@ _AREA_ENRICH_SYSTEM = (
     "the commonly-known. Verifiable facts only, no invention or opinions. If there is "
     "no reliable information about this exact district, reply with exactly: NONE."
 )
+
+# Area web-search is non-deterministic (see enrich_area): retry a fast empty within a time budget.
+_AREA_ENRICH_MAX_ATTEMPTS = 4       # hard cap on attempts per enrich_area call
+_AREA_ENRICH_MIN_ATTEMPT_S = 6.0    # need at least this much budget left to start another attempt
+_AREA_ENRICH_ATTEMPT_CAP_S = 20.0   # per-attempt timeout (covers the ~14-16 s slow-but-real case)
 
 
 def _context(addr: Address) -> NarrationContext:
@@ -677,32 +683,52 @@ class TextPipeline:
         coords = f"coordinates {point.lat:.4f}, {point.lon:.4f}" if point else ""
         query = f"{where} {coords} neighbourhood history what it's known for unusual facts".strip()
         system = _AREA_ENRICH_SYSTEM + _lang_directive(language or self.language)
-        try:
-            coro = self.area_llm.web_facts(
-                system, query, max_results=3, max_tokens=400
-            )
-            text = (await asyncio.wait_for(coro, timeout=timeout_s) if timeout_s else await coro)
-        except (Exception, asyncio.TimeoutError):
-            return None
-        cleaned = (text or "").strip()
-        if not cleaned or _is_no_data(cleaned):
-            return None
-        return cleaned
+        # The OpenRouter web plugin is NON-DETERMINISTIC: for the SAME area query it either does the
+        # search (~14-16 s, rich facts) or returns empty/no-data FAST (~2-3 s) ~40% of the time
+        # (measured on prod). A single call therefore left ~half of all areas factless -> silent.
+        # Retry on a fast empty (cheap) within a time budget; a slow attempt that times out is not
+        # retried (it wouldn't fit). This is what actually makes an area reliably factful.
+        budget = timeout_s or 25.0
+        deadline = time.monotonic() + budget
+        for attempt in range(_AREA_ENRICH_MAX_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            # Always try at least ONCE; only gate RETRIES on the remaining budget.
+            if attempt > 0 and remaining < _AREA_ENRICH_MIN_ATTEMPT_S:
+                break
+            per = min(max(remaining, 1.0), _AREA_ENRICH_ATTEMPT_CAP_S) if timeout_s else None
+            try:
+                coro = self.area_llm.web_facts(system, query, max_results=3, max_tokens=400)
+                text = await (asyncio.wait_for(coro, timeout=per) if per else coro)
+            except Exception:  # noqa: BLE001 — timeout/transient: a slow attempt won't fit a retry
+                return None
+            cleaned = (text or "").strip()
+            if cleaned and not _is_no_data(cleaned):
+                return cleaned
+            # empty / no-data (usually a fast 2-3 s) -> loop and retry within the budget
+        return None
 
     async def warm_area_facts(
         self, area_key: str | None, address: Address, point: GeoPoint | None,
         *, timeout_s: float | None = None, language: str | None = None,
     ) -> None:
         """Background: fetch the area facts once and cache them by `area_key`, so the FIRST area
-        beat serves them instantly instead of blocking ~9 s on web search. Caches "" for a dry
-        area too (so it isn't refetched). Best-effort — safe to call repeatedly / concurrently."""
+        beat serves them instantly instead of blocking on web search. Best-effort — safe to call
+        repeatedly / concurrently.
+
+        Only NON-EMPTY facts are cached: a transient failure (timeout/429) must NOT poison the area
+        for the whole session. If empty, `take_area_facts` returns None and `_area_line` retries
+        inline; a genuinely dry area is then cached once at the session level (`st.area_facts`)."""
         if not area_key:
             return
         key = (area_key, language or self.language)
         if key in self._area_facts_cache:
             return
-        facts = await self.enrich_area(address, point, timeout_s=timeout_s, language=language)
-        self._area_facts_cache.setdefault(key, facts or "")
+        # Background + non-blocking, so give it a GENEROUS budget: more retries of the flaky web
+        # plugin fit -> the area reliably lands facts before the beats need them.
+        budget = (timeout_s or 25.0) * 2
+        facts = await self.enrich_area(address, point, timeout_s=budget, language=language)
+        if facts:
+            self._area_facts_cache.setdefault(key, facts)
 
     def take_area_facts(self, area_key: str | None, language: str | None = None) -> str | None:
         """Peek warmed area facts for (`area_key`, language) — a string ("" = warmed-but-dry), or
