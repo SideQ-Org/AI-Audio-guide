@@ -321,10 +321,12 @@ class Settings(BaseSettings):
     # invented history). Such objects only fire the bubble when you're genuinely beside them.
     # Notable (MEDIUM+) or fact-bearing objects keep the full narrate_radius_m.
     narrate_radius_low_m: float = 32.0
-    # The reach fallback (gaze-gated) narrates an object AHEAD only within this radius —
-    # much tighter than weave_radius_m so the guide doesn't announce a place 150-200 m
-    # away ("triggered several houses off"). It fires only for what you're about to reach.
-    reach_radius_m: float = 100.0
+    # The reach fallback (gaze-gated, FORWARD-only — the reach set filters `in_gaze_cone`, so this
+    # extends the trigger distance for objects AHEAD without touching side/behind, which stay on
+    # the narrate_radius_m bubble). Bumped 100 -> 130: notable things straight ahead (a monument
+    # ~110 m up the street) were falling just outside 100 m and going unnarrated on sparse walks.
+    # Still much tighter than weave_radius_m so it doesn't announce a place 150-200 m off.
+    reach_radius_m: float = 130.0
     # Cap how many (nearest) candidates are considered per tick — bounds the
     # Scorer's input/output size (its JSON grows linearly with candidate count).
     scorer_max_candidates: int = 6
