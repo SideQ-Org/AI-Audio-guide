@@ -374,7 +374,10 @@ class OpenAICompatLLM:
         if (
             SESSION_TIER.get() == "paid"
             and settings.openai_model_paid
-            and role not in (Role.COMPANION, Role.ANSWER_FAST)
+            # JUDGE/OPTIMIZER are excluded on purpose: the judge must stay a DIFFERENT model
+            # family from the generator (self-preference bias) and the optimizer picks its own
+            # strong model — neither should be swapped for the paid generator.
+            and role not in (Role.COMPANION, Role.ANSWER_FAST, Role.JUDGE, Role.OPTIMIZER)
         ):
             return settings.openai_model_paid
         override = {
@@ -385,6 +388,11 @@ class OpenAICompatLLM:
             Role.ENRICHER: settings.openai_model_enricher,
             # Fast tier-1 answer: its own (fast, Groq-routed) model; falls back to the base model.
             Role.ANSWER_FAST: settings.openai_model_answer_fast,
+            # Interestingness judge (Block 4): its own model, a different family than the
+            # generator. Empty ⇒ falls back to the base model (fine for offline eval).
+            Role.JUDGE: settings.openai_model_judge,
+            # Prompt-rewrite proposer (Block 4 loop): the strongest reachable model.
+            Role.OPTIMIZER: settings.openai_model_optimizer,
         }.get(role, "")
         model = override or self._default
         if not model:

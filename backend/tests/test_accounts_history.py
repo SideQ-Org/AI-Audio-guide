@@ -22,7 +22,13 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.services.accounts import db, history  # noqa: E402
-from app.services.accounts.models import Base, Walk, WalkEvent  # noqa: E402
+from app.services.accounts.models import (  # noqa: E402
+    Base,
+    InterestSignal,
+    NarrationSample,
+    Walk,
+    WalkEvent,
+)
 from app.shared.schemas import (  # noqa: E402
     Address,
     GeoPoint,
@@ -112,6 +118,97 @@ def test_logged_in_writes_walk_and_events():
     assert title == "Прогулка по Долгопрудный"
     assert same_id  # SessionState.walk_id points at the persisted walk
     assert ended  # ended_at trails the last event
+
+
+def test_capture_narration_sample_persists_facts():
+    """Block 4 Phase 0: with capture ON, a narrated object also writes a NarrationSample
+    carrying the FACTS + context, linked to the same walk (the eval corpus)."""
+
+    async def run():
+        await _init_db()
+        settings.database_url = "sqlite+aiosqlite://"
+        settings.capture_narration_samples = True
+        try:
+            st = _state(str(uuid.uuid4()))
+            st.tier = "paid"  # tier is recorded onto the sample (per-tier scoring)
+            history.record_object(
+                st, _place("p1"), Significance.HIGH, "рассказ про место",
+                facts="Построено в 1901 году архитектором X.",
+                input_json={"place": {"name": "Место", "type": "museum"}, "theme": "модерн"},
+            )
+            await _drain()
+            async with db.get_sessionmaker()() as s:
+                sample = (await s.scalars(select(NarrationSample))).one()
+                walk = (await s.scalars(select(Walk))).one()
+                return (
+                    sample.facts, sample.narration, sample.significance,
+                    sample.kind, sample.seq, sample.input_json,
+                    str(sample.walk_id) == str(walk.id), sample.tier,
+                )
+        finally:
+            settings.capture_narration_samples = False
+            await db.dispose_engine()
+            settings.database_url = ""
+
+    facts, narr, sig, kind, seq, ctx, linked, tier = asyncio.run(run())
+    assert facts == "Построено в 1901 году архитектором X."  # grounding source captured
+    assert narr == "рассказ про место"
+    assert sig == "HIGH"
+    assert kind == "object"
+    assert seq == 0  # mirrors the event seq
+    assert ctx["theme"] == "модерн"  # context JSON round-trips
+    assert linked  # FK ties the sample to the walk (CASCADE-deletes with it)
+    assert tier == "paid"  # tier recorded for per-tier scoring
+
+
+def test_capture_off_writes_no_samples():
+    """Default (flag off): object history is written, but NO NarrationSample rows."""
+
+    async def run():
+        await _init_db()
+        settings.database_url = "sqlite+aiosqlite://"
+        # capture_narration_samples defaults to False
+        try:
+            st = _state(str(uuid.uuid4()))
+            history.record_object(
+                st, _place("p1"), Significance.HIGH, "текст", facts="какие-то факты"
+            )
+            await _drain()
+            return await _count(WalkEvent), await _count(NarrationSample)
+        finally:
+            await db.dispose_engine()
+            settings.database_url = ""
+
+    n_events, n_samples = asyncio.run(run())
+    assert n_events == 1  # the object was still recorded normally
+    assert n_samples == 0  # but no corpus row when capture is off
+
+
+def test_capture_interest_signal_persists():
+    """Block 4 Phase 0: a follow-up signal is logged with its Twitter-spirit weight."""
+
+    async def run():
+        await _init_db()
+        settings.database_url = "sqlite+aiosqlite://"
+        settings.capture_interest_signals = True
+        try:
+            st = _state(str(uuid.uuid4()))
+            st.last_place_id = "p1"
+            history.record_interest_signal(st, "followup", meta={"text": "а что это?"})
+            await _drain()
+            async with db.get_sessionmaker()() as s:
+                sig = (await s.scalars(select(InterestSignal))).one()
+                return sig.kind, sig.weight, sig.place_id, sig.language
+        finally:
+            settings.capture_interest_signals = False
+            await db.dispose_engine()
+            settings.database_url = ""
+
+    kind, weight, place_id, lang = asyncio.run(run())
+    assert kind == "followup"
+    assert weight == 1.0  # strongest positive signal
+    assert place_id == "p1"  # keyed to the last narrated object
+    assert lang == "ru"
 
 
 def test_walk_path_is_persisted_and_survives_events():

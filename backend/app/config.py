@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     model_answer_fast: str = ""  # Anthropic-path fast-tier model (usually the OpenAI path is used)
     model_landmark: str = "claude-opus-4-8"
     model_enricher: str = "claude-haiku-4-5"
+    # Interestingness judge (Block 4). MUST be a different family than the generator
+    # (self-preference bias). Off the hot path — a strong model is fine. Empty ⇒ falls
+    # back to the narrator model (acceptable for offline eval, not for a real gold gate).
+    model_judge: str = ""
+    # Prompt-rewrite proposer for the self-improvement loop (Block 4 Phase 5). The strongest
+    # frontier model available — it rewrites system prompts from the failure taxonomy. Empty
+    # ⇒ falls back to the landmark (premium) model.
+    model_optimizer: str = ""
 
     # OpenAI-compatible provider (LM Studio / OpenRouter / etc.)
     #   LM Studio:  OPENAI_BASE_URL=http://localhost:1234/v1  OPENAI_API_KEY=lm-studio
@@ -51,6 +59,11 @@ class Settings(BaseSettings):
     openai_model_companion: str = ""
     openai_model_landmark: str = ""
     openai_model_enricher: str = ""
+    # Interestingness judge (Block 4), OpenAI-compat path. A reachable NON-generator family
+    # (e.g. a Qwen/GLM/Mistral via OpenRouter from the geoblocked region). Empty ⇒ base model.
+    openai_model_judge: str = ""
+    # Prompt-rewrite proposer (Block 4 loop), OpenAI-compat path. The strongest reachable model.
+    openai_model_optimizer: str = ""
     # Two-tier answer: a FAST model gives ONE instant sentence, then the Companion (strong tier)
     # continues/deepens without repeating it (see docs/MODEL_LATENCY_RESEARCH.md). Empty model or
     # answer_two_tier=False => single-tier (Companion only, the old behaviour). Reachable pick from
@@ -342,6 +355,32 @@ class Settings(BaseSettings):
     inventory_ttl_s: float = 3600.0  # evict idle session inventories
     inventory_max_sessions: int = 2000  # LRU cap on cached inventories
 
+    # Pedestrian routing (proactive "guided" mode). "straight" needs no network and is
+    # MVP-safe; "osrm" talks to a self-hosted foot-profile OSRM on the internal docker
+    # network (geo-block-proof, see services/geo/routing.py). On any OSRM error the route
+    # planner falls back to straight-line, so the walk still gets a route.
+    routing_source: str = "straight"  # straight | osrm
+    osrm_url: str = "http://osrm-foot:5000"
+    routing_timeout_s: float = 4.0
+    walk_speed_mps: float = 1.3  # ~4.7 km/h — straight-line duration + budget->metres conversion
+    routing_table_max_points: int = 100  # cap the OSRM /table request size (pre-filter top-N)
+
+    # Route planning (guided mode): how the guide picks + orders interesting stops.
+    route_min_significance: str = "MEDIUM"  # SKIP|LOW|MEDIUM|HIGH|LANDMARK — floor for the route
+    route_min_stops: int = 2  # fewer interesting places than this => "little of note nearby"
+    route_max_stops: int = 8  # hard cap on stops per route
+    route_max_fetch_m: float = 4000.0  # cap the candidate-fetch radius for a long walk
+    route_corridor_pad_m: float = 600.0  # widen the origin->destination corridor by this
+
+    # Guided navigation: leading the walker along the accepted route.
+    nav_arrival_radius_m: float = 35.0  # within this of a pending stop => "reached", narrate it
+    nav_teaser_radius_m: float = 150.0  # tease the next stop once inside this
+    nav_between_mode: str = "teaser"  # teaser | silent | area — what to do between stops
+    nav_offroute_m: float = 50.0  # distance off the remaining route line that counts as "off-route"
+    nav_offroute_debounce_s: float = 20.0  # hold off-route this long before rerouting
+    nav_reroute_min_interval_s: float = 30.0  # min gap between reroutes (anti-spam)
+    nav_reroute_max: int = 8  # after this many reroutes, lead by straight line quietly
+
     # State store ("" => in-memory)
     redis_url: str = ""
     session_ttl_s: float = 3600.0  # evict idle in-memory sessions after this (0 => never)
@@ -418,12 +457,44 @@ class Settings(BaseSettings):
     # become two walks (design §5). 30 min default.
     walk_gap_s: float = 1800.0
 
+    # --- Self-improvement corpus capture (Block 4 §D2, Phase 0) ------------------
+    # Persist a NarrationSample (FACTS + full NarratorInput → narration) per narrated
+    # object, and real interest signals (follow-up/skip/…). Both durable-layer only
+    # (auth user + DATABASE_URL), best-effort, off the hot path. OFF by default so the
+    # base MVP behaviour is unchanged until the quality worker is wired up.
+    capture_narration_samples: bool = False
+    capture_interest_signals: bool = False
+    # Quality-worker sidecar (Block 4 Phase 4). Runs in a SEPARATE container; these are read
+    # only there. use_judge adds the LLM judge (needs a reachable non-generator model).
+    quality_worker_interval_s: float = 60.0
+    quality_worker_use_judge: bool = False
+    quality_worker_limit: int = 50  # walks scored per sweep
+    # Decision log: the quality worker + optimizer write a followable, human-readable trace of
+    # what they DECIDE after each walk (score, taxonomy, worst blurbs) and what the optimizer
+    # tunes (propose/accept/reject/rollback). Empty ⇒ stdout only (docker logs); set a dir for a
+    # rotating file sink that survives the docker-logs ring buffer.
+    quality_log_dir: str = ""
+    # Self-improvement durability (Block 4 hardening): where prompt versions + the experiment
+    # ledger (memory) + active pointer live. File-based, git-friendly.
+    prompt_registry_dir: str = "prompt_registry"
+    # Aggressive-research knobs (fix #3): widen when the pipeline fetches facts for a facts-less
+    # object (_start_fact_warm), so the fix for "no facts" is research, not fabrication/silence.
+    # Defaults preserve today's behaviour (paid + MEDIUM+); broaden to research more.
+    fact_warm_tier_min: str = "paid"    # paid | free  (free ⇒ research on the free tier too)
+    fact_warm_sig_min: str = "MEDIUM"   # min significance to research (LOW|MEDIUM|HIGH|LANDMARK)
+
     # --- Free/paid tier limits (feature: account tiers) --------------------------
     # Free accounts are cost-capped so ads roughly offset the (DeepSeek + wiki-only)
     # spend; paid accounts (Gemini + full web facts) are uncapped. Enforced
     # server-side; the client mirrors them for UX (upgrade prompts). 0 => unlimited.
     free_tier_daily_tours: int = 2  # new walks a free user may start per rolling 24h
     free_tier_walk_limit: int = 10  # saved walks retained for a free user (ring buffer)
+    # Beta / early-access: mint every NEW durable user as a lifetime "paid" account (no
+    # ads, no caps, premium model). A convenience knob for the closed-testing phase — set
+    # OFF the day real store subscriptions go live so new signups follow the normal free
+    # path. Only affects users created *after* this is on; existing rows are untouched.
+    # Applied in get_or_create_user (subscription_platform="grant", expires_at=None).
+    grant_premium_to_new_users: bool = False
 
     # Supabase JWT verification for WS auth (design §9a). Empty => auth disabled, every
     # session is a guest (current MVP behaviour). Set at least one verification path:

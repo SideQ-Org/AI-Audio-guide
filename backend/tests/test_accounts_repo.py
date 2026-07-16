@@ -69,6 +69,27 @@ def test_get_or_create_user_is_idempotent():
     assert a == b  # same identity -> same user, no duplicate
 
 
+def test_grant_premium_to_new_users_flag(monkeypatch):
+    # Beta early-access: with the flag on, a NEWLY created user is minted lifetime paid;
+    # with it off (default) they stay free. Existing users are never re-tiered.
+    from app.config import settings
+
+    async def run(flag: bool):
+        monkeypatch.setattr(settings, "grant_premium_to_new_users", flag)
+        engine, Session = await _setup()
+        async with Session() as s:
+            u = await repo.get_or_create_user(s, provider="email", provider_uid="new")
+            await s.commit()
+            tier, eff, exp = u.tier, repo.effective_tier(u), u.subscription_expires_at
+        await engine.dispose()
+        return tier, eff, exp
+
+    on_tier, on_eff, on_exp = asyncio.run(run(True))
+    assert on_tier == "paid" and on_eff == "paid" and on_exp is None  # lifetime paid
+    off_tier, off_eff, _ = asyncio.run(run(False))
+    assert off_tier == "free" and off_eff == "free"  # default path untouched
+
+
 def test_user_id_seeded_from_provider():
     async def run():
         engine, Session = await _setup()

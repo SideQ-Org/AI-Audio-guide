@@ -24,6 +24,8 @@ from app.services.enrichment.enricher import (
 from app.services.geo.discovery import Discovery
 from app.services.geo.geocoder import Geocoder, OverpassGeocoder
 from app.services.geo.providers import OverpassProvider, StaticPlaceProvider
+from app.services.geo.route_planner import RoutePlanner
+from app.services.geo.routing import make_routing
 from app.services.state.store import StateStore, default_store
 
 # Demo data (self-contained walk) — used when geo_source/enrichment=fixture/mock.
@@ -149,7 +151,11 @@ def build_orchestrator(store: StateStore | None = None) -> Orchestrator:
         planner=_planner(),
         name_localizer=_name_localizer(),
     )
+    discovery = _discovery()
+    # Proactive guided mode: the route planner reuses the discovery provider as its POI
+    # source and the configured routing backend (OSRM self-hosted, else straight-line).
+    route_planner = RoutePlanner(make_routing(), discovery.provider)
     return Orchestrator(
-        _discovery(), pipeline, companion, store or default_store(),
-        geocoder=_geocoder(), summarizer=_summarizer(),
+        discovery, pipeline, companion, store or default_store(),
+        geocoder=_geocoder(), summarizer=_summarizer(), route_planner=route_planner,
     )

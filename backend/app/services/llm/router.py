@@ -18,6 +18,8 @@ class Role(StrEnum):
     LANDMARK = "landmark"  # high-end narrator for LANDMARK-significance places
     ENRICHER = "enricher"  # web-search fact gathering (off the hot-path)
     ANSWER_FAST = "answer_fast"  # tier-1 instant one-sentence answer (two-tier barge-in)
+    JUDGE = "judge"  # interestingness evaluator (Block 4) — off-hot-path, other family
+    OPTIMIZER = "optimizer"  # prompt-rewrite proposer (Block 4 loop) — strongest frontier model
 
 
 def model_for(role: Role) -> str:
@@ -28,4 +30,6 @@ def model_for(role: Role) -> str:
         Role.LANDMARK: settings.model_landmark,
         Role.ENRICHER: settings.model_enricher,
         Role.ANSWER_FAST: settings.model_answer_fast or settings.model_companion,
+        Role.JUDGE: settings.model_judge or settings.model_narrator,
+        Role.OPTIMIZER: settings.model_optimizer or settings.model_landmark,
     }[role]

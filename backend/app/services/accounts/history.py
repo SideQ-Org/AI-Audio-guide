@@ -57,9 +57,21 @@ async def _write_summary(walk_id: str, user_id: str, summary: str) -> None:
         _log.warning("record_summary failed: %s", e)
 
 
-def record_object(state, place, significance, narration: str) -> None:
+def record_object(
+    state,
+    place,
+    significance,
+    narration: str,
+    *,
+    facts: str | None = None,
+    input_json: dict | None = None,
+) -> None:
     """Record a just-narrated object into the current walk (creating/rotating the walk
-    as needed). Safe to call on every narration; returns immediately."""
+    as needed). Safe to call on every narration; returns immediately.
+
+    When ``settings.capture_narration_samples`` is on, also persists a NarrationSample
+    (the FACTS + full NarratorInput that produced this blurb) in the SAME transaction —
+    the Block 4 eval corpus. Off ⇒ identical behaviour to before."""
     if not accounts_enabled() or not state.user_id:
         return
 
@@ -98,6 +110,16 @@ def record_object(state, place, significance, narration: str) -> None:
         "significance": significance.value if significance is not None else "MEDIUM",
         "narration": narration or None,
     }
+    # The extra corpus payload (Block 4). Only assembled when capture is on; carried
+    # alongside the event so it lands in the same transaction (walk FK satisfied).
+    sample = None
+    if settings.capture_narration_samples and (narration or "").strip():
+        sample = {
+            "kind": "object",
+            "facts": facts,
+            "input_json": input_json,
+            "narration": narration,
+        }
     meta = {
         "user_id": state.user_id,
         "tier": getattr(state, "tier", "free"),  # free => ring-buffer the saved history
@@ -108,12 +130,14 @@ def record_object(state, place, significance, narration: str) -> None:
         # snapshot the downsampled route so far (persisted to the walk row below)
         "path": list(getattr(state, "path", []) or []),
     }
-    task = asyncio.create_task(_write(new_walk, wid, meta, event))
+    task = asyncio.create_task(_write(new_walk, wid, meta, event, sample))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
 
 
-async def _write(new_walk: bool, wid: uuid.UUID, meta: dict, event: dict) -> None:
+async def _write(
+    new_walk: bool, wid: uuid.UUID, meta: dict, event: dict, sample: dict | None = None
+) -> None:
     try:
         async with session_scope() as session:
             if new_walk:
@@ -145,7 +169,24 @@ async def _write(new_walk: bool, wid: uuid.UUID, meta: dict, event: dict) -> Non
                     while (await repo.count_walks(session, user_id=meta["user_id"])) > limit:
                         if not await repo.delete_oldest_walk(session, user_id=meta["user_id"]):
                             break
-            await repo.append_event(session, walk_id=wid, **event)
+            ev = await repo.append_event(session, walk_id=wid, **event)
+            # Block 4 corpus: same transaction, reuses the event's seq/place metadata.
+            if sample is not None:
+                await repo.append_narration_sample(
+                    session,
+                    walk_id=wid,
+                    user_id=meta["user_id"],
+                    seq=ev.seq,
+                    kind=sample["kind"],
+                    language=meta["language"],
+                    tier=meta.get("tier", "free"),
+                    narration=sample["narration"],
+                    place_id=event["place_id"],
+                    category=event["category"],
+                    significance=event["significance"],
+                    facts=sample.get("facts"),
+                    input_json=sample.get("input_json"),
+                )
             # ended_at trails the last narrated object, giving the list view a sensible
             # "last activity" time + duration. The client sends an explicit `end` on Stop;
             # a walk shorter than its 10-min record threshold is pruned there (see
@@ -163,3 +204,55 @@ async def _write(new_walk: bool, wid: uuid.UUID, meta: dict, event: dict) -> Non
                 )
     except Exception as e:  # noqa: BLE001 — history is best-effort; never break the tour
         _log.warning("history write failed (walk=%s): %r", wid, e)
+
+
+# Twitter-spirit default weights: effortful positive ≫ passive ≫ negative (Block 4 Part C).
+_SIGNAL_WEIGHTS = {
+    "followup": 1.0,     # a question right after a blurb — our strongest "was interesting"
+    "complete": 0.2,     # listened to the end (passive, guardrail)
+    "truncate": -0.1,    # cut off before the end
+    "skip": -0.7,
+    "mute": -0.8,
+    "pause": -0.3,
+    "control_patch": -0.5,  # "покороче / пропусти магазины" right after a beat
+}
+
+
+def record_interest_signal(
+    state, kind: str, *, place=None, significance=None, meta: dict | None = None
+) -> None:
+    """Log a real interest signal for a narrated object (Block 4 Part C). Best-effort,
+    detached, never raises; no-op for guests / disabled store / capture flag off. The
+    weight is looked up from ``_SIGNAL_WEIGHTS`` unless overridden in ``meta['weight']``."""
+    if (
+        not settings.capture_interest_signals
+        or not accounts_enabled()
+        or not state.user_id
+    ):
+        return
+    weight = float((meta or {}).get("weight", _SIGNAL_WEIGHTS.get(kind, 0.0)))
+    sig = significance.value if significance is not None else getattr(
+        state, "last_significance", None
+    )
+    payload = {
+        "user_id": str(state.user_id),
+        "kind": kind,
+        "weight": weight,
+        "walk_id": str(state.walk_id) if state.walk_id else None,
+        "place_id": (place.id if place is not None else getattr(state, "last_place_id", None)),
+        "category": (place.category if place is not None else None),
+        "significance": sig.value if hasattr(sig, "value") else sig,
+        "language": state.language,
+        "meta": meta or None,
+    }
+    task = asyncio.create_task(_write_signal(payload))
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+async def _write_signal(payload: dict) -> None:
+    try:
+        async with session_scope() as session:
+            await repo.append_interest_signal(session, **payload)
+    except Exception as e:  # noqa: BLE001 — best-effort analytics; never break the tour
+        _log.warning("record_interest_signal failed: %s", e)

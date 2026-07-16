@@ -172,12 +172,36 @@ Flutter app. See `backend/README.md` for the full list.
 
 ---
 
+## Quality & self-improvement (Block 4)
+
+Narration quality is measured as an **objective number**, and the system can propose its own prompt
+fixes — safely, in a **separate sidecar container** that never touches the live tour:
+
+- **Instrumentation** captures, per narrated object, the FACTS the narrator saw + the narration
+  (`narration_samples`) and real interest signals (follow-up ≫ completion ≫ skip; `interest_signals`).
+- A **quality worker** (`app/services/quality/`, deploy service `quality-worker`) sweeps finished
+  walks and scores each blurb with a reference-free **metrics panel** + an **LLM judge** (a
+  different model family than the generator — fights self-preference bias), producing a per-walk
+  `walk_quality` row: interestingness score, hard-gate results (grounded / cliché / non-repeat /
+  **coverage** — silence is a failure, not a fix), a failure taxonomy, and the worst blurbs. It
+  reads the DB and writes its own table — never the backend event loop or prompts. Its decisions
+  are logged followably (`docker logs -f ai-guide-quality`).
+- An offline **optimizer loop** (`sim/prompt_optimize.py`) rewrites a system prompt against the
+  evaluator (OPRO + TextGrad), gated by a held-out **gold judge** + hard-gates, and can also propose
+  more aggressive **enrichment** (fetch facts) instead of going quiet. Every attempt is remembered
+  and every version is reversible via the **PromptRegistry** (memory + immutable versions + active
+  pointer + rollback). It only produces validated candidates — it never writes the live prompt.
+
+See [`BLOCK4_FIXER_HARDENING.md`](BLOCK4_FIXER_HARDENING.md) for the full failure-mode model +
+mechanics, and `Блок4_Интересность_метрики_и_луп_самоулучшения.md` for the original design/research.
+
 ## Docs
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — full system design (Russian).
 - [`ACCOUNTS_DESIGN.md`](ACCOUNTS_DESIGN.md) — the optional accounts / walk-history layer.
 - [`MODEL_COMPARISON.md`](MODEL_COMPARISON.md) — model choice & cost.
 - [`E2E_REGIONS.md`](E2E_REGIONS.md) — regional evaluation results.
+- [`BLOCK4_FIXER_HARDENING.md`](BLOCK4_FIXER_HARDENING.md) — self-improvement: failure modes + mechanics.
 - [`MVP_PITCH.md`](MVP_PITCH.md) · [`PRIVACY_POLICY.md`](PRIVACY_POLICY.md) · [`TERMS.md`](TERMS.md)
 
 ---

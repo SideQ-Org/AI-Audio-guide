@@ -17,6 +17,11 @@ services:
       ENRICH_CACHE_PATH: /data/enrich.json
       WALK_LOG_VERBOSE: "1"      # full per-tick walk trace (debugging)
       WALK_LOG_DIR: /data/walks  # persist the trace to /data/walks/walk.log (survives docker-logs rotation)
+      # Block 4 self-improvement corpus capture (durable-layer only, best-effort). Turns on
+      # the (FACTS + context → narration) samples + interest signals the quality-worker reads.
+      # Set to "0" to keep the pre-Block-4 behaviour.
+      CAPTURE_NARRATION_SAMPLES: "1"
+      CAPTURE_INTEREST_SIGNALS: "1"
     volumes:
       - guide-data:/data
     expose:
@@ -27,6 +32,49 @@ services:
       timeout: 5s
       retries: 3
       start_period: 40s
+
+  # Block 4 Phase 4: the self-improvement analysis sidecar. Reuses the backend image but runs
+  # the quality worker instead of the API. Internal-only (no ports), shares the same .env so it
+  # reads the SAME Postgres (DATABASE_URL) + LLM keys. It only READS walks and WRITES its own
+  # walk_quality table — it never touches the live tour, prompts, or the backend process.
+  quality-worker:
+    image: ai-audio-guide-backend
+    container_name: ai-guide-quality
+    restart: unless-stopped
+    depends_on:
+      - backend
+    env_file:
+      - ../backend/.env
+    environment:
+      # Judge ON: the LLM judge (a reachable NON-generator family) adds the groundedness verdict
+      # the code panel can't produce (it under-detects fabrication). Reachable from the prod region.
+      QUALITY_WORKER_USE_JUDGE: "1"
+      OPENAI_MODEL_JUDGE: "qwen/qwen3-max"
+      QUALITY_WORKER_INTERVAL_S: "120"
+      # Followable decision log: what the worker decides after each walk. Read live with
+      # `docker logs -f ai-guide-quality`, or from the rotating file at /data/quality/quality.log.
+      QUALITY_LOG_DIR: /data/quality
+    volumes:
+      - quality-data:/data       # own volume — remove the container + this volume to wipe cleanly
+    command: ["python", "-m", "app.services.quality"]
+
+  # Proactive "guided" mode: self-hosted pedestrian routing (foot profile). Internal-only,
+  # so its traffic never leaves the docker network — unlike a public routing API it can't be
+  # geo-blocked the way OpenAI/Anthropic/Google are from the prod region. The backend reaches
+  # it at http://osrm-foot:5000 (set ROUTING_SOURCE=osrm in ../backend/.env to turn it on;
+  # with ROUTING_SOURCE unset the planner uses straight-line distances and this service is
+  # dormant). Region data (region.osrm*) must be pre-processed once into ./osrm — see
+  # ./osrm/build-osrm.sh. Without those files the container won't start; that's expected until
+  # you've built them for your region.
+  osrm-foot:
+    image: osrm/osrm-backend
+    container_name: ai-guide-osrm
+    restart: unless-stopped
+    command: ["osrm-routed", "--algorithm", "mld", "/data/region.osrm"]
+    volumes:
+      - ./osrm:/data            # region.osm.pbf + pre-processed region.osrm* (see build-osrm.sh)
+    expose:
+      - "5000"                  # internal only — reached by the backend over the docker network
 
   caddy:
     image: caddy:2
@@ -44,5 +92,6 @@ services:
 
 volumes:
   guide-data:
+  quality-data:      # quality-worker's decision log (Block 4); removable with the container
   caddy-data:
   caddy-config:

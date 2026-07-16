@@ -281,6 +281,51 @@ class NarrativePlan(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# guided navigation (proactive "Проведи меня" mode — a pre-planned route of stops)
+# --------------------------------------------------------------------------- #
+class NavStopStatus(StrEnum):
+    PENDING = "pending"  # not yet reached
+    REACHED = "reached"  # walker arrived + it was narrated
+    SKIPPED = "skipped"  # user (or a reroute) dropped it
+
+
+class NavStop(BaseModel):
+    """One planned stop on a guided route — a place worth stopping at, in visit order."""
+
+    place_id: str
+    name: str
+    category: str = ""
+    lat: float
+    lon: float
+    significance: Significance = Significance.MEDIUM
+    order: int
+    status: NavStopStatus = NavStopStatus.PENDING
+    leg_distance_m: float = 0.0  # walking distance from the previous stop to this one
+
+
+class NavState(BaseModel):
+    """The active guided route + progress along it. Lives inside SessionState so it
+    persists and resumes across reconnects like the rest of the walk. Empty/inactive for
+    the reactive ("free") mode, so old clients and free walks are unaffected."""
+
+    active: bool = False  # a route has been planned
+    accepted: bool = False  # the user accepted it — the guide may start leading
+    mode: str = ""  # loop | destination
+    origin: GeoPoint | None = None
+    destination: GeoPoint | None = None
+    budget_m: float = 0.0
+    budget_min: float = 0.0
+    stops: list[NavStop] = Field(default_factory=list)
+    polyline: list[list[float]] = Field(default_factory=list)  # [[lat, lon], ...] full route line
+    total_distance_m: float = 0.0
+    total_duration_s: float = 0.0
+    current_index: int = 0  # index of the next PENDING stop
+    off_route_since: float | None = None  # epoch s the walker first went off-route (debounce)
+    last_reroute_at: float | None = None
+    reroute_count: int = 0
+
+
+# --------------------------------------------------------------------------- #
 # session
 # --------------------------------------------------------------------------- #
 class SessionState(BaseModel):
@@ -363,6 +408,11 @@ class SessionState(BaseModel):
     # which objects/topics were covered — anti-repeat over the ENTIRE walk (not the
     # narration_history window) and the substrate for callbacks / long-term memory.
     memory: WalkMemory = Field(default_factory=WalkMemory)
+    # Proactive guided mode ("Проведи меня"): "free" = the reactive guide (unchanged
+    # default), "guided" = the guide leads a pre-planned route. `nav` holds that route +
+    # progress. Both default so old clients / free walks behave exactly as before.
+    guide_mode: str = "free"  # free | guided
+    nav: NavState = Field(default_factory=NavState)
     state: str = "idle"  # FSM state name
     greeted: bool = False  # the instant session-opener greeting was already spoken (once)
     tick_seq: int = 0  # monotonic position-tick counter (walk-log correlation only)
@@ -488,3 +538,88 @@ class WSSummary(BaseModel):
 class WSStateUpdate(BaseModel):
     type: Literal["state"] = "state"
     state: str
+
+
+# --------------------------------------------------------------------------- #
+# guided mode (proactive route) — WS frames
+# --------------------------------------------------------------------------- #
+# client -> server
+class WSStartGuided(BaseModel):
+    """Start a proactive guided walk: the guide plans a route and proposes it. Needs a
+    fresh position first. `mode=loop` returns near the start after ~budget; `destination`
+    heads to `dest_lat/lon` (or, with pick_landmark, the top landmark nearby)."""
+
+    type: Literal["start_guided"] = "start_guided"
+    mode: Literal["loop", "destination"] = "loop"
+    budget_min: float | None = Field(default=None, ge=5.0, le=240.0)
+    budget_km: float | None = Field(default=None, ge=0.3, le=30.0)
+    dest_lat: float | None = Field(default=None, ge=-90.0, le=90.0)
+    dest_lon: float | None = Field(default=None, ge=-180.0, le=180.0)
+    pick_landmark: bool = False  # destination without an explicit point => guide picks the landmark
+    theme: str = ""
+
+
+class WSRouteAccept(BaseModel):
+    type: Literal["route_accept"] = "route_accept"
+
+
+class WSRouteReject(BaseModel):
+    type: Literal["route_reject"] = "route_reject"
+
+
+class WSSkipStop(BaseModel):
+    type: Literal["skip_stop"] = "skip_stop"
+    stop_index: int = Field(ge=0)
+
+
+# server -> client
+class WSRouteStop(BaseModel):
+    """One stop of a proposed/updated route (map marker + list row on the client)."""
+
+    index: int
+    name: str
+    category: str = ""
+    lat: float
+    lon: float
+    significance: str = "MEDIUM"
+    leg_distance_m: float = 0.0
+    status: str = "pending"
+
+
+class WSRouteProposal(BaseModel):
+    """A freshly planned route offered to the user (accept/reject on the client)."""
+
+    type: Literal["route"] = "route"
+    mode: str
+    stops: list[WSRouteStop] = Field(default_factory=list)
+    polyline: list[list[float]] = Field(default_factory=list)  # [[lat, lon], ...]
+    total_distance_m: float = 0.0
+    total_duration_s: float = 0.0
+
+
+class WSStopReached(BaseModel):
+    type: Literal["stop_reached"] = "stop_reached"
+    stop_index: int
+    place_id: str = ""
+
+
+class WSReroute(BaseModel):
+    """The tail of the route was replanned (user drifted off, or skipped a stop)."""
+
+    type: Literal["reroute"] = "reroute"
+    stops: list[WSRouteStop] = Field(default_factory=list)
+    polyline: list[list[float]] = Field(default_factory=list)
+    reason: str = "off_route"
+
+
+class WSRouteDone(BaseModel):
+    type: Literal["route_done"] = "route_done"
+
+
+class WSNavProgress(BaseModel):
+    """Optional server-side progress correction; the client mostly computes this locally."""
+
+    type: Literal["nav"] = "nav"
+    current_index: int
+    distance_to_next_m: float
+    bearing_deg: float | None = None

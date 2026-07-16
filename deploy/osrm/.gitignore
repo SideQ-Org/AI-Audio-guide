@@ -1,0 +1,4 @@
+# OSRM region data — large binaries, built locally per region (see build-osrm.sh)
+*.osm.pbf
+*.osrm
+*.osrm.*

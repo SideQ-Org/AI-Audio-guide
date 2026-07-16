@@ -76,6 +76,7 @@ class StepResult:
     next_hook: str | None = None  # baton to weave into the next paragraph
     card: str | None = None  # re-readable structured facts for the object card (not spoken)
     image: str | None = None  # object photo URL (Wikipedia thumbnail) for the card, if any
+    facts: str | None = None  # the FACTS handed to the narrator — the grounding source (Block 4)
 
 
 # Atypical-facts-forward area enrichment: lesser-known facts about the district /
@@ -93,6 +94,19 @@ _AREA_ENRICH_SYSTEM = (
 _AREA_ENRICH_MAX_ATTEMPTS = 4       # hard cap on attempts per enrich_area call
 _AREA_ENRICH_MIN_ATTEMPT_S = 6.0    # need at least this much budget left to start another attempt
 _AREA_ENRICH_ATTEMPT_CAP_S = 20.0   # per-attempt timeout (covers the ~14-16 s slow-but-real case)
+
+
+def _fact_warm_gate(sig: Significance) -> bool:
+    """Config-driven gate for aggressive research (Block 4 fix #3). Whether the pipeline spends a
+    background web-search to fetch facts for a facts-less object. Widen ``fact_warm_tier_min``
+    ('free') and ``fact_warm_sig_min`` ('LOW') so the answer to 'no facts' is RESEARCH, not
+    fabrication/silence. Defaults preserve the old behaviour (paid + MEDIUM+)."""
+    tier_ok = settings.fact_warm_tier_min == "free" or SESSION_TIER.get() == "paid"
+    try:
+        threshold = Significance(settings.fact_warm_sig_min)
+    except ValueError:
+        threshold = Significance.MEDIUM
+    return tier_ok and at_least(sig, threshold)
 
 
 def _context(addr: Address) -> NarrationContext:
@@ -473,12 +487,7 @@ class TextPipeline:
         # if it stayed silent, by the facts-aware fingerprint re-opening next tick (cache-warm,
         # fast) while it's still nearby. Gated to paid + MEDIUM+; the enricher's per-place
         # negative cache prevents a repeat spend. Mirrors elaborate()'s cache-miss dance.
-        if (
-            (floored or not text)
-            and not chosen.facts_available
-            and at_least(sig, Significance.MEDIUM)
-            and SESSION_TIER.get() == "paid"
-        ):
+        if (floored or not text) and not chosen.facts_available and _fact_warm_gate(sig):
             self._start_fact_warm([chosen], ctx, lang)
         log.info(
             "step place=%r cat=%s sig=%s facts=%s side=%s passing=%s reach=%s"
@@ -491,7 +500,8 @@ class TextPipeline:
             clip(text),
         )
         return StepResult(
-            text, ScorerOutput(), place, sig, next_hook=hook, card=card, image=image
+            text, ScorerOutput(), place, sig, next_hook=hook, card=card, image=image,
+            facts=chosen.facts_snippet,
         )
 
     async def elaborate(
@@ -627,7 +637,8 @@ class TextPipeline:
         return split_hook(raw, language or self.language)
 
     async def make_plan(
-        self, address: Address, *, facts: str | None, theme_override: str | None, language: str | None = None
+        self, address: Address, *, facts: str | None, theme_override: str | None,
+        language: str | None = None,
     ):
         """Form the story arc (theme + outline + opener) for a freshly entered area."""
         from app.shared.schemas import PlannerInput

@@ -42,6 +42,29 @@ create policy walk_events_delete_own on walk_events
   );
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Self-improvement corpus (Block 4 §D2). The quality worker reads these under the
+-- service-role key (bypasses RLS); the backend writes them under service-role too.
+-- These select-own policies are defence-in-depth for any direct client access; no
+-- insert/update policies (writes stay backend-only). A walk deletion cascades to its
+-- narration_samples via the FK, honouring the right to be forgotten.
+
+alter table narration_samples enable row level security;
+alter table interest_signals enable row level security;
+
+drop policy if exists narration_samples_select_own on narration_samples;
+create policy narration_samples_select_own on narration_samples
+  for select using (user_id = auth.uid());
+
+drop policy if exists interest_signals_select_own on interest_signals;
+create policy interest_signals_select_own on interest_signals
+  for select using (user_id = auth.uid());
+
+alter table walk_quality enable row level security;
+drop policy if exists walk_quality_select_own on walk_quality;
+create policy walk_quality_select_own on walk_quality
+  for select using (user_id = auth.uid());
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Community (design/COMMUNITY.md §3.3). Reads in v1 all go through the backend
 -- (service role bypasses RLS); these policies are defence-in-depth for any direct
 -- client access. Writes stay backend-only — no insert/update/delete policies.

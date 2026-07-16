@@ -1,0 +1,1 @@
+{"id": "prod-cand1-20260716", "target": "narrator", "tier": "free", "verdict": "rejected", "parent": null, "dev": 1.25, "gold": 1.0, "silence": 0.0, "gates_ok": true, "stop_reason": "gold_gate_failed", "n": 4, "judge": "qwen/qwen3-max", "corpus_ref": "", "ts": "2026-07-16T12:31:53.956699+00:00"}

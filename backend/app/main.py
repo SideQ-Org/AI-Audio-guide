@@ -63,9 +63,13 @@ from app.shared.schemas import (
     WSAuth,
     WSControl,
     WSPositionUpdate,
+    WSRouteProposal,
+    WSRouteStop,
     WSSetAddressForm,
     WSSetLanguage,
     WSSetTheme,
+    WSSkipStop,
+    WSStartGuided,
     WSUserUtterance,
 )
 
@@ -129,7 +133,14 @@ async def _load_entitlement(user_id: str) -> tuple[str, int]:
             return "free", 0
         since = datetime.now(UTC) - timedelta(hours=24)
         async with session_scope() as session:
-            user = await repo.get_user(session, user_id=user_id)
+            if settings.grant_premium_to_new_users:
+                # Beta early-access: materialize the row on auth (idempotent) so the grant
+                # applies from the FIRST session, not one walk late. Returning users re-read.
+                user = await repo.get_or_create_user(
+                    session, provider="supabase", provider_uid=user_id, user_id=user_id
+                )
+            else:
+                user = await repo.get_user(session, user_id=user_id)
             tier = repo.effective_tier(user)
             tours_today = await repo.count_walks_since(
                 session, user_id=user_id, since=since
@@ -985,6 +996,17 @@ class _SessionRuntime:
                     return
             else:
                 text = WSUserUtterance.model_validate(msg).text
+            # Block 4 Part C: a question right after a blurb is our strongest "was
+            # interesting" signal. Log it (best-effort) keyed to the last narrated object;
+            # the raw text rides in meta so curiosity-vs-complaint can be split later.
+            if settings.capture_interest_signals and text.strip():
+                with contextlib.suppress(Exception):
+                    st = await self.orch.store.load(self.session_id)
+                    from app.services.accounts import history
+
+                    history.record_interest_signal(
+                        st, "followup", meta={"text": text[:200]}
+                    )
             if not await self._answer_streaming(text):
                 out = await self.orch.on_utterance(self.session_id, text)
                 await self.send_out(out)
@@ -1246,6 +1268,46 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
         state.control_patch = merge_patch(state.control_patch, c.patch)
         await orch.store.save(state)
         await rt.send_json({"type": "state", "state": state.state})
+    elif kind == "start_guided":
+        # Proactive guided mode: plan a route from the current position and PROPOSE it.
+        # The tour doesn't start leading until the client accepts (route_accept).
+        g = WSStartGuided.model_validate(msg)
+        if orch.route_planner is None:
+            await rt.send_json({"type": "error", "message": "guided mode unavailable"})
+            return
+        if rt.live_position is None:
+            await rt.send_json({"type": "error", "message": "no position yet"})
+            return
+        dest = None
+        if g.dest_lat is not None and g.dest_lon is not None:
+            dest = GeoPoint(lat=g.dest_lat, lon=g.dest_lon)
+        route = await orch.plan_route(
+            rt.session_id, rt.live_position, mode=g.mode,
+            budget_min=g.budget_min, budget_km=g.budget_km,
+            destination=dest, pick_landmark=g.pick_landmark, theme=g.theme,
+        )
+        stops_ws: list[WSRouteStop] = []
+        prev = 0.0
+        for s in route.stops:
+            stops_ws.append(WSRouteStop(
+                index=s.order, name=s.place.name, category=s.place.category,
+                lat=s.place.location.lat, lon=s.place.location.lon,
+                significance=str(s.significance),
+                leg_distance_m=max(0.0, s.cum_distance_m - prev),
+            ))
+            prev = s.cum_distance_m
+        await rt.send_json(WSRouteProposal(
+            mode=route.mode, stops=stops_ws, polyline=route.polyline,
+            total_distance_m=route.total_distance_m, total_duration_s=route.total_duration_s,
+        ).model_dump())
+    elif kind == "route_accept":
+        await orch.accept_route(rt.session_id)
+        rt.wake.set()  # let the producer start leading (Phase 2)
+    elif kind == "route_reject":
+        await orch.cancel_route(rt.session_id)
+    elif kind == "skip_stop":
+        sk = WSSkipStop.model_validate(msg)
+        await orch.skip_stop(rt.session_id, sk.stop_index)
     elif kind == "address_form":
         # The user's optional grammatical form of address ("masculine"|"feminine"|"" neutral).
         af = WSSetAddressForm.model_validate(msg)

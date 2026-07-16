@@ -37,8 +37,39 @@ _ROLE_FILE = {
 
 
 @cache
-def _load(name: str) -> str:
+def _load_file(name: str) -> str:
     return (_PROMPTS_DIR / f"{name}.txt").read_text(encoding="utf-8").strip()
+
+
+# In-process prompt overrides (Block 4 Phase 5/6). The self-improvement loop swaps a CANDIDATE
+# prompt text in here to evaluate it WITHOUT touching the file (and it's the seed of the Phase 6
+# canary hot-swap). EMPTY by default ⇒ `_load` behaves exactly as the cached file read, so live
+# behaviour is unchanged until something sets an override. Not thread-safe by design: set/clear
+# around a single evaluation, or per-session at the canary boundary.
+_overrides: dict[str, str] = {}
+
+
+def _load(name: str) -> str:
+    ov = _overrides.get(name)
+    return ov if ov is not None else _load_file(name)
+
+
+def set_prompt_override(name: str, text: str | None) -> None:
+    """Override (or, with ``text=None``, clear) the named prompt for this process. ``name`` is a
+    template stem — ``"narrator"``, ``"area"``, ``"core"``, ``"judge"``, etc."""
+    if text is None:
+        _overrides.pop(name, None)
+    else:
+        _overrides[name] = text
+
+
+def clear_prompt_overrides() -> None:
+    _overrides.clear()
+
+
+def active_overrides() -> dict[str, str]:
+    """A copy of the currently-active overrides (for diagnostics / the canary controller)."""
+    return dict(_overrides)
 
 
 # Self-reference gender clause substituted into CORE ({self_reference}). Keeps the guide's
@@ -89,6 +120,19 @@ def system_for_area(language: str) -> str:
 def system_for_planner(language: str) -> str:
     """CORE(language) + the PLANNER block — forms the area story arc."""
     return f"{_core(language)}\n\n---\n\n{_load('planner')}"
+
+
+def system_for_judge(language: str) -> str:
+    """The interestingness-judge rubric (Block 4). Deliberately STANDALONE — it does NOT
+    prepend CORE: the judge is an evaluator, not the guide, and must not inherit the guide
+    persona/voice rules. ``{language}`` names the language the blurbs are written in."""
+    return _load("judge").replace("{language}", prompt_language(language))
+
+
+def system_for_optimizer() -> str:
+    """The prompt-rewrite proposer meta-prompt (Block 4 loop). Standalone (no CORE) — it is a
+    prompt engineer rewriting the guide's prompt, not the guide itself."""
+    return _load("optimizer")
 
 
 # Barge-in Companion, STREAMING variant: same behaviour as companion.txt but the model

@@ -172,6 +172,108 @@ class WalkEvent(Base):
     walk: Mapped[Walk] = relationship(back_populates="events")
 
 
+# -- self-improvement corpus (Block 4 §D2, Phase 0) --------------------------- #
+
+
+class NarrationSample(Base):
+    """One narrated blurb + the FULL input context that produced it — the eval corpus
+    the interestingness metrics / self-improvement loop consume (Block 4).
+
+    Distinct from ``WalkEvent`` (which stores only the final text + significance for
+    replay): this keeps the ``facts`` handed to the narrator and the serialized
+    ``NarratorInput`` (``input_json``), WITHOUT which the groundedness hard-gate cannot
+    verify a claim against its source. FK→walks with CASCADE so deleting a walk (right to
+    be forgotten) drops its samples too. Written best-effort, off the hot path, only when
+    ``settings.capture_narration_samples`` is on."""
+
+    __tablename__ = "narration_samples"
+
+    id: Mapped[uuid.UUID] = mapped_column(SAUuid, primary_key=True, default=uuid.uuid4)
+    walk_id: Mapped[uuid.UUID] = mapped_column(
+        SAUuid, ForeignKey("walks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Denormalised owner so the sidecar can filter/aggregate + RLS can match auth.uid()
+    # without a join. Not an FK: the walk's own FK already ties the row to a live user.
+    user_id: Mapped[uuid.UUID] = mapped_column(SAUuid, nullable=False, index=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    # object | area | elaborate | reply — which kind of blurb this is.
+    kind: Mapped[str] = mapped_column(String(16), default="object", nullable=False)
+    language: Mapped[str] = mapped_column(String(8), nullable=False)
+    # The tier this walk ran under (free|paid) — free/paid use DIFFERENT generator models, so
+    # quality is scored + optimized per tier (Block 4). Not a gate input (facts-only is universal).
+    tier: Mapped[str] = mapped_column(String(8), default="free", nullable=False)
+    place_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    significance: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # The FACTS text the narrator was given (enrichment snippet) — the grounding source.
+    facts: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The serialized NarratorInput (build_narrator_user) — full context the model saw.
+    input_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    narration: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        SADateTime(timezone=True), default=_now, nullable=False, index=True
+    )
+
+
+class InterestSignal(Base):
+    """A real interest signal keyed to a narrated object (Block 4 Part C). Logged NOW so
+    it accumulates as future ground-truth to calibrate/replace the LLM judge. Effortful
+    positive (a follow-up question right after a blurb) ≫ passive (completion) ≫ negative
+    (skip/mute/pause). Written best-effort when ``settings.capture_interest_signals`` is
+    on; a plain analytics sink (no FK) so a signal is never lost to row-ordering."""
+
+    __tablename__ = "interest_signals"
+
+    id: Mapped[uuid.UUID] = mapped_column(SAUuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(SAUuid, nullable=False, index=True)
+    walk_id: Mapped[uuid.UUID | None] = mapped_column(SAUuid, nullable=True, index=True)
+    # followup | complete | truncate | skip | mute | pause | control_patch
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    # Signed weight in the Twitter spirit (effort ≫ passive ≫ negative), set by the caller.
+    weight: Mapped[float] = mapped_column(Double, default=0.0, nullable=False)
+    place_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    significance: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    language: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    meta: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        SADateTime(timezone=True), default=_now, nullable=False, index=True
+    )
+
+
+class WalkQuality(Base):
+    """Per-walk interestingness score written by the quality-worker sidecar (Block 4
+    Phase 4). One row per walk (``walk_id`` unique = the idempotency marker: a walk already
+    here is skipped by the sweep). FK→walks CASCADE so it drops with the walk. Pure
+    analytics — the backend never reads it on the hot path; the worker writes it, a
+    dashboard reads it."""
+
+    __tablename__ = "walk_quality"
+    __table_args__ = (UniqueConstraint("walk_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(SAUuid, primary_key=True, default=uuid.uuid4)
+    walk_id: Mapped[uuid.UUID] = mapped_column(
+        SAUuid, ForeignKey("walks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(SAUuid, nullable=False, index=True)
+    computed_at: Mapped[datetime] = mapped_column(
+        SADateTime(timezone=True), default=_now, nullable=False, index=True
+    )
+    # free|paid — segment quality by tier (different generator models per tier).
+    tier: Mapped[str] = mapped_column(String(8), default="free", nullable=False, index=True)
+    n_blurbs: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 0-100 walk interestingness (mean gated composite over blurbs).
+    score: Mapped[float] = mapped_column(Double, default=0.0, nullable=False)
+    interest_mean: Mapped[float] = mapped_column(Double, default=0.0, nullable=False)
+    grounded_rate: Mapped[float] = mapped_column(Double, default=1.0, nullable=False)
+    cliche_rate: Mapped[float] = mapped_column(Double, default=0.0, nullable=False)
+    novelty_mean: Mapped[float] = mapped_column(Double, default=0.0, nullable=False)
+    distinct_2: Mapped[float] = mapped_column(Double, default=0.0, nullable=False)
+    used_judge: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Failure taxonomy + worst-blurb diagnostics (feeds the optimizer's error analysis).
+    diagnostics: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
 # -- community (design/COMMUNITY.md §3) --------------------------------------- #
 
 

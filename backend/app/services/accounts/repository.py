@@ -16,11 +16,26 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from .models import Identity, User, Walk, WalkEvent
+from .models import (
+    Identity,
+    InterestSignal,
+    NarrationSample,
+    User,
+    Walk,
+    WalkEvent,
+    WalkQuality,
+)
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _grant_premium_default() -> bool:
+    """Whether new signups are minted as lifetime paid (beta early-access flag)."""
+    from app.config import settings
+
+    return settings.grant_premium_to_new_users
 
 
 def _as_uuid(value: uuid.UUID | str) -> uuid.UUID:
@@ -55,6 +70,13 @@ async def get_or_create_user(
     user = User(email=email, display_name=display_name)
     if user_id is not None:
         user.id = _as_uuid(user_id)
+    # Beta / early-access: mint new signups as lifetime "paid" (design: config flag, off by
+    # default — flip OFF when real store subscriptions launch). Only the create path, so
+    # existing users are never re-tiered. expires_at stays None → effective_tier == "paid".
+    if _grant_premium_default():
+        user.tier = "paid"
+        user.subscription_platform = "grant"
+        user.subscription_product = "beta_grant"
     try:
         # SAVEPOINT so that if we LOSE a create race the rollback undoes only THIS insert (not the
         # caller's whole transaction) and leaves the session usable to re-read the winner's row.
@@ -212,6 +234,114 @@ async def append_event(
         walk.object_count = seq + 1
     await session.flush()
     return event
+
+
+async def append_narration_sample(
+    session: AsyncSession,
+    *,
+    walk_id: uuid.UUID | str,
+    user_id: uuid.UUID | str,
+    seq: int,
+    kind: str,
+    language: str,
+    narration: str,
+    tier: str = "free",
+    place_id: str | None = None,
+    category: str | None = None,
+    significance: str | None = None,
+    facts: str | None = None,
+    input_json: dict | None = None,
+) -> NarrationSample:
+    """Persist one narrated blurb + the full context that produced it (Block 4 corpus).
+    Kept in the same transaction as the event write so the walk FK is satisfied and a
+    walk deletion cascades to its samples."""
+    sample = NarrationSample(
+        walk_id=_as_uuid(walk_id),
+        user_id=_as_uuid(user_id),
+        seq=seq,
+        kind=kind,
+        language=language,
+        tier=tier,
+        place_id=place_id,
+        category=category,
+        significance=significance,
+        facts=facts,
+        input_json=input_json,
+        narration=narration,
+    )
+    session.add(sample)
+    await session.flush()
+    return sample
+
+
+async def append_interest_signal(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID | str,
+    kind: str,
+    weight: float,
+    walk_id: uuid.UUID | str | None = None,
+    place_id: str | None = None,
+    category: str | None = None,
+    significance: str | None = None,
+    language: str | None = None,
+    meta: dict | None = None,
+) -> InterestSignal:
+    """Append a real interest signal (Block 4 Part C future ground-truth)."""
+    signal = InterestSignal(
+        user_id=_as_uuid(user_id),
+        kind=kind,
+        weight=weight,
+        walk_id=_as_uuid(walk_id) if walk_id is not None else None,
+        place_id=place_id,
+        category=category,
+        significance=significance,
+        language=language,
+        meta=meta,
+    )
+    session.add(signal)
+    await session.flush()
+    return signal
+
+
+# -- quality worker (Block 4 Phase 4) -------------------------------------- #
+
+
+async def list_unscored_walks(session: AsyncSession, *, limit: int = 50) -> list[Walk]:
+    """Finished walks that have no ``walk_quality`` row yet — the sweep work-list. A walk
+    is 'finished' once ``ended_at`` is set (the history writer stamps it on each event).
+    Events are eager-loaded so the caller can score without an extra round-trip."""
+    rows = await session.scalars(
+        select(Walk)
+        .outerjoin(WalkQuality, WalkQuality.walk_id == Walk.id)
+        .where(WalkQuality.id.is_(None), Walk.ended_at.is_not(None))
+        .order_by(Walk.ended_at.asc())
+        .options(selectinload(Walk.events))
+        .limit(limit)
+    )
+    return list(rows)
+
+
+async def get_narration_samples(
+    session: AsyncSession, *, walk_id: uuid.UUID | str
+) -> list[NarrationSample]:
+    """The captured (FACTS + context → narration) samples for a walk, in tour order."""
+    rows = await session.scalars(
+        select(NarrationSample)
+        .where(NarrationSample.walk_id == _as_uuid(walk_id))
+        .order_by(NarrationSample.seq.asc())
+    )
+    return list(rows)
+
+
+async def append_walk_quality(
+    session: AsyncSession, *, walk_id: uuid.UUID | str, user_id: uuid.UUID | str, **fields
+) -> WalkQuality:
+    """Write the per-walk quality row (idempotent via the unique walk_id)."""
+    row = WalkQuality(walk_id=_as_uuid(walk_id), user_id=_as_uuid(user_id), **fields)
+    session.add(row)
+    await session.flush()
+    return row
 
 
 async def end_walk(

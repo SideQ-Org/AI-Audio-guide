@@ -44,6 +44,7 @@ from app.services.geo.categories import LINEAR_CATEGORIES
 from app.services.geo.discovery import Discovery
 from app.services.geo.geocoder import Geocoder
 from app.services.geo.ranking import Dedup, _norm_name, build_candidates
+from app.services.geo.route_planner import PlannedRoute, RoutePlanner
 from app.services.llm.client import as_background
 from app.services.metrics import GUIDE
 from app.services.state.store import StateStore
@@ -57,6 +58,9 @@ from app.shared.schemas import (
     GeoPoint,
     Heading,
     NarrativePlan,
+    NavState,
+    NavStop,
+    NavStopStatus,
     Pace,
     Place,
     SessionState,
@@ -109,6 +113,12 @@ class State(StrEnum):
     OFFLINE = "offline"
     ERROR = "error"
     RECOVERY = "recovery"
+    # proactive guided mode (advisory labels for WSStateUpdate; the real logic lives in nav)
+    PLANNING = "planning"
+    PROPOSED = "proposed"
+    EN_ROUTE = "en_route"
+    AT_STOP = "at_stop"
+    REPLANNING = "replanning"
 
 
 @dataclass
@@ -176,6 +186,42 @@ def _dedup(st) -> Dedup:
     )
 
 
+def _nav_from_route(
+    route: PlannedRoute, budget_m: float | None, budget_min: float | None
+) -> NavState:
+    """Turn a freshly planned route into the persisted NavState (active, not yet accepted)."""
+    stops: list[NavStop] = []
+    prev = 0.0
+    for s in route.stops:
+        stops.append(
+            NavStop(
+                place_id=s.place.id,
+                name=s.place.name,
+                category=s.place.category,
+                lat=s.place.location.lat,
+                lon=s.place.location.lon,
+                significance=s.significance,
+                order=s.order,
+                leg_distance_m=max(0.0, s.cum_distance_m - prev),
+            )
+        )
+        prev = s.cum_distance_m
+    return NavState(
+        active=bool(stops),
+        accepted=False,
+        mode=route.mode,
+        origin=route.origin,
+        destination=route.destination,
+        budget_m=budget_m or 0.0,
+        budget_min=budget_min or 0.0,
+        stops=stops,
+        polyline=route.polyline,
+        total_distance_m=route.total_distance_m,
+        total_duration_s=route.total_duration_s,
+        current_index=0,
+    )
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -185,6 +231,7 @@ class Orchestrator:
         store: StateStore,
         geocoder: Geocoder | None = None,
         summarizer=None,
+        route_planner: RoutePlanner | None = None,
     ) -> None:
         self.discovery = discovery
         self.pipeline = pipeline
@@ -192,7 +239,71 @@ class Orchestrator:
         self.store = store
         self.geocoder = geocoder
         self.summarizer = summarizer
+        self.route_planner = route_planner  # proactive guided mode; None => guided disabled
         self._bg: set[asyncio.Task] = set()  # hold refs to fire-and-forget warm tasks
+
+    # -- proactive guided mode: plan / accept / cancel / skip --------------- #
+    async def plan_route(
+        self,
+        session_id: str,
+        origin: GeoPoint,
+        *,
+        mode: str,
+        budget_min: float | None = None,
+        budget_km: float | None = None,
+        destination: GeoPoint | None = None,
+        pick_landmark: bool = False,
+        theme: str = "",
+    ) -> PlannedRoute:
+        """Build a guided route from `origin`, store it as this session's nav state (active,
+        not yet accepted) and return it so the caller can propose it. Reuses the session
+        seen-list + dedup so a resumed/second route doesn't repeat earlier stops."""
+        assert self.route_planner is not None, "guided mode requires a route_planner"
+        st = await self.store.load(session_id)
+        budget_m = budget_km * 1000.0 if budget_km else None
+        route = await self.route_planner.build(
+            origin,
+            mode=mode,
+            budget_m=budget_m,
+            budget_min=budget_min,
+            destination=destination,
+            pick_landmark=pick_landmark,
+            seen=st.seen_place_ids,
+            dedup=_dedup(st),
+            language=st.language,
+        )
+        st.guide_mode = "guided"
+        st.nav = _nav_from_route(route, budget_m, budget_min)
+        st.state = State.PROPOSED
+        await self.store.save(st)
+        log.info(
+            "guided route planned mode=%s stops=%d dist=%.0fm dur=%.0fs",
+            route.mode, len(route.stops), route.total_distance_m, route.total_duration_s,
+        )
+        return route
+
+    async def accept_route(self, session_id: str) -> None:
+        """The user accepted the proposed route — the guide may start leading."""
+        st = await self.store.load(session_id)
+        if st.nav.active:
+            st.nav.accepted = True
+            st.state = State.EN_ROUTE
+            await self.store.save(st)
+
+    async def cancel_route(self, session_id: str) -> None:
+        """Drop the guided route and return to the free (reactive) guide."""
+        st = await self.store.load(session_id)
+        st.guide_mode = "free"
+        st.nav = NavState()
+        await self.store.save(st)
+
+    async def skip_stop(self, session_id: str, stop_index: int) -> None:
+        """Mark a pending stop as skipped (tail reroute is added in Phase 3)."""
+        st = await self.store.load(session_id)
+        for s in st.nav.stops:
+            if s.order == stop_index and s.status == NavStopStatus.PENDING:
+                s.status = NavStopStatus.SKIPPED
+        await self.store.save(st)
 
     # Ranking of in-bubble candidates: distance, with a bonus for objects in the gaze
     # cone (visible ahead). 0.6 => a 70 m object ahead ranks like ~42 m, so it beats a
@@ -765,7 +876,23 @@ class Orchestrator:
             language=st.language,
             switching=switching,
         )
-        self._record_history(st, out.place, out.significance, out.text)
+        # Compact context for the Block 4 corpus (built only when capture is on). FACTS is
+        # the grounding source; the rest is the salient decision context the model saw.
+        sample_ctx = None
+        if settings.capture_narration_samples:
+            sample_ctx = {
+                "place": {"name": out.place.name, "type": out.place.category},
+                "significance": out.significance.value if out.significance else None,
+                "theme": plan.theme or None,
+                "next_hook": out.next_hook,
+                "switching": switching,
+                "city": st.address.city or None,
+                "district": st.address.district or None,
+            }
+        self._record_history(
+            st, out.place, out.significance, out.text,
+            facts=out.facts, input_json=sample_ctx,
+        )
         return await self._finish(
             st, state, "narration", out.text, out.place, out.significance,
             card=out.card, image=out.image,
@@ -1216,16 +1343,24 @@ class Orchestrator:
         await self.store.save(st)
 
     # ---------------------------------------------------------------------- #
-    def _record_history(self, st, place, significance, text: str) -> None:
+    def _record_history(
+        self, st, place, significance, text: str,
+        *, facts: str | None = None, input_json: dict | None = None,
+    ) -> None:
         """Fire-and-forget walk-history write for a just-narrated object (phase 4).
         Guarded so guests / a disabled durable store cost nothing, and so the base
-        install never imports the accounts (SQLAlchemy) layer. Never raises."""
+        install never imports the accounts (SQLAlchemy) layer. Never raises.
+
+        ``facts``/``input_json`` feed the Block 4 corpus (persisted only when
+        ``capture_narration_samples`` is on — the writer decides)."""
         if not st.user_id or not settings.database_url:
             return
         try:
             from app.services.accounts import history
 
-            history.record_object(st, place, significance, text)
+            history.record_object(
+                st, place, significance, text, facts=facts, input_json=input_json
+            )
         except Exception:  # noqa: BLE001 — history must never disturb narration
             pass
 

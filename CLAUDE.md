@@ -46,7 +46,10 @@ LLMs (OpenRouter) or a local model (LM Studio), and the Flutter app builds to an
 - **Design docs** (read these before non-trivial changes): `ARCHITECTURE.md` (full design, in
   Russian), `CONTINUE.md` (handoff: current state, run commands, gotchas — the most up-to-date
   status), `MODEL_COMPARISON.md` (model choice/cost), `E2E_REGIONS.md` (regional eval results),
-  `BUSINESS_LOGICS.pdf` (original Russian spec, source of `SYSTEM_PROMPT_RU`). For the
+  `BUSINESS_LOGICS.pdf` (original Russian spec, source of `SYSTEM_PROMPT_RU`), plus `docs/`
+  (`ARCHITECTURE_FLOW.md` — the per-tick loop as Mermaid block-diagrams; `MODEL_LATENCY_RESEARCH.md`
+  — the barge-in latency / voice-model research, incl. why GPT Realtime voice is a non-starter under
+  the regional geoblock). For the
   accounts/tiers work: `ACCOUNTS_DESIGN.md` (durable-layer design), `SUPABASE_SETUP.md` (the
   checklist to turn accounts ON — dormant without keys), `PROD_INFRA.md` (what's prototype-grade
   and the knob to harden each), plus `PRIVACY_POLICY.md` / `TERMS.md` / `MVP_PITCH.md`. For the
@@ -236,6 +239,79 @@ are the **built** slice (the doc's "design only" note is stale — Phases 1-5 sh
 `summarizer.py` (`LLMSummarizer`) writes the **end-of-walk structured recap** from the whole-walk
 narration corpus — one post-walk LLM call fired on `end` (kept walks), delivered async as a `summary`
 WS message and rendered in the client's Stop sheet (spinner → text).
+
+**Interestingness metric & self-improvement (Block 4** — design in
+`Блок4_Интересность_метрики_и_луп_самоулучшения.md`). Narration quality is scored as a **number**,
+reference-free, in a **separate sidecar container** so it can't destabilize the live tour. The
+**analysis foundation + offline optimization loop (Phases 0–5) are built**; only the canary
+auto-apply (Phase 6) stays design. Pieces:
+- **Instrumentation (Phase 0, additive, flag-gated — `capture_narration_samples` /
+  `capture_interest_signals`, both default OFF).** `accounts/history.record_object` also writes a
+  durable **`narration_samples`** row (the FACTS given to the narrator + a compact context JSON +
+  the narration) in the same txn as the event — the groundedness gate needs the FACTS, which
+  `walk_events` doesn't store. `record_interest_signal` logs real signals (`interest_signals`:
+  follow-up barge-in ≫ completion ≫ skip/mute, Twitter-spirit weights). FACTS are threaded out via
+  `pipeline.StepResult.facts` → `orchestrator._record_history`. Tables + migrations `0008`/`0009`
+  + RLS in `db/rls.sql`; **auth-user + `DATABASE_URL` only** (guests capture nothing).
+- **Code-metrics panel (Phase 1, `agent/interest_metrics.py`).** Pure-stdlib, reference-free,
+  language-agnostic (8 languages): distinct-n, self-repetition, MTLD, NIDF, number density,
+  speakability, novelty (reuses `is_near_duplicate`), cliché (reuses `narrator._CLICHE_FILLER_MARKERS`).
+  Two audio-specific calibrations found on real prod walks: **number density counts dates spoken as
+  WORDS** ("в тридцатых годах", not "1930" — a digit-only regex reads ~0 concreteness on concrete
+  prose; per-language lexicon), and **`object_repeat_rate`** flags re-narrating the same object
+  ("опять про руины"), which lexical novelty misses when the wording differs (soft walk-score penalty
+  + a `repeat_object` taxonomy count, applied in the worker).
+  `sim/interest_corpus.py` builds the corpus from `e2e_results.json`/the DB with a deterministic
+  stratified train/dev/test/**sacred-holdout** split; `sim/interest_eval.py` prints the per-region
+  "number" (`python -m sim.interest_eval`).
+- **LLM judge (Phase 2, `agent/interest_judge.py` + `prompts/judge.txt`, role `Role.JUDGE`).**
+  G-Eval rubric (8 axes → hard-gates), pointwise + pairwise-with-order-swap. The JUDGE role is
+  pinned to a **different model family than the generator** (`config.model_judge` /
+  `openai_model_judge`, excluded from the paid-tier override) to fight self-preference bias.
+  `sim/human_calib.py` computes %agreement + **Cohen's κ** against human labels (κ≥~0.6 before the
+  judge is trusted). logprob-weighting is a documented TODO (needs a client change; the frontier
+  gold judge is geoblocked anyway → lean on the rubric + human calibration).
+- **Composite (Phase 3, `agent/interest_score.py`).** `score = interestingness · Π(hard_gates)` —
+  gates (groundedness via the persisted FACTS, cliché, non-repeat) can't be bought back by
+  interest. Inverted-U for non-monotonic axes; `fit_weights` (pure-Python ridge least-squares) fits
+  the blend on human labels.
+- **Quality worker (Phase 4, `app/services/quality/`, `deploy/` service `quality-worker`).** A
+  **separate container** off the same image + `.env`, internal-only, that sweeps finished walks
+  (`repository.list_unscored_walks`, idempotent via the unique `walk_quality.walk_id`), scores each
+  blurb (code panel + optional judge), and writes one **`walk_quality`** row (aggregates + failure
+  taxonomy). Reads DB, writes its own table — never the backend event loop / prompts. Run:
+  `python -m app.services.quality [--once] [--judge]`. A read-only dashboard over `walk_quality` is
+  the one deferred piece.
+- **Self-improvement loop (Phase 5, `sim/prompt_optimize.py` + `prompts/optimizer.txt`, role
+  `Role.OPTIMIZER`).** The "fixer": rewrites a system prompt (e.g. `narrator.txt`) against the
+  evaluator until it plateaus, **producing a validated candidate + evidence bundle — it never writes
+  the live prompt** (that's Phase 6). Hybrid OPRO(propose) + TextGrad(critique from the failure
+  taxonomy) + DSPy dev/holdout discipline. Safety, per the research: a cheap **search judge** ranks
+  candidates on dev while a **gold judge** gates promotion on the **held-out** set only (the optimizer
+  never sees held-out); **hard-gates never degrade** (no buying interest with fabrication/cliché);
+  **stop by the gold judge**, with a reward-hacking detector (search rises but gold doesn't → reject).
+  Candidates are swapped in for evaluation via an in-process **prompt override**
+  (`prompts.set_prompt_override`, empty in the live backend — also the Phase 6 hot-swap seed). The
+  LLM pieces go through `LLMClient`, so the loop is unit-tested with fakes; a live run needs reachable
+  generator + judge models. `write_candidate` persists `candidate.txt` + `evidence.json` for review.
+  Two objective safeguards found on real prod walks: the loop **rejects a "fatalistic silence" fix**
+  (a `coverage_not_degraded` gate — a candidate may not raise the silence rate; the answer to
+  "no facts" is research, not going quiet), and **fix #3** makes research real via config knobs
+  (`fact_warm_tier_min`/`fact_warm_sig_min`, used by `pipeline._fact_warm_gate`) that widen when the
+  pipeline fetches facts for a facts-less object — the optimizer can propose an enrichment
+  `config_patch` (`apply_config_patch`), not just prompt text.
+- **Durability: memory + versioning + rollback (`app/services/quality/registry.py`,
+  `BLOCK4_FIXER_HARDENING.md`).** `PromptRegistry` is a file-based, per-(target,tier) store rooted
+  at **`prompt_registry/<target>/<tier>/`** (runtime state, untracked — a fresh clone won't have it):
+  immutable version texts (`versions/<hash>.txt`), an append-only **experiment ledger**
+  (`ledger.jsonl` — the memory of what was tried and whether it was accepted/rejected/rolled-back),
+  and an **active pointer** (`active.json`) with rollback history.
+  The optimizer seeds its trajectory from `past_attempts` (persistent across runs) and refuses to
+  re-try `known_bad` versions (**oscillation guard**); on promotion it `save_version` + `set_active`.
+  `check_and_rollback` reverts the active pointer when a promoted version regresses live (the Phase-6
+  safety net), and `kill_switch` forces the pinned baseline. `BLOCK4_FIXER_HARDENING.md` models every
+  failure mode (reward-hacking, judge drift, regression/oscillation, corpus, deployment, memory
+  corruption) and the mechanic that contains each.
 
 Services (`backend/app/services/`):
 - `geo/` — OSM **Overpass** discovery: radius search, type/distance/gaze-cone ranking, adaptive
