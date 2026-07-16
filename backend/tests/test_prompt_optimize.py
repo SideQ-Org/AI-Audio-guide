@@ -204,8 +204,10 @@ def test_optimize_with_registry_remembers_and_activates(tmp_path):
         registry=reg, tier="free", rounds=2, n_candidates=1,
     ))
     assert res.improved is True
-    assert reg.active_version("narrator", "free") == res.champion.id   # active pointer moved
-    assert reg.active_text("narrator", "free") == res.champion.text     # version stored
+    # an offline win is STAGED AS CANARY (not active) — live monitor promotes it if it wins live too
+    assert reg.canary_version("narrator", "free") == res.champion.id
+    assert reg.canary_text("narrator", "free") == res.champion.text
+    assert reg.active_version("narrator", "free") != res.champion.id   # NOT full-rolled-out yet
     past = reg.past_attempts("narrator", "free")
     assert any(p["verdict"] == "accepted" and p["id"] == res.champion.id for p in past)
 

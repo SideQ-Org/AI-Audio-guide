@@ -383,11 +383,14 @@ async def optimize(
             _log.info(
                 "round %d: promoted %s (dev %.3f gold %.3f)", r, champion.id, ev.mean, gold.mean
             )
-            # MEMORY + VERSIONING: remember the win, store the version, move the active pointer.
+            # MEMORY + VERSIONING: remember the win, store the version, and STAGE it as the CANARY
+            # (not active). An offline-gold-gate win earns a LIVE trial on a traffic fraction; the
+            # worker's canary monitor promotes it to active only if it also wins live, else rolls
+            # back. This is the autonomous close: offline gate -> canary -> live monitor -> active.
             _record(vid, ct, ev, gold, "accepted", "promoted")
             if registry is not None:
                 registry.save_version(target, tier, ct, version_id=vid)
-                registry.set_active(target, tier, vid)
+                registry.set_canary(target, tier, vid)
         else:
             if not coverage_not_degraded(gold, champ_gold):
                 stop = "coverage_regressed"
