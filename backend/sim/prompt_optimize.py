@@ -141,8 +141,10 @@ class Proposer:
             "INVARIANTS": INVARIANTS,
             "N": n,
         }, ensure_ascii=False)
+        # Big budget: N full prompt rewrites is a lot of output, and a reasoning proposer spends
+        # tokens on thinking first — too small a cap yields an empty candidates array.
         data = await self._llm.complete_json(
-            Role.OPTIMIZER, system_for_optimizer(), user, _PROPOSE_SCHEMA, max_tokens=4096
+            Role.OPTIMIZER, system_for_optimizer(), user, _PROPOSE_SCHEMA, max_tokens=16000
         )
         cands = [c for c in data.get("candidates", []) if isinstance(c, str) and c.strip()]
         return cands[:n]
