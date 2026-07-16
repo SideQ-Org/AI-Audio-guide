@@ -48,7 +48,7 @@ from app.services.geo.route_planner import PlannedRoute, RoutePlanner
 from app.services.llm.client import as_background
 from app.services.metrics import GUIDE
 from app.services.state.store import StateStore
-from app.shared.geo_math import haversine_m
+from app.shared.geo_math import haversine_m, nearest_on_geometry
 from app.shared.memory import ObjectMemo
 from app.shared.schemas import (
     Address,
@@ -226,6 +226,30 @@ def _nav_from_route(
     )
 
 
+def _navstop_ws(s: NavStop) -> dict:
+    """Serialize a NavStop into the client's WSRouteStop shape (for a reroute frame)."""
+    return {
+        "index": s.order,
+        "name": s.name,
+        "category": s.category,
+        "lat": s.lat,
+        "lon": s.lon,
+        "significance": str(s.significance),
+        "leg_distance_m": s.leg_distance_m,
+        "status": str(s.status),
+    }
+
+
+def _reroute_event(nav: NavState, reason: str) -> dict:
+    """The `reroute` frame the producer forwards after the route tail is replanned."""
+    return {
+        "type": "reroute",
+        "stops": [_navstop_ws(s) for s in nav.stops],
+        "polyline": nav.polyline,
+        "reason": reason,
+    }
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -328,6 +352,9 @@ class Orchestrator:
         dist = haversine_m(position, GeoPoint(lat=stop.lat, lon=stop.lon))
         if dist <= settings.nav_arrival_radius_m:
             return await self._arrive_stop(st, stop, position, heading, pace)
+        rerouted = await self._maybe_reroute(st, position, heading, pace)
+        if rerouted is not None:
+            return rerouted
         return await self._guided_between(st, stop, dist, heading, pace)
 
     async def _finish_guided_route(self, st: SessionState) -> OrchestratorOutput:
@@ -402,6 +429,78 @@ class Orchestrator:
                 log.info("guided teaser stop #%d %r @%.0fm", stop.order, stop.name, dist)
                 return await self._finish(st, State.EN_ROUTE, "narration", text)
         return await self._finish(st, State.EN_ROUTE, "silence")
+
+    @staticmethod
+    def _offroute_distance(nav: NavState, position: GeoPoint) -> float:
+        """How far the walker is from the planned route line (0 if on it / no line)."""
+        if len(nav.polyline) < 2:
+            return 0.0
+        d, _ = nearest_on_geometry(position, nav.polyline)
+        return d
+
+    async def _maybe_reroute(
+        self, st: SessionState, position: GeoPoint, heading: Heading, pace: Pace
+    ) -> OrchestratorOutput | None:
+        """Soft reroute: if the walker strays off the route line for longer than the
+        debounce (and not too often), replan the pending tail from where they are. Returns
+        an output carrying a `reroute` event, or None when no reroute is due."""
+        nav = st.nav
+        if self.route_planner is None or nav.reroute_count >= settings.nav_reroute_max:
+            return None
+        now = time.monotonic()
+        if self._offroute_distance(nav, position) <= settings.nav_offroute_m:
+            nav.off_route_since = None
+            return None
+        if nav.off_route_since is None:
+            nav.off_route_since = now
+            return None
+        if now - nav.off_route_since < settings.nav_offroute_debounce_s:
+            return None
+        if (
+            nav.last_reroute_at is not None
+            and now - nav.last_reroute_at < settings.nav_reroute_min_interval_s
+        ):
+            return None
+        return await self._reroute_tail(st, position, heading, pace, reason="off_route")
+
+    async def _reroute_tail(
+        self, st: SessionState, position: GeoPoint, heading: Heading, pace: Pace, *, reason: str
+    ) -> OrchestratorOutput | None:
+        """Replan the remaining (PENDING) stops from the current position, keeping the ones
+        already REACHED. Renumbers the fresh tail after the reached ones and re-anchors the
+        route line. Emits a `reroute` frame for the client to redraw."""
+        assert self.route_planner is not None
+        nav = st.nav
+        reached = [s for s in nav.stops if s.status == NavStopStatus.REACHED]
+        # Don't re-offer already-covered places (reached stops + the session seen-list).
+        seen = st.seen_place_ids + [s.place_id for s in reached]
+        route = await self.route_planner.build(
+            position, mode=nav.mode,
+            budget_m=nav.budget_m or None, budget_min=nav.budget_min or None,
+            destination=nav.destination, pick_landmark=False,
+            seen=seen, dedup=_dedup(st), language=st.language,
+        )
+        if not route.stops:
+            # Nothing to replan onto — keep leading the current plan (avoid churn).
+            nav.off_route_since = None
+            nav.last_reroute_at = time.monotonic()
+            return None
+        fresh = _nav_from_route(route, nav.budget_m or None, nav.budget_min or None)
+        base = len(reached)
+        for i, s in enumerate(fresh.stops):
+            s.order = base + i
+        nav.stops = reached + fresh.stops
+        nav.polyline = fresh.polyline
+        nav.total_distance_m = fresh.total_distance_m
+        nav.total_duration_s = fresh.total_duration_s
+        nav.current_index = base
+        nav.off_route_since = None
+        nav.last_reroute_at = time.monotonic()
+        nav.reroute_count += 1
+        log.info("guided reroute (%s) -> %d fresh stops (%d kept)", reason, len(fresh.stops), base)
+        out = await self._finish(st, State.REPLANNING, "silence")
+        out.nav_event = _reroute_event(nav, reason)
+        return out
 
     def _warm_next_stop(self, st: SessionState, heading: Heading, pace: Pace) -> None:
         """Fire-and-forget pre-generation of the NEXT stop's blurb (like warm_ahead on the

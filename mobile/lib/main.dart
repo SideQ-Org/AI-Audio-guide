@@ -570,6 +570,39 @@ class _MapPin extends StatelessWidget {
       );
 }
 
+// A numbered stop marker for a proactive guided route: a circle with the stop's order,
+// coloured by status (next = accent, reached = muted green, skipped/pending = grey).
+class _RouteStopPin extends StatelessWidget {
+  const _RouteStopPin(
+      {required this.number, required this.status, required this.isNext, required this.accent});
+  final int number;
+  final String status;
+  final bool isNext;
+  final Color accent;
+  @override
+  Widget build(BuildContext context) {
+    final reached = status == 'reached';
+    final color = reached
+        ? const Color(0xFF4C9A6A)
+        : (isNext ? accent : const Color(0xFF8A8A8A));
+    return Container(
+      width: 30,
+      height: 30,
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white, width: 2.5),
+      ),
+      alignment: Alignment.center,
+      child: reached
+          ? const Icon(Icons.check, size: 16, color: Colors.white)
+          : Text('$number',
+              style: const TextStyle(
+                  color: Colors.white, fontSize: 13, fontWeight: FontWeight.w700)),
+    );
+  }
+}
+
 // A found-but-not-yet-narrated object from the search disc (lite: name + type),
 // pinned faintly on the map so the user sees everything around them, not only the
 // place currently being narrated. Server pushes these in a "places" frame.
@@ -579,6 +612,20 @@ class NearbyObject {
   final String name;
   final String category;
   NearbyObject(this.id, this.point, this.name, this.category);
+}
+
+// One stop of a proactive guided route ("Проведи меня") — a place the guide leads you to,
+// in visit order. Mirrors the backend WSRouteStop. `status` is pending|reached|skipped.
+class GuideStop {
+  final int index;
+  final LatLng point;
+  final String name;
+  final String category;
+  final String significance;
+  final double legDistanceM;
+  String status;
+  GuideStop(this.index, this.point, this.name, this.category, this.significance,
+      this.legDistanceM, this.status);
 }
 
 // Muted family accents for the lite pins — the icon SHAPE tells you what it is; the
@@ -1172,6 +1219,14 @@ class _HomePageState extends State<HomePage>
   final List<PlaceMark> _places = []; // narrated places pinned on the map
   List<NearbyObject> _nearby = []; // all found objects (lite pins from "places" frame)
   String? _currentPlaceId; // the place being narrated now (highlighted)
+
+  // Proactive guided mode ("Проведи меня"): the pre-planned route + progress along it.
+  List<List<double>> _routeLine = []; // [[lat, lon], ...] proposed/active route polyline
+  List<GuideStop> _stops = [];
+  int _curStop = 0; // index of the next pending stop
+  bool _guidedProposed = false; // a route was offered, awaiting accept/reject
+  bool _guidedActive = false; // a route was accepted, leading in progress
+  Map<String, dynamic>? _pendingGuided; // start_guided frame to send once we have a position
 
   // What the player shows now.
   String? _curTitle; // current place name
@@ -1797,6 +1852,22 @@ class _HomePageState extends State<HomePage>
           case 'places':
             _setNearby(m); // pin everything the search disc found (lite)
             break;
+          case 'route':
+            _onRouteProposal(m); // guided mode: a planned route to accept/reject
+            break;
+          case 'stop_reached':
+            _onStopReached(m); // guided mode: arrived at a stop (narration follows)
+            break;
+          case 'reroute':
+            _onReroute(m); // guided mode: the route tail was replanned
+            break;
+          case 'route_done':
+            _onRouteDone(); // guided mode: the whole route is finished
+            break;
+          case 'nav':
+            final ci = m['current_index']; // optional server progress correction
+            if (ci is int) setState(() => _curStop = ci);
+            break;
           case 'transcript':
             _add('you', m['text'] as String);
             break;
@@ -1976,6 +2047,258 @@ class _HomePageState extends State<HomePage>
     }
   }
 
+  // ---- proactive guided mode ("Проведи меня") ----------------------------
+  List<GuideStop> _parseStops(dynamic items) {
+    final out = <GuideStop>[];
+    if (items is List) {
+      for (final it in items) {
+        final o = it as Map<String, dynamic>;
+        out.add(GuideStop(
+          (o['index'] as num).toInt(),
+          LatLng((o['lat'] as num).toDouble(), (o['lon'] as num).toDouble()),
+          (o['name'] as String?) ?? '',
+          (o['category'] as String?) ?? '',
+          (o['significance'] as String?) ?? 'MEDIUM',
+          ((o['leg_distance_m'] as num?) ?? 0).toDouble(),
+          (o['status'] as String?) ?? 'pending',
+        ));
+      }
+    }
+    return out;
+  }
+
+  List<List<double>> _parseLine(dynamic poly) {
+    final out = <List<double>>[];
+    if (poly is List) {
+      for (final p in poly) {
+        if (p is List && p.length >= 2) {
+          out.add([(p[0] as num).toDouble(), (p[1] as num).toDouble()]);
+        }
+      }
+    }
+    return out;
+  }
+
+  void _onRouteProposal(Map<String, dynamic> m) {
+    setState(() {
+      _stops = _parseStops(m['stops']);
+      _routeLine = _parseLine(m['polyline']);
+      _curStop = 0;
+      _guidedProposed = true;
+      _guidedActive = false;
+    });
+    _fitRoute();
+    if (_stops.isEmpty) {
+      _toast('Рядом мало интересных мест — попробуйте другой режим или дольше.');
+      return;
+    }
+    _showRouteSheet(m);
+  }
+
+  void _onStopReached(Map<String, dynamic> m) {
+    final idx = (m['stop_index'] as num?)?.toInt();
+    if (idx == null) return;
+    setState(() {
+      for (final s in _stops) {
+        if (s.index == idx) s.status = 'reached';
+      }
+      _curStop = idx + 1;
+    });
+  }
+
+  void _onReroute(Map<String, dynamic> m) {
+    setState(() {
+      _stops = _parseStops(m['stops']);
+      _routeLine = _parseLine(m['polyline']);
+      _curStop = _stops.indexWhere((s) => s.status == 'pending');
+      if (_curStop < 0) _curStop = _stops.length;
+    });
+    _toast('Маршрут обновлён');
+  }
+
+  void _onRouteDone() {
+    setState(() => _guidedActive = false);
+    _toast('Маршрут пройден 🎉');
+  }
+
+  // Send start_guided once we actually have a position on the server (the backend needs a
+  // fresh fix to plan from). Stashed here and flushed on the first _sendPosition.
+  void _startGuided(String mode, double budgetMin) {
+    _pendingGuided = {
+      'type': 'start_guided',
+      'mode': mode,
+      if (mode == 'loop') 'budget_min': budgetMin,
+      if (mode == 'destination') 'pick_landmark': true,
+    };
+    _toast('Строю маршрут…');
+    _startWithGate(); // same activation as a free walk; start_guided flushes on first fix
+  }
+
+  void _acceptRoute() {
+    _send({'type': 'route_accept'});
+    setState(() {
+      _guidedProposed = false;
+      _guidedActive = true;
+    });
+  }
+
+  void _rejectRoute() {
+    _send({'type': 'route_reject'});
+    setState(() {
+      _guidedProposed = false;
+      _guidedActive = false;
+      _stops = [];
+      _routeLine = [];
+    });
+  }
+
+  void _fitRoute() {
+    if (!_mapReady || _routeLine.length < 2) return;
+    var minLat = 90.0, maxLat = -90.0, minLon = 180.0, maxLon = -180.0;
+    for (final p in _routeLine) {
+      minLat = min(minLat, p[0]);
+      maxLat = max(maxLat, p[0]);
+      minLon = min(minLon, p[1]);
+      maxLon = max(maxLon, p[1]);
+    }
+    _map.fitCamera(CameraFit.bounds(
+      bounds: LatLngBounds(LatLng(minLat, minLon), LatLng(maxLat, maxLon)),
+      padding: const EdgeInsets.all(64),
+    ));
+  }
+
+  // The pre-walk chooser: pick a walk shape and (for a loop) its length, then plan.
+  void _openGuidedSheet() {
+    double minutes = 30;
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Проведи меня',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 4),
+            const Text('Гид сам составит маршрут по интересным местам и проведёт по нему.',
+                style: TextStyle(fontSize: 13, color: Colors.grey)),
+            const SizedBox(height: 16),
+            Row(children: [
+              Text('Прогулка-петля: ${minutes.round()} мин',
+                  style: const TextStyle(fontWeight: FontWeight.w600)),
+            ]),
+            Slider(
+              value: minutes, min: 15, max: 120, divisions: 21,
+              label: '${minutes.round()} мин',
+              onChanged: (v) => setSheet(() => minutes = v),
+            ),
+            const SizedBox(height: 4),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                icon: const Icon(Icons.route),
+                label: Text('Построить петлю на ${minutes.round()} мин'),
+                onPressed: () {
+                  Navigator.of(ctx).pop();
+                  _startGuided('loop', minutes);
+                },
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.flag_outlined),
+                label: const Text('До главного места рядом'),
+                onPressed: () {
+                  Navigator.of(ctx).pop();
+                  _startGuided('destination', minutes);
+                },
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // Accept/reject the proposed route (shown when a `route` frame lands).
+  void _showRouteSheet(Map<String, dynamic> m) {
+    final dur = ((m['total_duration_s'] as num?) ?? 0) / 60.0;
+    final dist = ((m['total_distance_m'] as num?) ?? 0) / 1000.0;
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Маршрут готов',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 6),
+          Text(
+            '${_stops.length} точек · ~${dur.round()} мин · ${dist.toStringAsFixed(1)} км',
+            style: const TextStyle(fontSize: 14, color: Colors.grey),
+          ),
+          const SizedBox(height: 14),
+          for (final s in _stops.take(6))
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Row(children: [
+                CircleAvatar(radius: 12, child: Text('${s.index + 1}', style: const TextStyle(fontSize: 12))),
+                const SizedBox(width: 10),
+                Expanded(child: Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis)),
+              ]),
+            ),
+          const SizedBox(height: 14),
+          Row(children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: () { Navigator.of(ctx).pop(); _rejectRoute(); },
+                child: const Text('Отклонить'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: FilledButton(
+                onPressed: () { Navigator.of(ctx).pop(); _acceptRoute(); },
+                child: const Text('Поехали'),
+              ),
+            ),
+          ]),
+        ]),
+      ),
+    );
+  }
+
+  // The "next stop" chip: its name, distance, and a locally-computed direction arrow
+  // (bearing minus the map rotation, like the user puck) — no server round-trip.
+  Widget _guidedChip() {
+    final s = _stops[_curStop.clamp(0, _stops.length - 1)];
+    final d = _dist([_here.latitude, _here.longitude], [s.point.latitude, s.point.longitude]);
+    final brg = _bearing([_here.latitude, _here.longitude], [s.point.latitude, s.point.longitude]);
+    final dm = d >= 1000 ? '${(d / 1000).toStringAsFixed(1)} км' : '${d.round()} м';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Transform.rotate(
+          angle: (brg - _mapRotation) * pi / 180,
+          child: const Icon(Icons.navigation, color: Colors.white, size: 18),
+        ),
+        const SizedBox(width: 8),
+        Flexible(
+          child: Text('${s.name} · $dm',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+        ),
+      ]),
+    );
+  }
+
   // ---- walk simulation ---------------------------------------------------
   static double _rad(double d) => d * pi / 180;
 
@@ -2046,6 +2369,12 @@ class _HomePageState extends State<HomePage>
     };
     _lastPositionMsg = msg; // replayed on reconnect so the tour resumes at once
     _send(msg);
+    // Guided mode: the backend needs a fresh fix to plan from, so start_guided waits for
+    // the first position and rides out right after it.
+    if (_pendingGuided != null) {
+      _send(_pendingGuided!);
+      _pendingGuided = null;
+    }
     // Publish live presence (coarse) so friends see "на прогулке" + co-walk dots.
     RealtimeService.instance.updateSelf(walking: _active, lat: lat, lon: lon);
     // Accumulate walked distance for the session summary (ignore GPS jitter jumps).
@@ -2741,6 +3070,17 @@ class _HomePageState extends State<HomePage>
             subdomains: MapConfig.subdomains,
             userAgentPackageName: 'com.example.ai_audio_guide',
           ),
+        // Guided mode: the planned route line (dashed, accent) under the live track — so the
+        // walked path draws on top of the plan as the user follows it.
+        if (_routeLine.length >= 2)
+          PolylineLayer(polylines: [
+            Polyline(
+              points: [for (final p in _routeLine) LatLng(p[0], p[1])],
+              strokeWidth: 5,
+              color: Theme.of(context).colorScheme.secondary.withValues(alpha: 0.85),
+              pattern: StrokePattern.dashed(segments: const [12, 8]),
+            ),
+          ]),
         // The walked GPS track, growing live (under the pins). Only while touring — otherwise it
         // would stay frozen under the blur on the inactive home. Glow + grey dashed on paused
         // stretches — same renderer as the summary / history so it looks identical everywhere.
@@ -2748,6 +3088,22 @@ class _HomePageState extends State<HomePage>
           PolylineLayer(
             polylines: trackPolylines(_track, liveColor: Theme.of(context).colorScheme.primary),
           ),
+        // Guided mode: numbered stop markers (next = accent, reached = check, others grey).
+        if (_stops.isNotEmpty)
+          MarkerLayer(markers: [
+            for (final s in _stops)
+              Marker(
+                point: s.point,
+                width: 34,
+                height: 34,
+                child: _RouteStopPin(
+                  number: s.index + 1,
+                  status: s.status,
+                  isNext: s.index == _curStop,
+                  accent: Theme.of(context).colorScheme.secondary,
+                ),
+              ),
+          ]),
         // Lite pins: every object the search disc found (drawn under narrated pins;
         // a narrated place's own pin overrides its lite dot by id).
         MarkerLayer(markers: [
@@ -3281,6 +3637,10 @@ class _HomePageState extends State<HomePage>
       _places.clear();
       _nearby = [];
       _track.clear();
+      _routeLine = [];
+      _stops = [];
+      _guidedProposed = false;
+      _guidedActive = false;
       return;
     }
     setState(() {
@@ -3290,6 +3650,11 @@ class _HomePageState extends State<HomePage>
       _curTitle = null;
       _curText = null;
       _curIsReply = false;
+      _routeLine = [];
+      _stops = [];
+      _curStop = 0;
+      _guidedProposed = false;
+      _guidedActive = false;
     });
   }
 
@@ -3666,6 +4031,36 @@ class _HomePageState extends State<HomePage>
           onHistory: active ? _openTourLog : null,
         ),
       ),
+      // Guided mode: the "next stop" chip (name + distance + direction arrow), computed
+      // locally from GPS so it updates every fix without server chatter.
+      if (_guidedActive && _stops.isNotEmpty && _curStop < _stops.length)
+        Positioned(
+          left: 16,
+          right: 16,
+          top: MediaQuery.of(context).padding.top + 64,
+          child: Center(child: _guidedChip()),
+        ),
+      // Pre-walk entry point for the proactive guide — only on the inactive home, above the
+      // swipe-to-start affordance (hidden while a proposed route is awaiting accept/reject).
+      if (!active && !_guidedProposed)
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: MediaQuery.of(context).padding.bottom + 150,
+          child: Center(
+            child: TextButton.icon(
+              style: TextButton.styleFrom(
+                backgroundColor: Colors.black.withValues(alpha: 0.28),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+              ),
+              icon: const Icon(Icons.assistant_navigation, size: 20),
+              label: const Text('Проведи меня'),
+              onPressed: _openGuidedSheet,
+            ),
+          ),
+        ),
     ]);
   }
 

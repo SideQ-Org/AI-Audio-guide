@@ -136,17 +136,16 @@ class RoutePlanner:
     ) -> list[_PoolItem]:
         # Fetch a disc wide enough for the walk. A loop of perimeter L lives inside a circle
         # of radius ~L/(2π); we use L/4 for headroom. A destination walk covers the corridor
-        # between origin and endpoint.
+        # between origin and endpoint — sampled as several discs along the line when it's long,
+        # so we don't inflate one disc (and miss the middle) for a far endpoint.
         if mode == "destination" and destination is not None:
-            center = _midpoint(origin, destination)
-            radius = haversine_m(origin, destination) / 2.0 + settings.route_corridor_pad_m
+            places = await self._corridor_places(origin, destination)
         else:
-            center = origin
             budget_ref = budget_m if budget_m != float("inf") else settings.route_max_fetch_m * 4
-            radius = budget_ref / 4.0
-        radius = max(settings.inventory_radius_m, min(radius, settings.route_max_fetch_m))
-
-        places = await self._provider.fetch_places(center, radius)
+            radius = max(
+                settings.inventory_radius_m, min(budget_ref / 4.0, settings.route_max_fetch_m)
+            )
+            places = await self._provider.fetch_places(origin, radius)
         seen_set = set(seen or [])
         min_sig = Significance(settings.route_min_significance)
 
@@ -189,6 +188,25 @@ class RoutePlanner:
             pool.sort(key=lambda pc: pc.interest, reverse=True)
             pool = pool[:cap]
         return pool
+
+    async def _corridor_places(self, origin: GeoPoint, destination: GeoPoint) -> list[Place]:
+        """POIs along the origin->destination corridor. One disc around the midpoint for a
+        short hop; several overlapping discs strung along the line for a long one (so the
+        middle of the corridor is covered, not just the two ends). Deduped by place id."""
+        span = haversine_m(origin, destination)
+        pad = settings.route_corridor_pad_m
+        disc_r = min(settings.inventory_radius_m, settings.route_max_fetch_m)
+        if span / 2.0 + pad <= disc_r:  # one mid disc already reaches both ends
+            return await self._provider.fetch_places(_midpoint(origin, destination), disc_r)
+        brg = bearing_deg(origin, destination)
+        step = disc_r * 1.5  # overlap consecutive discs
+        n = int(span // step) + 1
+        by_id: dict[str, Place] = {}
+        for i in range(n + 1):
+            centre = offset_point(origin, brg, min(i * step, span))
+            for p in await self._provider.fetch_places(centre, disc_r):
+                by_id[p.id] = p
+        return list(by_id.values())
 
     async def _materialize(
         self,
