@@ -49,6 +49,9 @@ class RouteLeg:
     polyline: list[list[float]]  # [[lat, lon], ...] along walkable ways
     distance_m: float
     duration_s: float
+    # OSRM map-matching confidence (0..1); 1.0 for a route/straight-line (not a match). Low
+    # confidence means the trace didn't fit the road graph (e.g. an unmapped alley/shortcut).
+    confidence: float = 1.0
 
 
 @dataclass
@@ -64,6 +67,9 @@ class DistanceMatrix:
 class RoutingProvider(Protocol):
     async def route(self, points: list[GeoPoint]) -> RouteLeg: ...
     async def table(self, points: list[GeoPoint]) -> DistanceMatrix: ...
+    # Snap a noisy GPS trace to the road/footpath network (OSRM map-matching), for a clean
+    # drawn track. Returns the snapped polyline; on no-match falls back to the input geometry.
+    async def match(self, points: list[GeoPoint]) -> RouteLeg: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -106,6 +112,35 @@ class OSRMRouting:
             duration_s=float(r.get("duration", 0.0)),
         )
 
+    async def match(self, points: list[GeoPoint]) -> RouteLeg:
+        if len(points) < 2:
+            pts = [[p.lat, p.lon] for p in points]
+            return RouteLeg(polyline=pts, distance_m=0.0, duration_s=0.0)
+        url = f"{self.base_url}/match/v1/foot/{_coords(points)}"
+        # tidy=true drops near-duplicate/noisy inputs; gaps=ignore keeps one matching across
+        # small gaps; radiuses gives OSRM the GPS accuracy so it snaps sensibly.
+        r = settings.track_match_radius_m
+        params = {
+            "geometries": "geojson", "overview": "full", "tidy": "true", "gaps": "ignore",
+            "radiuses": ";".join(str(r) for _ in points),
+        }
+        async with httpx.AsyncClient(timeout=self.timeout_s, follow_redirects=False) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+        matchings = data.get("matchings") or []
+        if not matchings:
+            raise ValueError(f"OSRM match: no matching for {len(points)} points")
+        m = matchings[0]
+        coords = m.get("geometry", {}).get("coordinates") or []
+        polyline = _downsample([[c[1], c[0]] for c in coords])
+        return RouteLeg(
+            polyline=polyline,
+            distance_m=float(m.get("distance", 0.0)),
+            duration_s=float(m.get("duration", 0.0)),
+            confidence=float(m.get("confidence", 1.0)),
+        )
+
     async def table(self, points: list[GeoPoint]) -> DistanceMatrix:
         if len(points) < 2:
             n = len(points)
@@ -145,6 +180,10 @@ class StraightLineRouting:
             haversine_m(points[i], points[i + 1]) for i in range(len(points) - 1)
         )
         return RouteLeg(polyline=polyline, distance_m=dist, duration_s=dist / self.speed)
+
+    async def match(self, points: list[GeoPoint]) -> RouteLeg:
+        # No map to snap to — return the input geometry unchanged (still cleaned upstream).
+        return await self.route(points)
 
     async def table(self, points: list[GeoPoint]) -> DistanceMatrix:
         n = len(points)

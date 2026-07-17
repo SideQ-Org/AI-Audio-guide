@@ -40,11 +40,13 @@ from app.services.agent.walklog import (
     tick_reset,
     tick_snapshot,
 )
+from app.services.enrichment.enricher import attach_facts, prefetch
 from app.services.geo.categories import LINEAR_CATEGORIES
 from app.services.geo.discovery import Discovery
 from app.services.geo.geocoder import Geocoder
 from app.services.geo.ranking import Dedup, _norm_name, build_candidates
 from app.services.geo.route_planner import PlannedRoute, RoutePlanner
+from app.services.geo.track_match import match_track
 from app.services.llm.client import as_background
 from app.services.metrics import GUIDE
 from app.services.state.store import StateStore
@@ -63,6 +65,9 @@ from app.shared.schemas import (
     NavStopStatus,
     Pace,
     Place,
+    RouteScript,
+    RouteScriptInput,
+    ScriptStop,
     SessionState,
     Significance,
 )
@@ -260,6 +265,8 @@ class Orchestrator:
         geocoder: Geocoder | None = None,
         summarizer=None,
         route_planner: RoutePlanner | None = None,
+        tour_scripter=None,
+        routing=None,
     ) -> None:
         self.discovery = discovery
         self.pipeline = pipeline
@@ -268,7 +275,19 @@ class Orchestrator:
         self.geocoder = geocoder
         self.summarizer = summarizer
         self.route_planner = route_planner  # proactive guided mode; None => guided disabled
+        self.tour_scripter = tour_scripter  # whole-route narration arc for guided mode
+        self.routing = routing  # map-matches the walked track (geo/track_match.py)
         self._bg: set[asyncio.Task] = set()  # hold refs to fire-and-forget warm tasks
+
+    async def matched_track(self, session_id: str) -> list[list[float]] | None:
+        """The walked track snapped to streets (OSRM /match), or None when matching is off /
+        the track is too short / no routing. Cosmetic + read-only — never touches narration."""
+        if not settings.track_match_enabled or self.routing is None:
+            return None
+        st = await self.store.load(session_id)
+        if len(st.path) < settings.track_match_min_points:
+            return None
+        return await match_track(st.path, self.routing)
 
     # -- proactive guided mode: plan / accept / cancel / skip --------------- #
     async def plan_route(
@@ -311,12 +330,94 @@ class Orchestrator:
         return route
 
     async def accept_route(self, session_id: str) -> None:
-        """The user accepted the proposed route — the guide may start leading."""
+        """The user accepted the proposed route — the guide may start leading. When the
+        whole-route scripter is on, kick off building the single-tour narration arc in the
+        background (facts prefetch + one LLM call); leading waits on `script_ready`."""
         st = await self.store.load(session_id)
-        if st.nav.active:
-            st.nav.accepted = True
-            st.state = State.EN_ROUTE
-            await self.store.save(st)
+        if not st.nav.active:
+            return
+        st.nav.accepted = True
+        st.state = State.EN_ROUTE
+        scripting = (
+            self.tour_scripter is not None
+            and settings.guided_script_enabled
+            and bool(st.nav.stops)
+        )
+        if scripting:
+            st.nav.script = RouteScript()  # placeholder; script_ready gates leading
+            st.nav.script_ready = False
+        await self.store.save(st)
+        if scripting:
+            self._build_script_bg(session_id)
+
+    def _build_script_bg(self, session_id: str) -> None:
+        """Fire-and-forget: build the whole-route script; on any failure clear it so the
+        guide falls back to the per-stop reactive path instead of staying silent forever."""
+        async def _run() -> None:
+            try:
+                await self._build_route_script(session_id)
+            except Exception as e:  # noqa: BLE001 — never strand the walk on a script failure
+                log.info("guided script build failed (%s) -> per-stop fallback", type(e).__name__)
+                st = await self.store.load(session_id)
+                st.nav.script = None
+                st.nav.script_ready = True  # unblock the guided tick (per-stop path)
+                await self.store.save(st)
+
+        task = asyncio.ensure_future(as_background(_run()))
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
+    async def _build_route_script(self, session_id: str) -> None:
+        """Pre-load facts for every stop, then ask the scripter for the whole-route arc.
+        Commits single-threaded with a freshness re-check (route unchanged since accept)."""
+        assert self.tour_scripter is not None
+        st = await self.store.load(session_id)
+        nav = st.nav
+        anchor = nav.origin or st.position
+        stops = [s for s in nav.stops if s.place is not None][: settings.guided_script_max_stops]
+        if not stops or anchor is None:
+            raise ValueError("no scriptable stops / no anchor")
+        # Candidates from each stop's Place (huge radius so none are distance-filtered out;
+        # distance is irrelevant here — we only need enrichment + significance per object).
+        cands = build_candidates(
+            anchor, st.heading, [s.place for s in stops], 1e7, st.seen_place_ids, _dedup(st)
+        )
+        lang = st.language
+        ctx = ", ".join(p for p in (st.address.city, st.address.country) if p) or None
+        timeout = self.pipeline.enrich_timeout_s or settings.enrich_timeout_s
+        await prefetch(
+            cands, self.pipeline.enricher, self.pipeline.cache,
+            top_k=len(cands), timeout_s=timeout, context=ctx, language=lang,
+        )
+        enriched = attach_facts(cands, self.pipeline.cache, lang)
+        script_stops = [
+            ScriptStop(
+                name=c.place.name,
+                category=c.place.category,
+                significance=str(
+                    significance_from_weight(
+                        c.type_weight, c.facts_available, has_wiki=tags_have_wiki(c.place.tags)
+                    )
+                ),
+                facts=c.facts_snippet if c.facts_available else None,
+            )
+            for c in enriched
+        ]
+        inp = RouteScriptInput(
+            stops=script_stops, theme_override=st.narrative_plan.theme_override,
+            address=st.address, language=lang,
+        )
+        script = await self.tour_scripter.script(inp)
+        # Freshness: reload and only commit if the route is unchanged (no reroute/skip since).
+        st2 = await self.store.load(session_id)
+        if [s.place_id for s in st2.nav.stops] != [s.place_id for s in nav.stops]:
+            log.info("guided script stale (route changed) -> discard")
+            return
+        st2.nav.script = script
+        st2.nav.script_ready = True
+        st2.narrative_plan.theme = script.theme or st2.narrative_plan.theme
+        await self.store.save(st2)
+        log.info("guided script ready: theme=%r beats=%d", script.theme, len(script.beats))
 
     async def cancel_route(self, session_id: str) -> None:
         """Drop the guided route and return to the free (reactive) guide."""
@@ -340,6 +441,19 @@ class Orchestrator:
         """One tick of leading the walker along an accepted route: skip past handled stops,
         narrate the current one on arrival, otherwise tease it / stay quiet en route."""
         nav = st.nav
+        # Whole-route script still building? Stay quiet until it's ready (or was cleared to
+        # the per-stop fallback, which sets script=None + script_ready=True).
+        if nav.script is not None and not nav.script_ready:
+            return await self._finish(st, State.EN_ROUTE, "silence")
+        # Play the tour intro overview once, before leading to the first stop.
+        if nav.script is not None and nav.script.intro and not nav.intro_done:
+            nav.intro_done = True
+            st.narrative_plan.theme = nav.script.theme or st.narrative_plan.theme
+            intro = nav.script.intro
+            st.narration_history = (st.narration_history + [intro])[-_HISTORY_CAP:]
+            log.info("guided intro | %s", clip(intro))
+            return await self._finish(st, State.NARRATING, "narration", intro)
+
         stops = nav.stops
         idx = nav.current_index
         while idx < len(stops) and stops[idx].status != NavStopStatus.PENDING:
@@ -357,14 +471,29 @@ class Orchestrator:
             return rerouted
         return await self._guided_between(st, stop, dist, heading, pace)
 
+    @staticmethod
+    def _beat_for(nav: NavState, order: int):
+        """The scripted StopBeat for a stop order (None if no script / not found)."""
+        if nav.script is None:
+            return None
+        return next((b for b in nav.script.beats if b.order == order), None)
+
     async def _finish_guided_route(self, st: SessionState) -> OrchestratorOutput:
-        """The last stop is done — end the guided route (client shows the summary on Stop)."""
-        was_active = st.nav.active
-        st.nav.active = False
+        """The last stop is done — play the scripted finale (once), then end the route on the
+        next tick (client shows the summary on Stop)."""
+        nav = st.nav
+        finale = nav.script.finale if nav.script else ""
+        if finale and not nav.finale_done:
+            nav.finale_done = True
+            st.narration_history = (st.narration_history + [finale])[-_HISTORY_CAP:]
+            log.info("guided finale | %s", clip(finale))
+            return await self._finish(st, State.NARRATING, "narration", finale)
+        was_active = nav.active
+        nav.active = False
         out = await self._finish(st, State.IDLE, "silence")
         if was_active:
             out.nav_event = {"type": "route_done"}
-            log.info("guided route done (%d stops)", len(st.nav.stops))
+            log.info("guided route done (%d stops)", len(nav.stops))
         return out
 
     async def _arrive_stop(
@@ -393,13 +522,22 @@ class Orchestrator:
             out.nav_event = nav_event
             return out
         plan = st.narrative_plan
+        # Scripted beat: tell THIS stop from its pre-planned angle, inside the whole-route
+        # theme, with the transition (bridge) as the baton to the next stop.
+        beat = self._beat_for(st.nav, stop.order)
+        theme = (st.nav.script.theme if st.nav.script else "") or plan.active_theme() or None
+        angle = beat.angle if beat else None
+        if beat and beat.callback:
+            angle = (angle or "") + f" Уместна отсылка назад: {beat.callback}."
+        next_hook = (beat.bridge if beat and beat.bridge else None) or plan.next_hook
         try:
             step = await self.pipeline.step(
                 cands, seen=st.seen_place_ids, history=st.narration_history,
                 address=st.address, heading=heading, pace=pace,
                 preferences=st.control_patch, language=st.language,
-                theme=plan.active_theme() or None, told=plan.told,
-                next_hook=plan.next_hook, passing=True, recall=st.memory.objects,
+                theme=theme, told=plan.told,
+                next_hook=next_hook, passing=True, recall=st.memory.objects,
+                beat_angle=angle,
             )
         except Exception:
             out = await self._finish(st, State.ERROR, "error")
@@ -415,18 +553,22 @@ class Orchestrator:
     async def _guided_between(
         self, st: SessionState, stop: NavStop, dist: float, heading: Heading, pace: Pace
     ) -> OrchestratorOutput:
-        """Between stops: tease the upcoming stop once (name + distance, no facts), else stay
-        quiet — the client's direction chip/arrow carries the leading."""
+        """Between stops: once, on approach, speak the scripted bridge (transition + anticipation
+        of this stop, from the previous stop's beat), else a plain teaser, else stay quiet — the
+        client's direction chip/arrow carries the leading."""
         if (
             settings.nav_between_mode == "teaser"
             and not stop.teased
             and dist <= settings.nav_teaser_radius_m
         ):
             stop.teased = True
-            text = lang.nav_teaser(st.language, stop.name, dist)
+            # The previous stop's bridge announces THIS one; fall back to the plain teaser.
+            prev_beat = self._beat_for(st.nav, stop.order - 1)
+            text = (prev_beat.bridge if prev_beat and prev_beat.bridge else "") \
+                or lang.nav_teaser(st.language, stop.name, dist)
             if text:
                 st.narration_history = (st.narration_history + [text])[-_HISTORY_CAP:]
-                log.info("guided teaser stop #%d %r @%.0fm", stop.order, stop.name, dist)
+                log.info("guided bridge->#%d %r @%.0fm", stop.order, stop.name, dist)
                 return await self._finish(st, State.EN_ROUTE, "narration", text)
         return await self._finish(st, State.EN_ROUTE, "silence")
 
@@ -497,9 +639,17 @@ class Orchestrator:
         nav.off_route_since = None
         nav.last_reroute_at = time.monotonic()
         nav.reroute_count += 1
+        # Re-script the (new) tail: the arc must cover the fresh stops. Gate leading on
+        # script_ready while it rebuilds in the background (intro/reached stops are kept).
+        rescript = self.tour_scripter is not None and settings.guided_script_enabled
+        if rescript:
+            nav.script_ready = False
+            nav.finale_done = False
         log.info("guided reroute (%s) -> %d fresh stops (%d kept)", reason, len(fresh.stops), base)
         out = await self._finish(st, State.REPLANNING, "silence")
         out.nav_event = _reroute_event(nav, reason)
+        if rescript:
+            self._build_script_bg(st.session_id)
         return out
 
     def _warm_next_stop(self, st: SessionState, heading: Heading, pace: Pace) -> None:
@@ -522,14 +672,20 @@ class Orchestrator:
         if not cands:
             return
         plan = st.narrative_plan
+        # Pre-generate inside the arc: the next stop's scripted angle + theme, so its blurb is
+        # warmed as part of the tour, not as an isolated blurb.
+        beat = self._beat_for(nav, nxt.order)
+        theme = (nav.script.theme if nav.script else "") or plan.active_theme() or None
+        angle = beat.angle if beat else None
+        next_hook = (beat.bridge if beat and beat.bridge else None) or plan.next_hook
 
         async def _run() -> None:
             await self.pipeline.warm_narration(
                 cands[0], seen=st.seen_place_ids, history=st.narration_history,
                 address=st.address, heading=heading, pace=pace,
                 preferences=st.control_patch, language=st.language,
-                theme=plan.active_theme() or None, told=plan.told,
-                next_hook=plan.next_hook, recall=st.memory.objects,
+                theme=theme, told=plan.told,
+                next_hook=next_hook, recall=st.memory.objects, beat_angle=angle,
             )
 
         task = asyncio.ensure_future(as_background(_run()))

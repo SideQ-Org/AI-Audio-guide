@@ -239,7 +239,7 @@ class TextPipeline:
     async def _render_object(
         self, chosen, place, sig, *, addr, heading, pace, switching, theme, told,
         next_hook, history, preferences, passing, in_view, lang, nothing_new,
-        passed=False, callback=None, lookahead=None,
+        passed=False, callback=None, lookahead=None, beat_angle=None,
     ) -> tuple[str, str | None, str | None]:
         """The narrator call for one chosen object — shared by step() and warm_narration()
         so a pre-generated blurb matches what step would produce. Returns (spoken, hook, card):
@@ -250,7 +250,7 @@ class TextPipeline:
                 distance_m=chosen.distance_m, heading=heading or Heading(),
                 side=chosen.side, in_view=in_view, pace=pace, context=_context(addr),
                 theme=theme, told=told or [], next_hook=next_hook, history=history,
-                callback=callback, lookahead=lookahead,
+                callback=callback, lookahead=lookahead, beat_angle=beat_angle,
                 flags=NarratorFlags(
                     switching=switching, nothing_new=nothing_new,
                     passing=passing, passed=passed, preferences=preferences,
@@ -264,7 +264,7 @@ class TextPipeline:
 
     async def warm_narration(
         self, chosen, *, seen, history, address, heading, pace, preferences,
-        language, theme, told, next_hook, recall=None, lookahead=None,
+        language, theme, told, next_hook, recall=None, lookahead=None, beat_angle=None,
     ) -> None:
         """Pre-render the PASSING narration for an object you're walking toward, so
         step() speaks it the instant you reach it (no LLM wait on arrival). Facts are
@@ -299,6 +299,7 @@ class TextPipeline:
                 theme=theme, told=told, next_hook=next_hook, history=history,
                 preferences=preferences, passing=True, in_view=False,
                 lang=lang, nothing_new=False, callback=callback, lookahead=lookahead,
+                beat_angle=beat_angle,
             )
         except Exception as e:  # noqa: BLE001 — prefetch is an optimization, never fatal
             # A failed pre-gen (e.g. a 429 under rate-limit) just means step() renders live on
@@ -363,6 +364,7 @@ class TextPipeline:
         reach: bool = False,
         recall=None,
         lookahead=None,
+        beat_angle=None,
     ) -> StepResult:
         """Narrate the nearest weave-worthy object, woven INTO the story arc.
 
@@ -443,7 +445,7 @@ class TextPipeline:
                 switching=switching, theme=theme, told=told, next_hook=next_hook,
                 history=history, preferences=preferences, passing=passing,
                 passed=passed, in_view=in_view, lang=lang, nothing_new=not candidates,
-                callback=callback, lookahead=lookahead,
+                callback=callback, lookahead=lookahead, beat_angle=beat_angle,
             )
         # Anti-fabrication backstop: with NO verified facts, any history/date/creation claim the
         # model slipped in is invented (the "детсад «Ивушка» появился в те годы…" case). Strip

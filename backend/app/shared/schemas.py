@@ -195,6 +195,10 @@ class NarratorInput(BaseModel):
     # (history/people/function/detail/context) so successive follow-ups go DEEPER from a
     # DIFFERENT angle instead of rewording the same fact. None on a normal first narration.
     elaborate_angle: str | None = None
+    # Guided mode: the scripted role of THIS stop inside the whole-route arc (TourScripter),
+    # e.g. "покажи, как менялся квартал". Threads the pre-planned scenario into the blurb so
+    # the object sits inside the overall story, not as an isolated fact. None for free walks.
+    beat_angle: str | None = None
     language: str = "ru"
 
 
@@ -307,6 +311,41 @@ class NavStop(BaseModel):
     place: Place | None = None
 
 
+class StopBeat(BaseModel):
+    """The scripted role of one stop inside the whole-route tour (TourScripter). A director's
+    note per stop — not the spoken text (that's generated per stop with this as context)."""
+
+    order: int
+    angle: str = ""  # what to emphasise at this stop (its role in the overall story)
+    bridge: str = ""  # the transition + anticipation of the next stop (spoken on the leg between)
+    callback: str = ""  # an optional reference back to an earlier stop ("" = none)
+
+
+class RouteScript(BaseModel):
+    """The pre-planned narration arc for a whole guided route: a single coherent tour."""
+
+    theme: str = ""  # the through-line of the walk
+    intro: str = ""  # the opening overview (first thing spoken after accept)
+    beats: list[StopBeat] = Field(default_factory=list)  # one per stop, in route order
+    finale: str = ""  # the closing word at the end of the route
+
+
+class ScriptStop(BaseModel):
+    """A lite stop fed to the TourScripter — enough to plan the arc, no geometry."""
+
+    name: str
+    category: str = ""
+    significance: str = "MEDIUM"
+    facts: str | None = None  # verified facts (empty => the beat may only name/observe, not invent)
+
+
+class RouteScriptInput(BaseModel):
+    stops: list[ScriptStop] = Field(default_factory=list)  # ordered route stops
+    theme_override: str | None = None  # a topic the user explicitly asked for (wins over theme)
+    address: Address = Field(default_factory=Address)
+    language: str = "ru"
+
+
 class NavState(BaseModel):
     """The active guided route + progress along it. Lives inside SessionState so it
     persists and resumes across reconnects like the rest of the walk. Empty/inactive for
@@ -327,6 +366,14 @@ class NavState(BaseModel):
     off_route_since: float | None = None  # epoch s the walker first went off-route (debounce)
     last_reroute_at: float | None = None
     reroute_count: int = 0
+    # Whole-route narration arc (TourScripter, built at accept). Since the whole route is known
+    # up front, the guide plans ONE coherent tour — intro, per-stop role, transitions, finale —
+    # instead of narrating each stop in isolation. None until built; script_ready gates leading
+    # (until then the guided tick stays quiet, or falls back to the reactive per-stop path).
+    script: RouteScript | None = None
+    script_ready: bool = False
+    intro_done: bool = False  # the whole-route intro overview was already spoken (once)
+    finale_done: bool = False  # the closing word was already spoken (once)
 
 
 # --------------------------------------------------------------------------- #
@@ -542,6 +589,16 @@ class WSSummary(BaseModel):
 class WSStateUpdate(BaseModel):
     type: Literal["state"] = "state"
     state: str
+
+
+class WSTrack(BaseModel):
+    """The walked track, snapped to streets (OSRM map-matching), for a clean drawn line.
+    Same [[lat, lon(, 1.0 paused)]] shape as the raw track. Pushed periodically while walking
+    (final=false) and once at end-of-walk (final=true). Absent when matching is off."""
+
+    type: Literal["track"] = "track"
+    polyline: list[list[float]] = Field(default_factory=list)
+    final: bool = False
 
 
 # --------------------------------------------------------------------------- #

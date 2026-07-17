@@ -24,6 +24,7 @@ from app.shared.schemas import (
     CompanionInput,
     NarratorInput,
     PlannerInput,
+    RouteScriptInput,
     ScorerInput,
 )
 
@@ -141,6 +142,11 @@ def system_for_area(language: str) -> str:
 def system_for_planner(language: str) -> str:
     """CORE(language) + the PLANNER block — forms the area story arc."""
     return f"{_core(language)}\n\n---\n\n{_load('planner')}"
+
+
+def system_for_scripter(language: str) -> str:
+    """CORE(language) + the SCRIPTER block — plans the whole guided route as one tour."""
+    return f"{_core(language)}\n\n---\n\n{_load('scripter')}"
 
 
 def system_for_judge(language: str) -> str:
@@ -270,6 +276,9 @@ def build_narrator_user(inp: NarratorInput) -> str:
             # When elaborating, the facet to take THIS follow-up from (see ПРОДОЛЖЕНИЕ block) so
             # deeper details come from a different angle, not a reworded repeat. Null on first tell.
             "ELABORATE_ANGLE": inp.elaborate_angle if inp.flags.elaborate else None,
+            # Guided tour: the scripted role of THIS stop inside the whole-route arc (see BEAT
+            # block). A director's note — the angle to tell this object from so it fits the tour.
+            "BEAT": inp.beat_angle,
             # The last 1-2 SUBSTANTIVE paragraphs — CONTINUE this voice/thread (A1), a
             # POSITIVE continuity signal, distinct from HISTORY (the do-not-repeat ledger).
             # Terse bridges/floor lines are filtered so we don't seed on "Пройдём дальше."
@@ -318,6 +327,25 @@ def build_planner_user(inp: PlannerInput) -> str:
             "ADDRESS": inp.address.model_dump(exclude_none=True),
             "FACTS": inp.facts,
             "THEME_OVERRIDE": inp.theme_override,
+        }
+    )
+
+
+def build_scripter_user(inp: RouteScriptInput) -> str:
+    return _json(
+        {
+            "ADDRESS": inp.address.model_dump(exclude_none=True),
+            "THEME_OVERRIDE": inp.theme_override,
+            "STOPS": [
+                {
+                    "order": i,
+                    "name": s.name,
+                    "category": s.category,
+                    "significance": s.significance,
+                    "facts": s.facts,
+                }
+                for i, s in enumerate(inp.stops)
+            ],
         }
     )
 

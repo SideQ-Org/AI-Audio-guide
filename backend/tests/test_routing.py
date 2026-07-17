@@ -61,3 +61,84 @@ def test_make_routing_selects_by_source(monkeypatch):
     assert isinstance(make_routing(), StraightLineRouting)
     monkeypatch.setattr(settings, "routing_source", "osrm")
     assert isinstance(make_routing(), OSRMRouting)
+
+
+def test_straight_match_is_passthrough():
+    pts = _pts()
+    leg = asyncio.run(StraightLineRouting().match(pts))
+    assert leg.polyline == [[p.lat, p.lon] for p in pts]
+
+
+def test_match_track_preserves_paused_runs():
+    from app.services.geo.track_match import match_track
+
+    # A walking run, then a paused run (trailing 1.0), then walking again.
+    path = [
+        [55.7539, 37.6208], [55.7535, 37.6212], [55.7531, 37.6216],
+        [55.7528, 37.6220, 1.0], [55.7526, 37.6222, 1.0],
+        [55.7522, 37.6226], [55.7518, 37.6230],
+    ]
+    out = asyncio.run(match_track(path, StraightLineRouting()))
+    # Straight-line match is a passthrough, so geometry is preserved...
+    assert [p[:2] for p in out] == [p[:2] for p in path]
+    # ...and the paused points keep their trailing 1.0 flag (grey-dashed styling).
+    paused = [p for p in out if len(p) > 2 and p[2] == 1.0]
+    assert len(paused) == 2
+
+
+def test_match_track_short_path_unchanged():
+    from app.services.geo.track_match import match_track
+
+    assert asyncio.run(match_track([[55.75, 37.62]], StraightLineRouting())) == [[55.75, 37.62]]
+
+
+def test_match_track_chunks_long_run(monkeypatch):
+    from app.config import settings
+    from app.services.geo.track_match import match_track
+
+    monkeypatch.setattr(settings, "track_match_chunk", 5)  # force multiple chunks
+    path = [[55.75 + i * 0.0002, 37.62 + i * 0.0002] for i in range(20)]
+    out = asyncio.run(match_track(path, StraightLineRouting()))
+    # Chunking with overlap-join must not drop or duplicate points (straight passthrough).
+    assert [p[:2] for p in out] == [p[:2] for p in path]
+
+
+# -- honesty guard: keep the real path when the snapped match is untrustworthy -------------- #
+class _StubMatch:
+    """Routing stub returning a fixed match leg — to exercise confidence/detour gating."""
+
+    def __init__(self, snapped, dist, conf):
+        from app.services.geo.routing import RouteLeg
+
+        self._leg = RouteLeg(polyline=snapped, distance_m=dist, duration_s=0.0, confidence=conf)
+
+    async def match(self, points):
+        return self._leg
+
+
+def test_match_track_low_confidence_keeps_raw():
+    from app.services.geo.track_match import match_track
+
+    path = [[55.75, 37.62], [55.751, 37.621], [55.752, 37.622]]
+    stub = _StubMatch([[0.0, 0.0], [1.0, 1.0]], dist=250, conf=0.1)  # low confidence
+    out = asyncio.run(match_track(path, stub))
+    assert [p[:2] for p in out] == [p[:2] for p in path]  # raw kept, not the bogus snap
+
+
+def test_match_track_detour_keeps_raw():
+    from app.services.geo.track_match import match_track
+
+    path = [[55.75, 37.62], [55.7505, 37.6205]]  # short real segment (~70 m)
+    stub = _StubMatch([[55.75, 37.62], [55.7505, 37.6205]], dist=9999, conf=0.9)  # huge detour
+    out = asyncio.run(match_track(path, stub))
+    assert [p[:2] for p in out] == [p[:2] for p in path]  # real cut-through kept, no detour
+
+
+def test_match_track_good_match_uses_snapped():
+    from app.services.geo.track_match import match_track
+
+    path = [[55.75, 37.62], [55.751, 37.621], [55.752, 37.622]]
+    snapped = [[55.7501, 37.6201], [55.7511, 37.6211], [55.7521, 37.6221]]
+    stub = _StubMatch(snapped, dist=250, conf=0.9)  # reasonable length + high confidence
+    out = asyncio.run(match_track(path, stub))
+    assert [p[:2] for p in out] == snapped  # snapped geometry used

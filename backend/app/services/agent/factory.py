@@ -14,6 +14,7 @@ from app.services.agent.pipeline import TextPipeline
 from app.services.agent.planner import HeuristicPlanner, LLMPlanner, Planner
 from app.services.agent.scorer import HeuristicScorer, LLMScorer, Scorer
 from app.services.agent.summarizer import LLMSummarizer, NullSummarizer, Summarizer
+from app.services.agent.tour_scripter import HeuristicTourScripter, LLMTourScripter
 from app.services.enrichment.enricher import (
     CompositeEnricher,
     Enricher,
@@ -135,6 +136,21 @@ def _planner() -> Planner:
     return HeuristicPlanner()
 
 
+def _tour_scripter():
+    """Plans the whole guided route as one coherent tour (intro/beats/finale). LLM-backed
+    in production; deterministic (names the stops) for the offline/heuristic path."""
+    backend = settings.agent_backend
+    if backend == "openai":
+        from app.services.llm.client import OpenAICompatLLM
+
+        return LLMTourScripter(OpenAICompatLLM())
+    if backend == "anthropic":
+        from app.services.llm.client import AnthropicLLM
+
+        return LLMTourScripter(AnthropicLLM())
+    return HeuristicTourScripter()
+
+
 def build_orchestrator(store: StateStore | None = None) -> Orchestrator:
     scorer, narrator, companion = _roles()
     web = settings.enrichment_source == "websearch"
@@ -153,9 +169,12 @@ def build_orchestrator(store: StateStore | None = None) -> Orchestrator:
     )
     discovery = _discovery()
     # Proactive guided mode: the route planner reuses the discovery provider as its POI
-    # source and the configured routing backend (OSRM self-hosted, else straight-line).
-    route_planner = RoutePlanner(make_routing(), discovery.provider)
+    # source and the configured routing backend (OSRM self-hosted, else straight-line). The
+    # same routing instance also map-matches the walked track (geo/track_match.py).
+    routing = make_routing()
+    route_planner = RoutePlanner(routing, discovery.provider)
     return Orchestrator(
         discovery, pipeline, companion, store or default_store(),
         geocoder=_geocoder(), summarizer=_summarizer(), route_planner=route_planner,
+        tour_scripter=_tour_scripter(), routing=routing,
     )

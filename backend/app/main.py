@@ -200,6 +200,32 @@ async def _discard_walk(orch, session_id: str, user_id: str | None) -> None:
         _log.warning("discard walk failed for session %s: %r", session_id, e)
 
 
+async def _finalize_track(orch, session_id: str, user_id: str | None) -> list[list[float]] | None:
+    """At end-of-walk, map-match the whole track once (OSRM) and persist the smooth version to
+    the durable walk (so history/detail draw clean) — returning it for the client's summary.
+    Best-effort: matching off / guest / base install / DB hiccup just no-op."""
+    try:
+        matched = await orch.matched_track(session_id)  # None if disabled/short/no routing
+    except Exception:  # noqa: BLE001
+        return None
+    if not matched:
+        return None
+    if user_id:
+        try:
+            from app.services.accounts import repository as repo
+            from app.services.accounts.db import accounts_enabled, session_scope
+
+            if accounts_enabled():
+                state = await orch.store.load(session_id)
+                walk_id = getattr(state, "walk_id", None)
+                if walk_id:
+                    async with session_scope() as session:
+                        await repo.update_walk_path(session, walk_id=walk_id, path=matched)
+        except Exception as e:  # noqa: BLE001 — cosmetic; never break the socket
+            _log.warning("finalize track persist failed for %s: %r", session_id, e)
+    return matched
+
+
 async def get_stt() -> STTClient:
     """Build the STT client off the event loop. ``faster-whisper`` model load is a
     synchronous, multi-second (first-run: multi-minute download) operation — running
@@ -490,6 +516,7 @@ class _SessionRuntime:
         # delivery so the inter-beat LLM latency isn't a silent gap. Read-only in the
         # orchestrator (no state mutation); committed single-threaded in _step.
         self._area_prefetch: asyncio.Task | None = None
+        self._last_track_at: float | None = None  # throttle the street-snapped track push
         self.send_lock = asyncio.Lock()
         # Inbound-message token bucket (anti-flood). Starts full so a normal reconnect
         # burst (auth + language + theme + resume position) is never throttled.
@@ -607,6 +634,16 @@ class _SessionRuntime:
     async def send_json(self, obj: dict) -> None:
         async with self.send_lock:
             await self.ws.send_json(obj)
+
+    async def finalize_and_summarize(self) -> None:
+        """End-of-walk (kept): map-match the final track (smooth history + summary), push it,
+        then generate the recap. Both best-effort — neither can break the end flow."""
+        with contextlib.suppress(Exception):
+            matched = await _finalize_track(self.orch, self.session_id, self.user_id)
+            if matched and len(matched) >= 2:
+                with contextlib.suppress(Exception):
+                    await self.send_json({"type": "track", "polyline": matched, "final": True})
+        await self.send_walk_summary()
 
     async def send_walk_summary(self) -> None:
         """Generate the end-of-walk structured recap and push it to the client (Stop sheet)."""
@@ -777,6 +814,7 @@ class _SessionRuntime:
                 self.session_id, self.live_position, self.live_heading, self.live_pace
             )
         await self._maybe_send_places()
+        self._maybe_send_track()  # throttled street-snapped track push (fire-and-forget)
         # Guided-mode side events (stop_reached / route_done / reroute) ride out here, BEFORE
         # the stop's narration frame, so the client marks the arrival then hears the blurb.
         if out.nav_event:
@@ -877,6 +915,30 @@ class _SessionRuntime:
         ]
         with contextlib.suppress(Exception):
             await self.send_json({"type": "places", "items": items})
+
+    def _maybe_send_track(self) -> None:
+        """Periodically push the street-snapped walked track for a clean drawn line. Throttled,
+        and the (possibly slow) OSRM match runs off the send path so it never stalls narration."""
+        if not settings.track_match_enabled:
+            return
+        now = time.monotonic()
+        if (
+            self._last_track_at is not None
+            and now - self._last_track_at < settings.track_match_interval_s
+        ):
+            return
+        self._last_track_at = now
+
+        async def _run() -> None:
+            try:
+                poly = await self.orch.matched_track(self.session_id)
+            except Exception:  # noqa: BLE001 — cosmetic; never disturb the walk
+                return
+            if poly and len(poly) >= 2:
+                with contextlib.suppress(Exception):
+                    await self.send_json({"type": "track", "polyline": poly, "final": False})
+
+        asyncio.ensure_future(_run())  # fire-and-forget; self-contained
 
     async def _wait_played(self, text: str) -> None:
         self.played.clear()
@@ -1243,9 +1305,9 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
         if msg.get("discard"):
             await _discard_walk(orch, rt.session_id, rt.user_id)
         else:
-            # A kept walk: generate the structured recap in the background and push it to the
-            # Stop sheet when ready (the sheet shows a spinner until it arrives).
-            asyncio.ensure_future(rt.send_walk_summary())
+            # A kept walk: map-match the final track (smooth history/summary) and generate the
+            # structured recap, in the background (the Stop sheet shows a spinner until ready).
+            asyncio.ensure_future(rt.finalize_and_summarize())
     elif kind in ("utterance", "audio"):
         await rt.handle_question(msg, kind)
     elif kind == "auth":
@@ -1308,11 +1370,16 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
         dest = None
         if g.dest_lat is not None and g.dest_lon is not None:
             dest = GeoPoint(lat=g.dest_lat, lon=g.dest_lon)
-        route = await orch.plan_route(
-            rt.session_id, rt.live_position, mode=g.mode,
-            budget_min=g.budget_min, budget_km=g.budget_km,
-            destination=dest, pick_landmark=g.pick_landmark, theme=g.theme,
-        )
+        try:
+            route = await orch.plan_route(
+                rt.session_id, rt.live_position, mode=g.mode,
+                budget_min=g.budget_min, budget_km=g.budget_km,
+                destination=dest, pick_landmark=g.pick_landmark, theme=g.theme,
+            )
+        except Exception:  # noqa: BLE001 — a planning failure must not drop the socket
+            _walk.exception("guided plan_route failed")
+            await rt.send_json({"type": "error", "message": "route planning failed"})
+            return
         stops_ws: list[WSRouteStop] = []
         prev = 0.0
         for s in route.stops:

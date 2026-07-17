@@ -70,6 +70,13 @@ class RoutePlanner:
         self._provider = provider
         self._straight = StraightLineRouting()
 
+    # -- POI fetch with a safety net (a slow/blocked Overpass must not crash planning) -- #
+    async def _safe_fetch(self, center: GeoPoint, radius_m: float) -> list[Place]:
+        try:
+            return await self._provider.fetch_places(center, radius_m)
+        except Exception:  # noqa: BLE001 — timeout/HTTP error -> no candidates here, not a crash
+            return []
+
     # -- routing with a straight-line safety net (OSRM may be down / geo-blocked) -- #
     async def _safe_route(self, points: list[GeoPoint]) -> RouteLeg:
         try:
@@ -145,7 +152,7 @@ class RoutePlanner:
             radius = max(
                 settings.inventory_radius_m, min(budget_ref / 4.0, settings.route_max_fetch_m)
             )
-            places = await self._provider.fetch_places(origin, radius)
+            places = await self._safe_fetch(origin, radius)
         seen_set = set(seen or [])
         min_sig = Significance(settings.route_min_significance)
 
@@ -197,14 +204,14 @@ class RoutePlanner:
         pad = settings.route_corridor_pad_m
         disc_r = min(settings.inventory_radius_m, settings.route_max_fetch_m)
         if span / 2.0 + pad <= disc_r:  # one mid disc already reaches both ends
-            return await self._provider.fetch_places(_midpoint(origin, destination), disc_r)
+            return await self._safe_fetch(_midpoint(origin, destination), disc_r)
         brg = bearing_deg(origin, destination)
         step = disc_r * 1.5  # overlap consecutive discs
         n = int(span // step) + 1
         by_id: dict[str, Place] = {}
         for i in range(n + 1):
             centre = offset_point(origin, brg, min(i * step, span))
-            for p in await self._provider.fetch_places(centre, disc_r):
+            for p in await self._safe_fetch(centre, disc_r):
                 by_id[p.id] = p
         return list(by_id.values())
 

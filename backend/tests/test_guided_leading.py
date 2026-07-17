@@ -23,6 +23,9 @@ def _orch(monkeypatch):
     monkeypatch.setattr(settings, "geo_source", "fixture")
     monkeypatch.setattr(settings, "enrichment_source", "mock")
     monkeypatch.setattr(settings, "nav_between_mode", "teaser")
+    # These tests exercise the per-stop reactive leading path; the whole-route script has its
+    # own suite (test_guided_script.py).
+    monkeypatch.setattr(settings, "guided_script_enabled", False)
     orch = build_orchestrator(store=InMemoryStateStore())
     orch.route_planner = RoutePlanner(StraightLineRouting(), orch.discovery.provider)
     return orch

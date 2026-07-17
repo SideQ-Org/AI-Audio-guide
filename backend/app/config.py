@@ -368,6 +368,23 @@ class Settings(BaseSettings):
     walk_speed_mps: float = 1.3  # ~4.7 km/h — straight-line duration + budget->metres conversion
     routing_table_max_points: int = 100  # cap the OSRM /table request size (pre-filter top-N)
 
+    # Track map-matching: snap the walked GPS breadcrumb to the road/footpath network (OSRM
+    # /match) so the drawn track is smooth and follows streets, not raw jitter. Needs
+    # routing_source=osrm; without it (or on any error) the raw (already spoof-cleaned) path is
+    # kept. Live track is re-matched + pushed every track_match_interval_s.
+    track_match_enabled: bool = True
+    track_match_interval_s: float = 25.0  # live re-match/emit cadence
+    track_match_min_points: int = 8  # skip matching a tiny track
+    track_match_chunk: int = 90  # OSRM /match caps ~100 coords/request — split longer runs
+    track_match_radius_m: float = 12.0  # GPS accuracy hint passed to OSRM (radiuses)
+    # Honesty guard against a snapped DETOUR when the real path isn't in OSM (an unmapped
+    # alley/shortcut/cut-through): if OSRM's match confidence is below this, OR the snapped
+    # length exceeds the raw length by more than the factor (+floor), keep the real (smoothed)
+    # segment instead of a plausible-but-wrong route around the block.
+    track_match_min_confidence: float = 0.3
+    track_match_detour_factor: float = 1.8  # snapped/raw length ratio that flags a detour
+    track_match_detour_floor_m: float = 30.0  # ignore the factor below this absolute slack
+
     # Route planning (guided mode): how the guide picks + orders interesting stops.
     route_min_significance: str = "MEDIUM"  # SKIP|LOW|MEDIUM|HIGH|LANDMARK — floor for the route
     route_min_stops: int = 2  # fewer interesting places than this => "little of note nearby"
@@ -383,6 +400,12 @@ class Settings(BaseSettings):
     nav_offroute_debounce_s: float = 20.0  # hold off-route this long before rerouting
     nav_reroute_min_interval_s: float = 30.0  # min gap between reroutes (anti-spam)
     nav_reroute_max: int = 8  # after this many reroutes, lead by straight line quietly
+
+    # Guided-mode whole-route narration arc (TourScripter). Because the whole route is known
+    # at accept, the guide plans ONE coherent tour (intro + per-stop role + transitions +
+    # finale) instead of narrating each stop reactively. False => the per-stop reactive path.
+    guided_script_enabled: bool = True
+    guided_script_max_stops: int = 8  # cap the scripter prompt; extra stops fall back to per-stop
 
     # State store ("" => in-memory)
     redis_url: str = ""
@@ -459,6 +482,13 @@ class Settings(BaseSettings):
     # starts a new one on the next narrated object — so "morning + evening on one sid"
     # become two walks (design §5). 30 min default.
     walk_gap_s: float = 1800.0
+    # Server-side backstop behind the client's 10-minute record rule: when a session
+    # rotates to a NEW walk (gap above), the PREVIOUS walk is deleted if it spanned less
+    # than this many seconds — catching walks that never got an explicit `end`/discard
+    # (killed app, dead socket at Stop). Deliberately BELOW the client's 600 s: a walk
+    # row starts at the first narrated object (later than the tour itself), so a tight
+    # threshold here would prune walks the client explicitly chose to keep. 0 = off.
+    walk_min_record_s: float = 480.0
 
     # --- Self-improvement corpus capture (Block 4 §D2, Phase 0) ------------------
     # Persist a NarrationSample (FACTS + full NarratorInput → narration) per narrated

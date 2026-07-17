@@ -22,6 +22,8 @@ def _orch(monkeypatch, **over):
     monkeypatch.setattr(settings, "geo_source", "fixture")
     monkeypatch.setattr(settings, "enrichment_source", "mock")
     monkeypatch.setattr(settings, "nav_offroute_m", 50.0)
+    # Reroute mechanics are tested on the per-stop path; scripting has its own suite.
+    monkeypatch.setattr(settings, "guided_script_enabled", False)
     for k, v in over.items():
         monkeypatch.setattr(settings, k, v)
     orch = build_orchestrator(store=InMemoryStateStore())
