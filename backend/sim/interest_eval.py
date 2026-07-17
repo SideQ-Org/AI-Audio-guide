@@ -27,6 +27,7 @@ from app.services.agent.interest_metrics import (
     score_blurb,
     score_corpus,
 )
+from app.services.agent.interest_score import walk_coherence
 from sim.interest_corpus import Sample, load_db, load_e2e, split
 
 # Provisional axis weights (effortful/valuable axes higher, per the doc). Positive axes
@@ -60,11 +61,15 @@ class RegionScore:
     mtld: float
     distinct_2: float
     cliche_rate: float
+    coherence: float      # 0-1 walk-level coherence (transitions/adjacency/callbacks; code-only)
 
 
 def _score_region(region: str, samples: list[Sample], idf: dict[str, float]) -> RegionScore:
+    # A region == one walk here; order by seq so adjacency/transitions are measured in walk order.
+    samples = sorted(samples, key=lambda s: s.seq)
     texts = [s.text for s in samples]
-    cm = score_corpus(texts)
+    lang = samples[0].language if samples else "ru"
+    cm = score_corpus(texts, categories=[s.category for s in samples], language=lang)
     prior: list[str] = []
     per_blurb: list[float] = []
     agg = defaultdict(float)
@@ -103,6 +108,7 @@ def _score_region(region: str, samples: list[Sample], idf: dict[str, float]) -> 
         mtld=agg["mtld"] / n,
         distinct_2=cm.distinct_2,
         cliche_rate=cliche_blurbs / n,
+        coherence=walk_coherence(cm, None),
     )
 
 
@@ -143,12 +149,12 @@ def main() -> None:
     scores = evaluate(samples)
     overall = sum(r.score * r.n for r in scores) / (sum(r.n for r in scores) or 1)
     print(f"\ninterestingness (code-panel proxy) — {len(samples)} blurbs, split={args.split}\n")
-    print(f"  {'region':<20} {'n':>3}  {'score':>6}  {'bar':<20}  nov  spec  num  say  clich")
+    print(f"  {'region':<20} {'n':>3}  {'score':>6}  {'bar':<20}  nov  spec  num  say  clich  cohr")
     for r in scores:
         print(
             f"  {r.region:<20} {r.n:>3}  {r.score:>6.1f}  {_bar(r.score / 100)}  "
             f"{r.novelty:.2f} {r.specificity:.2f} {min(1.0, r.number_density*10):.2f} "
-            f"{r.speakability:.2f} {r.cliche_rate:.2f}"
+            f"{r.speakability:.2f} {r.cliche_rate:.2f}  {r.coherence:.2f}"
         )
     print(f"\n  overall (blurb-weighted): {overall:.1f}/100   "
           "[provisional weights; hook/vividness/grounding come from the judge, Phase 2-3]\n")

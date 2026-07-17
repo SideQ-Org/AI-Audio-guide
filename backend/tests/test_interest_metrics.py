@@ -8,7 +8,9 @@ from __future__ import annotations
 from app.services.agent.interest_metrics import (
     BlurbMetrics,
     CorpusMetrics,
+    adjacent_cohesion,
     build_idf,
+    callback_rate,
     cliche_hits,
     distinct_n,
     mtld,
@@ -20,7 +22,17 @@ from app.services.agent.interest_metrics import (
     score_corpus,
     self_repetition,
     speakability,
+    transition_rate,
 )
+
+# Cross-object coherence fixtures reused across tests.
+_CONNECTED = [
+    "Слева храм восемнадцатого века у реки.",
+    "А чуть дальше, как и та церковь, стоит часовня того же прихода.",
+    "Впереди усадьба, к которой вела эта аллея.",
+]
+_DISJOINT = ["Тут кафе.", "Памятник Пушкину.", "Аптека работает с восьми."]
+_CONN_CATS = ["place_of_worship", "place_of_worship", "attraction"]
 
 
 def test_distinct_n_rewards_variety_penalises_repetition():
@@ -140,3 +152,39 @@ def test_score_blurb_and_corpus_shapes():
     assert 0.0 <= cm.distinct_2 <= 1.0
     assert cm.silence_rate == 0.25
     assert abs(cm.object_repeat_rate - 1 / 3) < 1e-9  # 'a' repeats once out of 3 named
+
+
+# --- cross-object coherence ------------------------------------------------ #
+def test_transition_rate_rewards_connectives():
+    # 2 of 2 following blurbs open with a connective ("а чуть дальше", "впереди")
+    assert transition_rate(_CONNECTED, "ru") == 1.0
+    assert transition_rate(_DISJOINT, "ru") == 0.0
+    assert transition_rate(["only one blurb"], "ru") == 0.0  # <2 blurbs
+    assert transition_rate(_CONNECTED, "de") == 0.0  # no lexicon → neutral, judge covers it
+
+
+def test_adjacent_cohesion_bounds_and_edges():
+    # shared exact content tokens between neighbours raise cohesion; disjoint ~0.
+    themed = ["Старая мельница стояла у реки Волга.", "Река Волга кормила мельница веками."]
+    assert adjacent_cohesion(themed) > adjacent_cohesion(_DISJOINT)
+    assert adjacent_cohesion(["single"]) == 0.0  # <2 blurbs
+    assert 0.0 <= adjacent_cohesion(_CONNECTED) <= 1.0
+
+
+def test_callback_rate_needs_prior_category_and_marker():
+    # blurb 2 back-references an earlier place_of_worship ("как та церковь") → 1 hit of 2 followers
+    assert callback_rate(_CONNECTED, _CONN_CATS) == 0.5
+    # same texts but no repeated category ⇒ no callback can land
+    assert callback_rate(_CONNECTED, ["a", "b", "c"]) == 0.0
+    # marker present but no categories ⇒ neutral
+    assert callback_rate(_CONNECTED, []) == 0.0
+
+
+def test_score_corpus_threads_coherence():
+    cm = score_corpus(_CONNECTED, categories=_CONN_CATS, language="ru")
+    assert cm.transition_rate == 1.0
+    assert cm.callback_rate == 0.5
+    assert 0.0 <= cm.adjacent_cohesion <= 1.0
+    # disjoint corpus scores lower on every coherence axis
+    cd = score_corpus(_DISJOINT, categories=["cafe", "memorial", "pharmacy"], language="ru")
+    assert cd.transition_rate == 0.0 and cd.callback_rate == 0.0

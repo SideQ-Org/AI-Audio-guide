@@ -63,6 +63,38 @@ _PAIRWISE_TASK = (
     "неотличимо или оба нарушают гейты."
 )
 
+# Walk-level coherence axes (Block 4 coherence extension): judged over the WHOLE ordered sequence
+# of blurbs, not one object — the per-blurb panel's blind spot (бесшовность / связность / арка).
+WALK_AXES = ("seamlessness", "arc_coherence")
+
+WALK_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "rationale": {"type": "string"},
+        **{ax: {"type": "integer", "minimum": 0, "maximum": 4} for ax in WALK_AXES},
+    },
+    "required": ["rationale", *WALK_AXES],
+    "additionalProperties": False,
+}
+
+_WALK_TASK = (
+    "\n\nРЕЖИМ ПРОГУЛКИ: тебе дан УПОРЯДОЧЕННЫЙ список фрагментов (BLURBS) одной прогулки — "
+    "по порядку, как их слышал пешеход. Оцени прогулку КАК ЦЕЛОЕ по двум осям 0–4 и верни JSON "
+    "{rationale, seamlessness, arc_coherence}:\n"
+    "- seamlessness (бесшовность): плавно ли фрагменты перетекают друг в друга (пространственные/"
+    "смысловые связки, «а вот…», «чуть дальше…»), или это набор оборванных карточек с резкими "
+    "переходами. 4 — переходы естественны; 0 — каждый фрагмент начинается с нуля.\n"
+    "- arc_coherence (связность/арка): читается ли прогулка как одна история с темой и отсылками "
+    "(callback к ранее пройденному, единый мотив), или разрозненные факты без общей нити. 4 — есть "
+    "тема и связки между объектами; 0 — просто перечень.\n"
+    "Оценивай СВЯЗЬ между фрагментами, а не интересность каждого по отдельности. Пустые фрагменты/"
+    "[SILENCE] не считаются связками — молчание не бесшовность.\n"
+    "Ориентиры: seamlessness=4, arc=4 — «Слева храм XVIII века… // А чуть дальше, как и та "
+    "церковь, стоит старая часовня того же прихода… // Впереди усадьба, к которой вела эта "
+    "аллея.» (переходы и общая нить). seamlessness=0, arc=0 — «Тут кафе. // Памятник Пушкину. "
+    "// Аптека работает с 8.» (три оборванные карточки без связок и темы)."
+)
+
 
 @dataclass
 class JudgeVerdict:
@@ -82,6 +114,20 @@ class JudgeVerdict:
         floored regardless of its axes (the 'facts only, no cliché' invariant as reward)."""
         base = self.overall / 4.0
         return min(base, 0.25) if not self.gates_ok else base
+
+
+@dataclass
+class WalkVerdict:
+    """Walk-level coherence verdict (one per walk). Axes are 0-4 as returned by the judge;
+    ``score`` normalises to 0-1 (mean of the two axes)."""
+
+    rationale: str
+    seamlessness: int
+    arc_coherence: int
+
+    @property
+    def score(self) -> float:
+        return max(0.0, min(1.0, (self.seamlessness + self.arc_coherence) / 8.0))
 
 
 def _user(blurb: str, *, facts: str | None, context: dict | None, tier: str | None) -> str:
@@ -123,6 +169,30 @@ class LLMJudge:
             grounded=bool(data.get("grounded", False)),
             cliche=bool(data.get("cliche", True)),
             overall=int(data.get("overall", 0)),
+        )
+
+    async def score_walk(
+        self,
+        blurbs: list[str],
+        *,
+        language: str = "ru",
+    ) -> WalkVerdict:
+        """Walk-level coherence: judge the ORDERED sequence of blurbs as one narrative (seamlessness
+        + arc). Pass only non-silent blurbs (silence isn't smoothness). Blurbs are clipped so a long
+        walk fits the judge context. Neutral (0/0) for <2 blurbs — coherence is undefined."""
+        clean = [(b or "").strip() for b in blurbs if (b or "").strip()]
+        if len(clean) < 2:
+            return WalkVerdict(rationale="too few blurbs", seamlessness=0, arc_coherence=0)
+        # Clip each blurb + cap the count so a huge walk can't blow the judge context window.
+        seq = [b[:280] for b in clean[:40]]
+        system = system_for_judge(language) + _WALK_TASK
+        data = await self._llm.complete_json(
+            Role.JUDGE, system, _json({"BLURBS": seq}), WALK_SCHEMA, max_tokens=1200,
+        )
+        return WalkVerdict(
+            rationale=str(data.get("rationale", "")),
+            seamlessness=int(data.get("seamlessness", 0)),
+            arc_coherence=int(data.get("arc_coherence", 0)),
         )
 
     async def _compare_once(

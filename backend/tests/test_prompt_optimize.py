@@ -16,6 +16,7 @@ from sim.prompt_optimize import (
     SplitEval,
     beats_champion,
     check_and_rollback,
+    coherence_not_degraded,
     coverage_not_degraded,
     evaluate_prompt,
     gates_not_degraded,
@@ -23,6 +24,7 @@ from sim.prompt_optimize import (
     optimize,
     write_candidate,
 )
+from sim.prompt_optimize import _gates_hold as gates_hold
 
 
 # --- fakes ----------------------------------------------------------------- #
@@ -83,6 +85,60 @@ def _run(coro):
         return asyncio.run(coro)
     finally:
         clear_prompt_overrides()
+
+
+# --- coherence objective (walk-aware) -------------------------------------- #
+def _sv(coherence: float, *, mean: float = 0.5) -> SplitEval:
+    return SplitEval(n=2, mean=mean, grounded_rate=1.0, cliche_rate=0.0, coherence=coherence)
+
+
+def test_coherence_not_degraded_tolerates_noise_but_rejects_drops():
+    champ = _sv(0.5)
+    assert coherence_not_degraded(_sv(0.6), champ)        # improvement
+    assert coherence_not_degraded(_sv(0.47), champ)       # within eps 0.05 (noise)
+    assert not coherence_not_degraded(_sv(0.3), champ)    # real regression
+
+
+def test_gates_hold_rejects_a_disjointness_regression():
+    # a candidate that improves the mean but makes walks MORE disjoint must not pass the gate
+    champ = _sv(0.5, mean=0.5)
+    cand = _sv(0.2, mean=0.9)
+    assert not gates_hold(cand, champ)
+    assert gates_hold(_sv(0.5, mean=0.9), champ)          # same coherence, higher mean → ok
+
+
+def _witem(name, walk_id, seq, category="place_of_worship"):
+    from app.shared.schemas import NarratorInput
+    inp = NarratorInput(
+        place=Place(id=name, name=name, category=category, location=GeoPoint(lat=55.0, lon=37.0)),
+        significance=Significance.MEDIUM, distance_m=30.0, facts="факт", language="ru",
+    )
+    return EvalItem(inp=inp, facts="факт", walk_id=walk_id, seq=seq, category=category)
+
+
+class _ConnNarrator:
+    """CONNECTED override ⇒ blurbs that open with a connective + call back; else plain cards."""
+    async def narrate(self, inp):
+        ov = active_overrides().get("narrator", "")
+        if "CONNECTED" in ov:
+            return f"А чуть дальше, как и та церковь, стоит {inp.place.name}."
+        return f"{inp.place.name}."
+
+
+class _OkJudge:
+    async def score(self, text, *, facts=None, language="ru", tier=None):
+        return JudgeVerdict("", {ax: 3 for ax in AXES}, True, False, 3)
+
+
+def test_evaluate_prompt_walk_grouping_scores_coherence():
+    items = [_witem("часовня", "w1", 0), _witem("храм", "w1", 1)]  # one walk, ordered
+    conn = _run(evaluate_prompt("narrator", "CONNECTED", items, _ConnNarrator(), _OkJudge()))
+    plain = _run(evaluate_prompt("narrator", "PLAIN", items, _ConnNarrator(), _OkJudge()))
+    assert conn.coherence > plain.coherence
+    # ungrouped items (default walk_id None → singleton walks) ⇒ neutral coherence, no crash
+    solo = [_witem("a", None, 0), _witem("b", None, 0)]
+    solo_ev = _run(evaluate_prompt("narrator", "PLAIN", solo, _ConnNarrator(), _OkJudge()))
+    assert solo_ev.coherence == 0.0
 
 
 # --- pure gate logic ------------------------------------------------------- #

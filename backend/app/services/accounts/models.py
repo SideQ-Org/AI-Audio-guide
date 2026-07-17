@@ -269,6 +269,11 @@ class WalkQuality(Base):
     cliche_rate: Mapped[float] = mapped_column(Double, default=0.0, nullable=False)
     novelty_mean: Mapped[float] = mapped_column(Double, default=0.0, nullable=False)
     distinct_2: Mapped[float] = mapped_column(Double, default=0.0, nullable=False)
+    # Cross-object coherence (Block 4 coherence extension): бесшовность / связность / арка.
+    # Nullable — rows written before this column stay valid; 0.0 for code-only (no walk judge).
+    coherence_mean: Mapped[float | None] = mapped_column(Double, nullable=True)
+    seamlessness: Mapped[float | None] = mapped_column(Double, nullable=True)
+    arc_coherence: Mapped[float | None] = mapped_column(Double, nullable=True)
     used_judge: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Failure taxonomy + worst-blurb diagnostics (feeds the optimizer's error analysis).
     diagnostics: Mapped[dict | None] = mapped_column(JSON, nullable=True)

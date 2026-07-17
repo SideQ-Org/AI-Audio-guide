@@ -2,15 +2,47 @@
 
 from __future__ import annotations
 
-from app.services.agent.interest_judge import AXES, JudgeVerdict
-from app.services.agent.interest_metrics import BlurbMetrics
+from app.services.agent.interest_judge import AXES, JudgeVerdict, WalkVerdict
+from app.services.agent.interest_metrics import BlurbMetrics, CorpusMetrics
 from app.services.agent.interest_score import (
     FEATURES,
     composite,
     feature_vector,
     fit_weights,
     inverted_u,
+    walk_coherence,
 )
+
+
+def _cm(**kw) -> CorpusMetrics:
+    base = dict(
+        distinct_1=1.0, distinct_2=1.0, distinct_3=1.0, self_repetition=0.0, silence_rate=0.0,
+        object_repeat_rate=0.0, transition_rate=0.0, adjacent_cohesion=0.0, callback_rate=0.0,
+    )
+    base.update(kw)
+    return CorpusMetrics(**base)
+
+
+def test_walk_coherence_code_only_rewards_links():
+    disjoint = walk_coherence(_cm())
+    linked = walk_coherence(_cm(transition_rate=0.5, adjacent_cohesion=0.25, callback_rate=0.34))
+    assert disjoint == 0.0
+    assert linked > disjoint
+    assert 0.0 <= linked <= 1.0
+
+
+def test_walk_coherence_high_adjacency_is_penalised_as_repetition():
+    thematic = walk_coherence(_cm(adjacent_cohesion=0.25))
+    rewordy = walk_coherence(_cm(adjacent_cohesion=0.9))  # near-identical neighbours = repetition
+    assert rewordy < thematic
+
+
+def test_walk_coherence_judge_leads_when_present():
+    cm = _cm(transition_rate=0.0, adjacent_cohesion=0.0, callback_rate=0.0)  # code says 0
+    wv = WalkVerdict(rationale="", seamlessness=4, arc_coherence=4)          # judge says great
+    blended = walk_coherence(cm, wv)
+    assert blended >= 0.6 * wv.score  # judge (weight 0.6) dominates code-0
+    assert walk_coherence(cm, None) == 0.0  # code-only path unaffected
 
 
 def _bm(**kw) -> BlurbMetrics:

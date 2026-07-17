@@ -27,7 +27,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from app.services.agent.interest_metrics import build_idf, score_blurb
-from app.services.agent.interest_score import composite
+from app.services.agent.interest_score import composite, walk_coherence
 from app.services.agent.prompts import (
     clear_prompt_overrides,
     set_prompt_override,
@@ -61,6 +61,12 @@ class EvalItem:
     inp: NarratorInput
     facts: str | None = None
     tier: str = "free"
+    # Walk-grouping for the coherence objective: items with the same walk_id, ordered by seq,
+    # form one walk so evaluate_prompt can score cross-object seamlessness. Default (None, 0) =>
+    # each item is its own singleton walk (coherence neutral) — backward-compatible.
+    walk_id: str | None = None
+    seq: int = 0
+    category: str | None = None
 
     @property
     def language(self) -> str:
@@ -74,6 +80,33 @@ def _is_silence(text: str) -> bool:
     return not t or t.upper().strip("[]") == "SILENCE"
 
 
+def _walk_coherence_over(items: list[EvalItem], texts: list[str]) -> float:
+    """Walk-level coherence for the optimizer's secondary objective: group the regenerated blurbs
+    by walk_id (ordered by seq), and average CODE-ONLY walk_coherence over walks with ≥2 non-silent
+    blurbs. Code-only (no judge.score_walk) keeps the in-loop cost/determinism sane; the signal is
+    a non-degradation guard, not the primary score. Returns 0.0 (neutral) when no walk has ≥2
+    non-silent blurbs — so single-item / ungrouped corpora neither gain nor lose."""
+    from app.services.agent.interest_metrics import score_corpus
+
+    groups: dict[str, list[tuple[int, str, str | None]]] = {}
+    for it, text in zip(items, texts, strict=True):
+        if _is_silence(text):
+            continue
+        key = it.walk_id or f"__solo__{id(it)}"
+        groups.setdefault(key, []).append((it.seq, text, it.category))
+    scores: list[float] = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda m: m[0])
+        seq_texts = [m[1] for m in members]
+        cats = [m[2] for m in members]
+        lang = items[0].language if items else "ru"
+        cm = score_corpus(seq_texts, categories=cats, language=lang)
+        scores.append(walk_coherence(cm, None))
+    return sum(scores) / len(scores) if scores else 0.0
+
+
 @dataclass
 class SplitEval:
     n: int
@@ -81,6 +114,7 @@ class SplitEval:
     grounded_rate: float
     cliche_rate: float
     silence_rate: float = 0.0         # fraction of blurbs that went silent (coverage anti-pattern)
+    coherence: float = 0.0            # 0-1 walk-level coherence over walk-grouped items (secondary)
     scores: list[float] = field(default_factory=list)   # per-item, aligned to the split
     texts: list[str] = field(default_factory=list)       # the regenerated narrations
 
@@ -194,6 +228,7 @@ async def evaluate_prompt(
         grounded_rate=g_ok / n,
         cliche_rate=(n - c_ok) / n,
         silence_rate=sum(1 for t in texts if _is_silence(t)) / n,
+        coherence=_walk_coherence_over(items, texts),
         scores=scores,
         texts=texts,
     )
@@ -205,7 +240,8 @@ def failure_analysis(items: list[EvalItem], ev: SplitEval, *, keep: int = 5) -> 
     ranked = sorted(zip(ev.scores, ev.texts, items, strict=True), key=lambda x: x[0])
     lines = [
         f"grounded_rate={ev.grounded_rate:.2f} cliche_rate={ev.cliche_rate:.2f} "
-        f"mean_score={ev.mean:.2f}",
+        f"mean_score={ev.mean:.2f} coherence={ev.coherence:.2f} (связность прогулки: "
+        f"плавные переходы, отсылки к пройденному, единая тема — а не набор карточек)",
         "Худшие фрагменты (score — текст — был ли факт):",
     ]
     for s, t, it in ranked[:keep]:
@@ -263,9 +299,22 @@ def coverage_not_degraded(cand: SplitEval, champ: SplitEval, *, eps: float = 1e-
     return cand.silence_rate <= champ.silence_rate + eps
 
 
+def coherence_not_degraded(cand: SplitEval, champ: SplitEval, *, eps: float = 0.05) -> bool:
+    """The COHERENCE guard — a fix may not make the walk MORE disjoint (worse seamlessness / arc).
+    Generous ``eps`` so it only catches a real drop, not noise: coherence is a SECONDARY objective,
+    it must not veto a genuine grounding/interest win over sampling jitter. Kept out of the hard
+    gold `mean` gate on purpose (so a candidate can't game it with filler connectives — the
+    cliché/speakability gates fight that)."""
+    return cand.coherence >= champ.coherence - eps
+
+
 def _gates_hold(cand: SplitEval, champ: SplitEval) -> bool:
-    """All non-negotiables at once: groundedness, cliché, AND coverage don't degrade."""
-    return gates_not_degraded(cand, champ) and coverage_not_degraded(cand, champ)
+    """All non-negotiables at once: groundedness, cliché, coverage, AND coherence don't degrade."""
+    return (
+        gates_not_degraded(cand, champ)
+        and coverage_not_degraded(cand, champ)
+        and coherence_not_degraded(cand, champ)
+    )
 
 
 def is_reward_hacking(search_gain: float, gold_gain: float, *, tol: float = 0.01) -> bool:
@@ -385,7 +434,7 @@ async def optimize(
             champion = Variant(id=vid, text=ct, gen=r, parent=champion.id)
             trajectory.append(
                 {"id": champion.id, "dev": round(ev.mean, 3), "gold": round(gold.mean, 3),
-                 "silence": round(gold.silence_rate, 3)}
+                 "silence": round(gold.silence_rate, 3), "coherence": round(gold.coherence, 3)}
             )
             plateau = 0
             _log.info(
@@ -402,6 +451,8 @@ async def optimize(
         else:
             if not coverage_not_degraded(gold, champ_gold):
                 stop = "coverage_regressed"
+            elif not coherence_not_degraded(gold, champ_gold):
+                stop = "coherence_regressed"
             elif is_reward_hacking(search_gain, gold_gain):
                 stop = "reward_hacking"
             else:

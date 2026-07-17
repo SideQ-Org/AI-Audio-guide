@@ -21,8 +21,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .interest_judge import JudgeVerdict
-from .interest_metrics import BlurbMetrics
+from .interest_judge import JudgeVerdict, WalkVerdict
+from .interest_metrics import BlurbMetrics, CorpusMetrics
 
 # Feature order used by the regression + the default weights. Semantic axes come from the
 # judge when present; code axes are the reference-free panel. All normalised to ~0-1.
@@ -124,6 +124,34 @@ def composite(
     for ok in gates.values():
         factor *= 1.0 if ok else 0.0
     return CompositeScore(interest=interest, gates=gates, score=interest * factor)
+
+
+# --------------------------------------------------------------------------- #
+# walk-level coherence (cross-object) — бесшовность / связность / интеграция в арку
+# A SEPARATE 0-1 quantity from the per-blurb composite: consumed by the worker (as a bounded
+# ±15% dial on the walk score) and the optimizer (as a secondary objective). Deliberately NOT a
+# hard gate and NOT part of composite() — a disjoint-but-grounded walk must never be zeroed, and
+# coherence must never buy back facts-only/coverage.
+# --------------------------------------------------------------------------- #
+def walk_coherence(
+    cm: CorpusMetrics, wv: WalkVerdict | None = None, *, judge_weight: float = 0.6
+) -> float:
+    """Blend the code coherence signals (transitions / adjacency / callbacks) with the optional
+    walk-level judge verdict into one 0-1 score. Code-only when no judge (advisory); with a judge,
+    its multilingual seamlessness/arc verdict leads (``judge_weight``). Adjacency ramps to full
+    credit at a modest 0.25 (content-word overlap between neighbours is small in practice) and is
+    HALVED past 0.6 (near-identical consecutive blurbs = rewording, not a theme — the one case where
+    'more overlap' is worse)."""
+    coh_adj = min(1.0, cm.adjacent_cohesion / 0.25)
+    if cm.adjacent_cohesion > 0.6:
+        coh_adj *= 0.5
+    trans = min(1.0, cm.transition_rate / 0.5)   # ~half the blurbs linking = full credit; capped
+    callbacks = min(1.0, cm.callback_rate * 3.0)  # callbacks are rare; a few is a strong signal
+    code_score = 0.5 * coh_adj + 0.25 * trans + 0.25 * callbacks
+    code_score = max(0.0, min(1.0, code_score))
+    if wv is None:
+        return code_score
+    return max(0.0, min(1.0, judge_weight * wv.score + (1.0 - judge_weight) * code_score))
 
 
 # --------------------------------------------------------------------------- #

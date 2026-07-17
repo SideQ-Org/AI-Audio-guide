@@ -54,6 +54,64 @@ def test_score_blurbs_empty_is_zero():
     assert r.score == 0.0
 
 
+# --- cross-object coherence (code-only, no judge) -------------------------- #
+def _connected() -> list[Blurb]:
+    return [
+        Blurb("Слева храм восемнадцатого века у реки.", "ru", category="place_of_worship"),
+        Blurb("А чуть дальше, как и та церковь, стоит часовня того же прихода.", "ru",
+              category="place_of_worship"),
+        Blurb("Впереди усадьба, к которой вела эта аллея.", "ru", category="attraction"),
+    ]
+
+
+def _disjoint() -> list[Blurb]:
+    return [
+        Blurb("Тут кафе.", "ru", category="cafe"),
+        Blurb("Памятник Пушкину.", "ru", category="memorial"),
+        Blurb("Аптека работает с восьми.", "ru", category="pharmacy"),
+    ]
+
+
+def test_worker_scores_and_flags_coherence():
+    rc = asyncio.run(score_blurbs(_connected()))
+    rd = asyncio.run(score_blurbs(_disjoint()))
+    assert rc.coherence_mean > rd.coherence_mean          # connected reads as one walk
+    assert "coherence" in rc.diagnostics
+    assert "disjoint" in (rd.diagnostics["taxonomy"])     # disjoint walk flagged
+    assert "disjoint" not in (rc.diagnostics["taxonomy"])
+
+
+def test_coherence_factor_is_bounded_and_never_boosts():
+    # The fold is score = 100·mean·(1−0.4·obj_repeat)·(0.85+0.15·coherence): the multiplier lives in
+    # [0.85, 1.0], so coherence can shave at most 15% off and NEVER lifts a walk above its base.
+    from app.services.agent.interest_metrics import build_idf, score_blurb
+    from app.services.agent.interest_score import composite
+    blurbs = _connected()
+    idf = build_idf([b.text for b in blurbs])
+    prior: list[str] = []
+    gated = []
+    for b in blurbs:
+        gated.append(composite(score_blurb(b.text, prior=prior, idf=idf, language="ru")).score)
+        prior.append(b.text)
+    base = 100 * sum(gated) / len(gated)          # no coherence factor
+    r = asyncio.run(score_blurbs(blurbs))
+    assert r.score <= base + 1e-6                  # coherence never boosts above the gated base
+    assert r.score >= 0.85 * base - 1e-6           # and shaves at most 15%
+
+
+def test_silence_cannot_masquerade_as_coherence():
+    # Replacing the smooth middle link with [SILENCE] must NOT raise coherence (silence ≠ smooth).
+    connected = _connected()
+    silenced = [
+        connected[0],
+        Blurb("[SILENCE]", "ru", category="place_of_worship"),
+        connected[2],
+    ]
+    rc = asyncio.run(score_blurbs(connected))
+    rs = asyncio.run(score_blurbs(silenced))
+    assert rs.coherence_mean <= rc.coherence_mean
+
+
 def test_score_blurbs_records_tier_and_passes_it_to_judge():
     seen_tiers = []
 

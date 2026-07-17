@@ -62,6 +62,35 @@ def _spelled_number_hits(text: str, language: str) -> int:
     return len(pat.findall(text or "")) if pat else 0
 
 
+# Discourse/spatial connectives a blurb OPENS with when it links smoothly to the walk instead of
+# starting a fresh disconnected card ("а вот и…", "чуть дальше…", "напротив…"). Per-language (RU is
+# prod); other languages have no lexicon → transition_rate returns 0 and leans on the walk judge.
+# Matched at the blurb start (after stripping quotes/spaces), case-insensitive.
+_TRANSITION_MARKERS: dict[str, tuple[str, ...]] = {
+    "ru": (
+        "а вот", "а вон", "а здесь", "а тут", "вот и", "вот здесь", "чуть дальше", "чуть впереди",
+        "чуть правее", "чуть левее", "напротив", "рядом", "здесь же", "тут же", "по соседству",
+        "впереди", "справа", "слева", "перед нами", "перед вами", "за спиной", "позади",
+        "тем временем", "кстати", "к слову", "а ещё", "а еще", "как и", "как та", "как тот",
+        "как и та", "как и тот", "неподалёку", "неподалеку", "дальше по", "а прямо",
+    ),
+}
+
+# Back-reference markers: a blurb that CALLS BACK to something told earlier ("как та церковь ранее",
+# "тот самый мост", "мы уже видели…"). Paired with an earlier-object category match in callbacks.
+_CALLBACK_MARKERS: dict[str, tuple[str, ...]] = {
+    "ru": (
+        "как та", "как тот", "как и та", "как и тот", "как и эта", "как и этот", "тот самый",
+        "та самая", "то самое", "мы уже", "уже видели", "уже проходили", "как ранее", "ранее",
+        "помнишь", "помните", "как и прежд", "как прежде", "снова", "опять же", "как у",
+    ),
+}
+
+
+def _lex_for(mapping: dict[str, tuple[str, ...]], language: str) -> tuple[str, ...]:
+    return mapping.get((language or "").split("-")[0].lower(), ())
+
+
 def _tokens(text: str) -> list[str]:
     return _WORD_RE.findall((text or "").lower())
 
@@ -104,6 +133,84 @@ def self_repetition(texts: list[str], n: int = 3) -> float:
                 total += len(grams[i] & grams[j]) / len(union)
                 pairs += 1
     return total / pairs if pairs else 0.0
+
+
+# --------------------------------------------------------------------------- #
+# cross-object coherence (across CONSECUTIVE blurbs) — "seamlessness / связность / arc"
+# These score the WALK as a connected narrative, not each blurb in isolation. All
+# reference-free; RU lexicons now (other languages fall back to the walk-level judge).
+# --------------------------------------------------------------------------- #
+# A blurb often opens with a bare conjunction before the real connective ("А чуть дальше…",
+# "И вот…") — strip one leading conjunction so the marker match still fires.
+_LEAD_CONJ = ("а ", "и ", "но ", "да ", "ну ", "вот ")
+
+
+def _opens_with(text: str, markers: tuple[str, ...]) -> bool:
+    """True if the blurb's first sentence starts with one of ``markers`` (quotes/space-stripped),
+    tolerating a single leading conjunction ("А чуть дальше…" matches "чуть дальше")."""
+    head = (text or "").lstrip("\"'«»„“ \t\n—-–").lower()
+    heads = [head]
+    for c in _LEAD_CONJ:
+        if head.startswith(c):
+            heads.append(head[len(c):])
+            break
+    return any(h.startswith(m) for h in heads for m in markers)
+
+
+def transition_rate(texts: list[str], language: str = "ru") -> float:
+    """Fraction of blurbs (after the first) that OPEN with a spatial/discourse connective — a cheap
+    proxy for smooth linking ("а вот и…", "чуть дальше…") vs an abrupt fresh card. 0.0 for <2 blurbs
+    or a language with no lexicon. This is a MILD positive; capped downstream so connective-spam
+    (which the cliché/speakability gates catch) can't run it up."""
+    markers = _lex_for(_TRANSITION_MARKERS, language)
+    if not markers or len(texts) < 2:
+        return 0.0
+    hits = sum(1 for t in texts[1:] if _opens_with(t, markers))
+    return hits / (len(texts) - 1)
+
+
+def _content_tokens(text: str) -> set[str]:
+    """Content words for adjacency overlap: length-≥4 tokens (a language-agnostic stopword proxy —
+    RU/EN function words are mostly short), lowercased."""
+    return {w for w in _tokens(text) if len(w) >= 4}
+
+
+def adjacent_cohesion(texts: list[str]) -> float:
+    """Mean Jaccard of CONTENT tokens between CONSECUTIVE blurbs — the connective tissue of a theme.
+    Returned RAW (non-monotonic): interest_score applies the inverted-U so a moderate shared thread
+    is rewarded while 0 (disjoint cards) and ~1 (rewording the same thing) are both penalised. 0.0
+    for <2 blurbs."""
+    sets = [_content_tokens(t) for t in texts]
+    pairs = [(sets[i], sets[i + 1]) for i in range(len(sets) - 1) if sets[i] and sets[i + 1]]
+    if not pairs:
+        return 0.0
+    total = 0.0
+    for a, b in pairs:
+        union = a | b
+        total += len(a & b) / len(union) if union else 0.0
+    return total / len(pairs)
+
+
+def callback_rate(texts: list[str], categories: list[str | None]) -> float:
+    """Fraction of blurbs (after the first) that CALL BACK to an earlier object of the same category
+    AND carry a back-reference marker ("как та церковь ранее", "тот самый мост") — the integration /
+    arc signal the director's callbacks aim for. Needs per-blurb ``categories`` aligned to ``texts``
+    (present in the worker). 0.0 without categories, a lexicon, or <2 blurbs."""
+    lang_markers = _CALLBACK_MARKERS.get("ru")  # RU-only for now; matches the lexicons above
+    if not lang_markers or len(texts) < 2 or not categories:
+        return 0.0
+    seen_cats: set[str] = set()
+    total = hits = 0
+    for text, cat in zip(texts, categories, strict=False):
+        low = (text or "").lower()
+        if total >= 1:  # only blurbs with a prior object can call back
+            if cat and cat in seen_cats and any(m in low for m in lang_markers):
+                hits += 1
+        if cat:
+            seen_cats.add(cat)
+        total += 1
+    denom = max(1, total - 1)
+    return hits / denom
 
 
 # --------------------------------------------------------------------------- #
@@ -282,7 +389,8 @@ def object_repeat_rate(place_ids: list[str | None]) -> float:
 @dataclass
 class CorpusMetrics:
     """Whole-walk metrics: lexical diversity + repetition + object-level repetition + a
-    silence rate the caller supplies (from walklog counters — "шёл и молчал")."""
+    silence rate the caller supplies (from walklog counters — "шёл и молчал"), plus the
+    cross-object coherence signals (transitions / adjacency / callbacks)."""
 
     distinct_1: float
     distinct_2: float
@@ -290,6 +398,10 @@ class CorpusMetrics:
     self_repetition: float
     silence_rate: float
     object_repeat_rate: float = 0.0
+    # cross-object coherence (raw; interest_score.walk_coherence blends/transforms these)
+    transition_rate: float = 0.0
+    adjacent_cohesion: float = 0.0
+    callback_rate: float = 0.0
 
 
 def score_corpus(
@@ -297,10 +409,14 @@ def score_corpus(
     *,
     silence_rate: float = 0.0,
     place_ids: list[str | None] | None = None,
+    categories: list[str | None] | None = None,
+    language: str = "ru",
 ) -> CorpusMetrics:
-    """Whole-walk diversity/repetition. ``silence_rate`` is passed in (ticks with no
+    """Whole-walk diversity/repetition + coherence. ``silence_rate`` is passed in (ticks with no
     narration ÷ total ticks). ``place_ids`` (per-blurb object identity, aligned to ``texts``)
-    enables object-level repeat detection; omit it for text-only corpora."""
+    enables object-level repeat detection; ``categories`` (aligned to ``texts``) enables the
+    callback signal. Omit either for text-only corpora. Coherence is computed over the given
+    ``texts`` — pass only NON-silent blurbs so silence can't masquerade as smoothness."""
     return CorpusMetrics(
         distinct_1=distinct_n(texts, 1),
         distinct_2=distinct_n(texts, 2),
@@ -308,4 +424,7 @@ def score_corpus(
         self_repetition=self_repetition(texts),
         silence_rate=max(0.0, min(1.0, silence_rate)),
         object_repeat_rate=object_repeat_rate(place_ids) if place_ids else 0.0,
+        transition_rate=transition_rate(texts, language),
+        adjacent_cohesion=adjacent_cohesion(texts),
+        callback_rate=callback_rate(texts, categories) if categories else 0.0,
     )

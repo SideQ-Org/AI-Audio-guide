@@ -22,7 +22,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 
 from app.services.agent.interest_metrics import build_idf, score_blurb, score_corpus
-from app.services.agent.interest_score import composite
+from app.services.agent.interest_score import composite, walk_coherence
 
 _log = logging.getLogger("aiguide.quality")
 
@@ -38,6 +38,7 @@ class Blurb:
     facts: str | None = None
     place: str | None = None
     significance: str | None = None
+    category: str | None = None
     tier: str = "free"
 
 
@@ -51,6 +52,9 @@ class QualityResult:
     cliche_rate: float = 0.0
     novelty_mean: float = 0.0
     distinct_2: float = 0.0
+    coherence_mean: float = 0.0    # 0-1 walk coherence (transitions/adjacency/callbacks + judge)
+    seamlessness: float = 0.0      # judge axis 0-4 (0 when no judge / <2 blurbs)
+    arc_coherence: float = 0.0     # judge axis 0-4
     used_judge: bool = False
     diagnostics: dict = field(default_factory=dict)
 
@@ -70,8 +74,10 @@ async def score_blurbs(blurbs: list[Blurb], *, judge=None) -> QualityResult:
 
     texts = [b.text for b in blurbs]
     place_ids = [b.place for b in blurbs]
+    categories = [b.category for b in blurbs]
+    lang = blurbs[0].language or "ru"
     idf = build_idf(texts)
-    cm = score_corpus(texts, place_ids=place_ids)
+    cm = score_corpus(texts, place_ids=place_ids, categories=categories, language=lang)
     prior: list[str] = []
     tax: Counter[str] = Counter()
     worst: list[tuple[float, str]] = []
@@ -121,7 +127,26 @@ async def score_blurbs(blurbs: list[Blurb], *, judge=None) -> QualityResult:
     if repeat_objs:
         tax["repeat_object"] = repeat_objs
 
-    walk_score = 100 * sum(scores) / n * (1 - 0.4 * cm.object_repeat_rate)
+    # Walk-level coherence (бесшовность / связность / арка): a SEPARATE cross-object quantity.
+    # The judge (when present) scores the ordered NON-SILENT sequence; the code panel supplies the
+    # transition/adjacency/callback signals. Folded as a BOUNDED ±15% dial — it can never zero a
+    # grounded walk, and (computed over non-silent blurbs + the coverage gate elsewhere) silence
+    # can't masquerade as smoothness.
+    wv = None
+    if judge is not None:
+        seq = [t for t in texts if t.strip() and t.strip().upper().strip("[]") != "SILENCE"]
+        if len(seq) >= 2:
+            try:
+                wv = await judge.score_walk(seq, language=lang)
+            except Exception as e:  # noqa: BLE001 — a judge hiccup must not abort the sweep
+                _log.warning("walk judge failed: %s", e)
+    coherence = walk_coherence(cm, wv)
+
+    walk_score = (
+        100 * sum(scores) / n * (1 - 0.4 * cm.object_repeat_rate) * (0.85 + 0.15 * coherence)
+    )
+    if coherence < 0.4:
+        tax["disjoint"] = 1
     worst.sort(key=lambda x: x[0])
     return QualityResult(
         tier=blurbs[0].tier,
@@ -132,10 +157,21 @@ async def score_blurbs(blurbs: list[Blurb], *, judge=None) -> QualityResult:
         cliche_rate=round((n - cliche_ok) / n, 3),
         novelty_mean=round(sum(novelties) / n, 3),
         distinct_2=round(cm.distinct_2, 3),
+        coherence_mean=round(coherence, 3),
+        seamlessness=float(wv.seamlessness) if wv else 0.0,
+        arc_coherence=float(wv.arc_coherence) if wv else 0.0,
         used_judge=judge is not None,
         diagnostics={
             "taxonomy": dict(tax),
             "object_repeat_rate": round(cm.object_repeat_rate, 3),
+            "coherence": {
+                "score": round(coherence, 3),
+                "transition_rate": round(cm.transition_rate, 3),
+                "adjacent_cohesion": round(cm.adjacent_cohesion, 3),
+                "callback_rate": round(cm.callback_rate, 3),
+                "seamlessness": float(wv.seamlessness) if wv else None,
+                "arc_coherence": float(wv.arc_coherence) if wv else None,
+            },
             "worst": [{"score": round(s, 3), "text": t} for s, t in worst[:_WORST_KEEP]],
         },
     )
@@ -161,12 +197,16 @@ def _blurbs_for_walk(samples: list, events: list) -> list[Blurb]:
             Blurb(
                 text=s.narration, language=s.language, facts=s.facts,
                 place=s.place_id, significance=s.significance,
+                category=getattr(s, "category", None),
                 tier=getattr(s, "tier", "free"),
             )
             for s in samples
         ]
     return [
-        Blurb(text=e.narration or "", language="ru", significance=e.significance)
+        Blurb(
+            text=e.narration or "", language="ru", significance=e.significance,
+            place=getattr(e, "place_id", None), category=getattr(e, "category", None),
+        )
         for e in events
         if (e.narration or "").strip()
     ]
@@ -214,8 +254,9 @@ def _log_decision(walk_id: str, r: QualityResult) -> None:
     diag = r.diagnostics or {}
     _log.info(
         "WALK %s tier=%s score=%.1f/100 | grounded=%.2f cliche=%.2f novelty=%.2f "
-        "object_repeat=%.2f | n=%d judge=%s",
+        "coherence=%.2f (seam=%.0f arc=%.0f) object_repeat=%.2f | n=%d judge=%s",
         walk_id, r.tier, r.score, r.grounded_rate, r.cliche_rate, r.novelty_mean,
+        r.coherence_mean, r.seamlessness, r.arc_coherence,
         diag.get("object_repeat_rate", 0.0), r.n_blurbs, r.used_judge,
     )
     tax = diag.get("taxonomy") or {}

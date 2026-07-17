@@ -39,6 +39,12 @@ class Sample:
     significance: str | None = None
     facts: str | None = None   # None for e2e-sourced samples; set for DB-sourced ones
     tier: str = "free"         # free|paid — the walk's tier (different generator models)
+    # Walk grouping for the coherence objective: blurbs sharing walk_id, ordered by seq, are one
+    # walk. e2e: walk_id=region, seq=index (a scenario's narrations ARE the walk, in order). db:
+    # walk_id=str(walk_id), seq=narration_samples.seq. category feeds the callback signal.
+    walk_id: str | None = None
+    seq: int = 0
+    category: str | None = None
 
     @property
     def has_facts(self) -> bool:
@@ -70,6 +76,9 @@ def load_e2e(path: str | Path | None = None) -> list[Sample]:
                     text=text,
                     place=n.get("place"),
                     significance=n.get("sig"),
+                    walk_id=region,            # a scenario = one walk
+                    seq=i,                     # narration order within the scenario
+                    category=n.get("category"),
                 )
             )
     return out
@@ -111,6 +120,9 @@ async def load_db(limit: int = 5000) -> list[Sample]:
                 significance=r.significance,
                 facts=r.facts,
                 tier=getattr(r, "tier", "free"),
+                walk_id=str(getattr(r, "walk_id", "") or "") or None,
+                seq=int(getattr(r, "seq", 0) or 0),
+                category=getattr(r, "category", None),
             )
         )
     return out
