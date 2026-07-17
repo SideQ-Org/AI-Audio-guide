@@ -358,6 +358,12 @@ class Settings(BaseSettings):
     inventory_ttl_s: float = 3600.0  # evict idle session inventories
     inventory_max_sessions: int = 2000  # LRU cap on cached inventories
 
+    # Drop private service/commerce with no sightseeing value (clinics, dentists, vet clinics,
+    # pharmacies, kindergartens/child-development centres, social facilities) BEFORE the object is
+    # created — so it never appears as a map pin, in narration or in a route. Cut by tag, not by
+    # weight (see categories.is_junk); hospitals + schools are kept. Set 0 to disable.
+    filter_junk_objects: bool = True
+
     # Pedestrian routing (proactive "guided" mode). "straight" needs no network and is
     # MVP-safe; "osrm" talks to a self-hosted foot-profile OSRM on the internal docker
     # network (geo-block-proof, see services/geo/routing.py). On any OSRM error the route

@@ -18,7 +18,7 @@ from app.services.metrics import GUIDE
 from app.shared.geo_math import haversine_m
 from app.shared.schemas import GeoPoint, Place
 
-from .categories import KEEP_TAGS, classify
+from .categories import KEEP_TAGS, classify, is_junk
 
 
 @runtime_checkable
@@ -171,6 +171,10 @@ def _element_to_place(el: dict, origin: GeoPoint) -> Place | None:
     tags = el.get("tags") or {}
     name = _pick_name(tags) or _synth_name(tags)
     if not name:
+        return None
+    # Drop private service/commerce (clinics/dentists/kindergartens/…) before it ever becomes a
+    # Place — removes it from the map, narration and routes in one spot (see categories.is_junk).
+    if settings.filter_junk_objects and is_junk(tags):
         return None
     geometry: list[list[float]] | None = None
     if el.get("type") == "node":

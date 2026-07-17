@@ -167,6 +167,32 @@ def classify(tags: dict[str, str]) -> tuple[str, float]:
     return category, weight_for(category)
 
 
+# Private service / commerce that carries no sightseeing value — the "junk" the wide amenity
+# search now drags in (private clinics, dentists, vet clinics, pharmacies, kindergartens /
+# child-development centres, social facilities). Kept OUT: hospital + school (large public
+# landmarks the user wants to keep). Cut by TAG, not by weight/threshold, so nothing else
+# is affected. See is_junk.
+_JUNK_AMENITIES: frozenset[str] = frozenset({
+    "clinic", "doctors", "dentist", "veterinary", "childcare", "kindergarten",
+    "pharmacy", "social_facility", "nursing_home",
+})
+
+
+def is_junk(tags: dict[str, str] | None) -> bool:
+    """True for a private service/commerce object that shouldn't be shown/narrated/routed. A
+    cultural/historic anchor (tourism/historic/heritage) always wins — a museum in a former
+    clinic stays. Otherwise: a junk `amenity`, or ANY `healthcare=*` except a hospital (catches
+    dentists/doctors/physio/labs/vet tagged only under healthcare)."""
+    if not tags:
+        return False
+    if tags.get("tourism") or tags.get("historic") or tags.get("heritage"):
+        return False
+    if tags.get("amenity") in _JUNK_AMENITIES:
+        return True
+    healthcare = tags.get("healthcare")
+    return bool(healthcare) and healthcare != "hospital"
+
+
 def _category(t: dict[str, str]) -> str:
     tourism = t.get("tourism")
     if tourism in {"museum", "gallery"}:

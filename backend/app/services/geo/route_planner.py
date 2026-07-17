@@ -29,6 +29,11 @@ from .routing import RouteLeg, RoutingProvider, StraightLineRouting
 
 _EPS = 1e-6
 
+# Large public buildings kept as map landmarks but NOT used as guided-tour stops (you don't
+# stop for an excursion at a hospital/school). They still show on the map + can be narrated in
+# passing; they just aren't route waypoints.
+_ROUTE_STOP_EXCLUDE: frozenset[str] = frozenset({"hospital", "school"})
+
 
 @dataclass
 class RouteStop:
@@ -162,6 +167,8 @@ class RoutePlanner:
         for p in places:
             if p.id in seen_set:
                 continue
+            if p.category in _ROUTE_STOP_EXCLUDE:
+                continue  # a hospital/school is a landmark on the map, not a tour STOP
             if dedup is not None and dedup.blocks(p):
                 continue
             has_wiki = tags_have_wiki(p.tags)

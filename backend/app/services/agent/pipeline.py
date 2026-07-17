@@ -62,9 +62,9 @@ _AMBIENT_FLOOR = frozenset({
     "park", "garden", "common", "allotments", "forest", "wood", "orchard", "vineyard",
     "nature_reserve", "water", "river", "reservoir", "waterfall", "beach", "bay",
     "wetland", "spring", "hill", "ridge", "peak", "square", "pedestrian", "marina",
-    "stadium", "cemetery", "fountain", "hospital", "clinic", "school", "university",
+    "stadium", "cemetery", "fountain", "hospital", "school", "university",
     "college", "library", "marketplace",
-})
+})  # note: `clinic` removed — private clinics are filtered out (categories.is_junk)
 
 
 @dataclass
