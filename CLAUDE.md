@@ -49,7 +49,10 @@ LLMs (OpenRouter) or a local model (LM Studio), and the Flutter app builds to an
   `BUSINESS_LOGICS.pdf` (original Russian spec, source of `SYSTEM_PROMPT_RU`), plus `docs/`
   (`ARCHITECTURE_FLOW.md` — the per-tick loop as Mermaid block-diagrams; `MODEL_LATENCY_RESEARCH.md`
   — the barge-in latency / voice-model research, incl. why GPT Realtime voice is a non-starter under
-  the regional geoblock). For the
+  the regional geoblock). `LIVE_CAMERA_RESEARCH.md` — the live-camera ("покажи гиду
+  достопримечательность") research: why native live APIs (Gemini Live / GPT Realtime) are closed to
+  us and the recommended one-shot snapshot → vision-LLM path over the existing OpenRouter transport;
+  **research only, nothing implemented**. For the
   accounts/tiers work: `ACCOUNTS_DESIGN.md` (durable-layer design), `SUPABASE_SETUP.md` (the
   checklist to turn accounts ON — dormant without keys), `PROD_INFRA.md` (what's prototype-grade
   and the knob to harden each), plus `PRIVACY_POLICY.md` / `TERMS.md` / `MVP_PITCH.md`. For the
@@ -244,9 +247,17 @@ WS message and rendered in the client's Stop sheet (spinner → text).
 `BLOCK4_SELF_IMPROVEMENT.md`; failure-mode model + deploy runbook in `BLOCK4_FIXER_HARDENING.md`;
 original design in `Блок4_Интересность_метрики_и_луп_самоулучшения.md`). Narration quality is scored
 as a **number**, reference-free, in a **separate sidecar container** so it can't destabilize the live
-tour. **Deployed to prod** (capture on, worker scoring with a validated judge, canary armed). The
-**analysis foundation + offline optimization loop (Phases 0–5) are built**; only the canary
-auto-apply (Phase 6) stays design. Pieces:
+tour. **Deployed to prod and the autonomous loop is CLOSED + LIVE** (capture on, worker scoring with
+a validated judge, **canary armed at 10% with the first machine-found candidate staged**). The
+**full loop (Phases 0–6) is built and has run end-to-end**: the optimizer found a narrator rewrite
+that beat baseline through the dev-CI + hard-gates + held-out gold gate (**gold 0.215 → 0.252, +17%**),
+auto-staged it as the CANARY (`9338dcb234ce`), and `canary_enabled=1`/`canary_fraction=0.1` now routes
+~10% of live sessions to it via a stable sid-hash (`canary_prompt_for` → `set_prompt_override`); the
+quality worker compares canary vs control `walk_quality` to **auto-promote** on a clear live win or
+**auto-roll-back** on regression (`canary_min_walks`/`canary_margin`/`canary_window`), no human in the
+loop. The canary machinery is otherwise **inert** without those flags + a staged version. Invariant: a
+candidate reaches the canary only after the offline held-out gold gate — the canary is the *live
+confirmation*, not the first line of defence. Pieces:
 - **Instrumentation (Phase 0, additive, flag-gated — `capture_narration_samples` /
   `capture_interest_signals`, both default OFF).** `accounts/history.record_object` also writes a
   durable **`narration_samples`** row (the FACTS given to the narrator + a compact context JSON +
@@ -391,6 +402,39 @@ a rotating file sink that survives the docker-logs ring buffer. Complements `llm
    up to `_MAX_ELABORATE` follow-ups, before going quiet).
 6. **Context dedup** — only unseen places enter the LLM context.
 
+### Guided mode ("Проведи меня" — proactive routed walks)
+
+Besides the default reactive "free walk", the guide can **lead**: plan a route of interesting
+stops, propose it, and navigate the walker stop-to-stop. `SessionState.guide_mode` is
+`free | guided`; the free path is untouched when guided is off.
+
+- **Planning** (`geo/route_planner.py` `RoutePlanner`): picks + orders stops by significance
+  (floor `route_min_significance`, `route_min_stops`/`route_max_stops` caps). Three request
+  shapes via `start_guided`: time budget (`budget_min`), distance budget (`budget_km`), or a
+  destination (explicit point, or `pick_landmark` — the guide picks one); destination mode
+  samples POIs from overlapping discs along the origin→destination **corridor**
+  (`route_corridor_pad_m`). POI fetch and routing both have safety nets (`_safe_fetch`/
+  `_safe_route`) — a slow/blocked Overpass or a down OSRM degrades, never crashes planning
+  (`main.py` additionally catches `plan_route` failures so the socket survives).
+- **Pedestrian routing** (`geo/routing.py`): `routing_source=straight` (no network, MVP-safe,
+  `walk_speed_mps` for durations) or `osrm` — a self-hosted foot-profile OSRM on the internal
+  docker network (geo-block-proof); any OSRM error falls back to straight-line.
+- **Leading** (`orchestrator._guided_tick`, replaces the reactive tick once the route is
+  accepted): arrival detect within `nav_arrival_radius_m` → narrate the stop via the **same
+  pipeline** the reactive path uses; between stops `nav_between_mode` = `teaser` (tease the next
+  stop inside `nav_teaser_radius_m`) | `silent` | `area`. **Soft off-route reroute**: drifting
+  > `nav_offroute_m` off the remaining route line arms a debounce
+  (`nav_offroute_debounce_s`), then the pending tail is re-planned (min gap
+  `nav_reroute_min_interval_s`; after `nav_reroute_max` reroutes, lead quietly by straight
+  line). `NavState` lives in `SessionState`, so a guided walk **survives reconnect/resume**.
+  Tests: `tests/test_guided_reroute.py`.
+- **WS frames** (`shared/schemas.py`): in — `start_guided`, `route_accept`, `route_reject`,
+  `skip_stop`; out — `route` (the proposal: ordered stops + polyline), `stop_reached`, `reroute`,
+  `route_done` (client shows the summary on Stop).
+- **Mobile** (`main.dart`): a "Проведи меня" chooser sheet, the planned route drawn as a dashed
+  line + numbered stop pins, an accept/reject sheet, and a next-stop chip with a
+  locally-computed direction arrow.
+
 ### WebSocket contract (`/ws`)
 
 The single transport. The backend runs a **background producer** per connection that emits
@@ -408,13 +452,15 @@ time delivery — the sentence granularity is what makes seamless weaving possib
   `SessionState.user_address`, survives resume), `pause`/`resume` (real server-side halt — see below),
   `end` (Stop button: halt the tour;
   with `discard:true` the backend deletes this session's walk — a walk shorter than the client's
-  10-minute record threshold is dropped, see "Session record rule" below), `ping` (keepalive, ignored).
+  10-minute record threshold is dropped, see "Session record rule" below), `ping` (keepalive, ignored),
+  `start_guided`/`route_accept`/`route_reject`/`skip_stop` (guided mode — see above).
 - **Out:** `state`, `narration` (text + place + coords, **+ optional `audio_b64`/`audio_mime`** —
   see Neural TTS — **+ optional `card`/`image`/`category`** for the tappable object card: the dry
   `CARD:` facts, a photo URL, and the type), `places` (all discovered objects, for map pins), `reply` (also carries optional
   audio), `transcript`, `summary` (structured end-of-walk recap, pushed async after `end` on a kept
   walk — see the director/summarizer above), `language`, `error`, `ping` (server keepalive every
-  20 s), `quota` (`{scope:"daily"}` — a free account is out of daily tours; upgrade prompt).
+  20 s), `quota` (`{scope:"daily"}` — a free account is out of daily tours; upgrade prompt),
+  `route`/`stop_reached`/`reroute`/`route_done` (guided mode — see above).
   The `auth` reply also carries `tier` / `tours_today` / `daily_tour_limit` (feature: account tiers).
 
 **Connectivity resilience (the real-walk fix — see `CONTINUE.md` §0).** A real mobile walk drops
@@ -565,8 +611,11 @@ to be **dead config**, never enforced), the inventory cache (`INVENTORY_ENABLED`
 `ENRICH_LOOKAHEAD_K`, `ENRICH_TIMEOUT_S`, `ENRICH_CACHE_PATH`), STT (`STT_BACKEND` —
 `faster_whisper` local vs `openrouter` cloud; `WHISPER_*` for local, `STT_MODEL`/`STT_TIMEOUT_S`
 for cloud), neural TTS (`TTS_BACKEND`, `TTS_VOICE`, `TTS_TIER_MIN`, `TTS_PRESYNTH`, … — see "Neural
-TTS" above), revisit (`REVISIT_ENABLED`, `REVISIT_RADIUS_M`, `REVISIT_MIN_ROUTE_M`), and the state
-store (`REDIS_URL`, `SESSION_TTL_S`, `MAX_SESSIONS`). `config.py` itself is the authoritative list.
+TTS" above), revisit (`REVISIT_ENABLED`, `REVISIT_RADIUS_M`, `REVISIT_MIN_ROUTE_M`), guided mode
+(`ROUTING_SOURCE`/`OSRM_URL`, the `ROUTE_*` planning knobs and `NAV_*` leading knobs — see "Guided
+mode" above), the Phase 6 canary (`CANARY_ENABLED`, `CANARY_FRACTION`, … — dormant by default), and
+the state store (`REDIS_URL`, `SESSION_TTL_S`, `MAX_SESSIONS`). `config.py` itself is the
+authoritative list.
 
 **Accounts/tiers/billing** (all empty = feature off, guest-only): `DATABASE_URL` (durable layer;
 empty ⇒ `accounts_enabled()` False), `SUPABASE_JWKS_URL` or `SUPABASE_JWT_SECRET` (+ `SUPABASE_JWT_AUD`)

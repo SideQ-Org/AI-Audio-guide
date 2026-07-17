@@ -206,13 +206,39 @@ Source of truth for reachability: `sim/ttft_probe.py` from the prod host.
 
 ---
 
-## 10. Status & limitations
+## 10. Status — the loop is closed and LIVE
 
-- Deployed to prod: capture on, worker scoring with the validated judge, canary armed at 10%
-  (inert until a candidate is staged). The autonomous loop is closed against a trustworthy signal.
-- The judge is reliable on clear cases; a single genuinely-borderline case (folk-legend attribution)
-  still has residual variance — acceptable, and caught by the validation harness.
+- Deployed to prod: capture on, worker scoring with the **validated judge** (grounded 12/12 on the
+  gold set, temp 0), the corrected-judge before/after on real walks **avg grounded 0.36 → 0.90**
+  (the earlier "fabrication dominant" was largely a measurement artifact).
+- **The autonomous loop ran end-to-end.** The optimizer found a candidate that beat baseline through
+  the dev-CI + hard-gates + **held-out gold gate** (gold **0.215 → 0.252, +17%**) and auto-staged it
+  as the **canary** (`9338dcb234ce`). `canary_enabled=1`, `canary_fraction=0.1` → **~10% of live
+  sessions serve the candidate**; the worker's monitor compares canary vs control `walk_quality` and
+  will **auto-promote** (100%) on a live win or **auto-roll-back** on a regression (≥ `canary_min_walks`
+  per arm). No human in the loop.
+- **Verified live** (before-doc check): a canary-member session gets the override; a control session
+  doesn't; the candidate generates valid grounded narration for objects with facts.
+
+**What the first live candidate changed** (`9338dcb234ce`): a tight anti-fabrication rewrite of the
+narrator role block — every claim tied to a verified fact; a facts-less *notable* object must trigger
+enrichment first (research, not invention), else name-only; a facts-less *ordinary* object gets one
+neutral line or `[SILENCE]`; "a fact is concrete (number/name/date/cause)".
+
+**Limitations / watch-items**
+- The first candidate leans toward `[SILENCE]` on facts-less objects when enrichment finds nothing —
+  it passes the coverage gate (not worse than baseline) but relies on fix #3 to fill notable objects.
+  The live canary monitor is exactly what decides whether it's a net win; a regression auto-rolls-back.
+- The candidate silences the *spoken* line for a facts-less object but the object **CARD** (tappable,
+  not spoken) can still show model-knowledge — a minor unsourced-content leak on the card, not the audio.
+- The judge is reliable on clear cases; one genuinely-borderline case (folk-legend attribution) has
+  residual variance — caught by the validation harness (`python -m sim.judge_validate`).
 - Groundedness is most trustworthy with captured facts; the world-knowledge fallback is a strong
   model's best guess, not ground truth.
-- The optimizer is conservative on small dev sets (bootstrap-CI); landing a promoted candidate wants
-  a 30–50-object dev set. Rejected-candidate texts aren't persisted yet (only their metrics).
+- The optimizer is conservative on small dev sets (bootstrap-CI); a 30–50-object dev set lands
+  candidates more reliably. Rejected-candidate texts aren't persisted (only their metrics).
+
+**Bugs hardened along the way** (surfaced by live optimizer runs, all fixed): client crash on
+`content=None` (hot-path — narrator/companion too), `evaluate_prompt` crash on a `None` narration,
+optimizer abort on a judge's empty/invalid JSON, and a too-small judge `max_tokens` truncating a
+verbose gold judge.
