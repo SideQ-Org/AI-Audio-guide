@@ -107,6 +107,16 @@ def test_reward_hacking_detector():
     assert is_reward_hacking(search_gain=0.1, gold_gain=0.08) is False
 
 
+def test_evaluate_prompt_survives_none_narration():
+    class _NoneNarrator:
+        async def narrate(self, inp):
+            return None  # narrator can return None/[SILENCE] — must not crash the eval
+    items = [_item("A", "факт"), _item("B", None)]
+    ev = _run(evaluate_prompt("narrator", "p", items, _NoneNarrator(), _Judge()))
+    assert ev.n == 2
+    assert ev.silence_rate == 1.0  # both None -> silent
+
+
 def test_coverage_gate_blocks_going_quiet():
     champ = SplitEval(n=4, mean=0.5, grounded_rate=1.0, cliche_rate=0.0, silence_rate=0.0)
     quieter = SplitEval(n=4, mean=0.9, grounded_rate=1.0, cliche_rate=0.0, silence_rate=0.5)

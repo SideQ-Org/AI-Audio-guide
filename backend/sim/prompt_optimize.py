@@ -165,7 +165,9 @@ async def evaluate_prompt(
     override is always cleared, even on error, so it never leaks into other calls."""
     set_prompt_override(target, prompt_text)
     try:
-        texts = [await narrator.narrate(it.inp) for it in items]
+        # narrate() may return None / [SILENCE] — coerce to "" so downstream (idf, panel,
+        # silence check) is robust; an empty narration is a (silent) blurb, not a crash.
+        texts = [(await narrator.narrate(it.inp)) or "" for it in items]
     finally:
         clear_prompt_overrides()
 
