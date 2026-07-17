@@ -488,7 +488,11 @@ class OpenAICompatLLM:
             METER.note_failure()  # feeds /ready + error counters
             raise
         METER.record(role, model, data.get("usage"))
-        return data["choices"][0]["message"]["content"].strip()
+        # Some models/providers return a message with content=None (empty/filtered response, or a
+        # reasoning model that emitted only reasoning). Coerce to "" so a null never crashes the
+        # caller with AttributeError — an empty completion is handled downstream as silence/empty.
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        return (msg.get("content") or "").strip()
 
     async def _post_with_retry(self, payload: dict, role: Role) -> dict:
         """POST with retries on a transient failure (timeout / 5xx / 429). A 429 (rate limit —
