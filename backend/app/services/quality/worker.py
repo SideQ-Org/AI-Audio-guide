@@ -52,9 +52,11 @@ class QualityResult:
     cliche_rate: float = 0.0
     novelty_mean: float = 0.0
     distinct_2: float = 0.0
-    coherence_mean: float = 0.0    # 0-1 walk coherence (transitions/adjacency/callbacks + judge)
-    seamlessness: float = 0.0      # judge axis 0-4 (0 when no judge / <2 blurbs)
-    arc_coherence: float = 0.0     # judge axis 0-4
+    # 0-1 walk coherence (transitions/adjacency/callbacks + judge); None = not applicable
+    # (<2 non-silent blurbs — nothing to cohere) or no judge.
+    coherence_mean: float | None = None
+    seamlessness: float | None = None   # judge axis 0-4; None when n/a or no judge
+    arc_coherence: float | None = None  # judge axis 0-4; None when n/a or no judge
     used_judge: bool = False
     diagnostics: dict = field(default_factory=dict)
 
@@ -132,20 +134,22 @@ async def score_blurbs(blurbs: list[Blurb], *, judge=None) -> QualityResult:
     # transition/adjacency/callback signals. Folded as a BOUNDED ±15% dial — it can never zero a
     # grounded walk, and (computed over non-silent blurbs + the coverage gate elsewhere) silence
     # can't masquerade as smoothness.
+    # Coherence is only defined for a SEQUENCE — a walk with <2 non-silent blurbs has nothing to
+    # cohere, so it's "not applicable": neutral factor (no ±15% penalty) and NO `disjoint` flag
+    # (a 1-object walk isn't disjoint, there's just nothing to connect).
+    seq = [t for t in texts if t.strip() and t.strip().upper().strip("[]") != "SILENCE"]
+    coh_applicable = len(seq) >= 2
     wv = None
-    if judge is not None:
-        seq = [t for t in texts if t.strip() and t.strip().upper().strip("[]") != "SILENCE"]
-        if len(seq) >= 2:
-            try:
-                wv = await judge.score_walk(seq, language=lang)
-            except Exception as e:  # noqa: BLE001 — a judge hiccup must not abort the sweep
-                _log.warning("walk judge failed: %s", e)
-    coherence = walk_coherence(cm, wv)
+    if judge is not None and coh_applicable:
+        try:
+            wv = await judge.score_walk(seq, language=lang)
+        except Exception as e:  # noqa: BLE001 — a judge hiccup must not abort the sweep
+            _log.warning("walk judge failed: %s", e)
+    coherence = walk_coherence(cm, wv) if coh_applicable else None
+    coh_factor = (0.85 + 0.15 * coherence) if coherence is not None else 1.0
 
-    walk_score = (
-        100 * sum(scores) / n * (1 - 0.4 * cm.object_repeat_rate) * (0.85 + 0.15 * coherence)
-    )
-    if coherence < 0.4:
+    walk_score = 100 * sum(scores) / n * (1 - 0.4 * cm.object_repeat_rate) * coh_factor
+    if coherence is not None and coherence < 0.4:
         tax["disjoint"] = 1
     worst.sort(key=lambda x: x[0])
     return QualityResult(
@@ -157,15 +161,16 @@ async def score_blurbs(blurbs: list[Blurb], *, judge=None) -> QualityResult:
         cliche_rate=round((n - cliche_ok) / n, 3),
         novelty_mean=round(sum(novelties) / n, 3),
         distinct_2=round(cm.distinct_2, 3),
-        coherence_mean=round(coherence, 3),
-        seamlessness=float(wv.seamlessness) if wv else 0.0,
-        arc_coherence=float(wv.arc_coherence) if wv else 0.0,
+        coherence_mean=round(coherence, 3) if coherence is not None else None,
+        seamlessness=float(wv.seamlessness) if wv else None,
+        arc_coherence=float(wv.arc_coherence) if wv else None,
         used_judge=judge is not None,
         diagnostics={
             "taxonomy": dict(tax),
             "object_repeat_rate": round(cm.object_repeat_rate, 3),
             "coherence": {
-                "score": round(coherence, 3),
+                "applicable": coh_applicable,
+                "score": round(coherence, 3) if coherence is not None else None,
                 "transition_rate": round(cm.transition_rate, 3),
                 "adjacent_cohesion": round(cm.adjacent_cohesion, 3),
                 "callback_rate": round(cm.callback_rate, 3),
@@ -252,12 +257,14 @@ def _log_decision(walk_id: str, r: QualityResult) -> None:
     """Emit a followable record of what the worker DECIDED for one walk (the user-facing trace:
     "что система решает после прогулок")."""
     diag = r.diagnostics or {}
+    coh = "n/a" if r.coherence_mean is None else (
+        f"{r.coherence_mean:.2f} (seam={r.seamlessness:.0f} arc={r.arc_coherence:.0f})"
+    )
     _log.info(
         "WALK %s tier=%s score=%.1f/100 | grounded=%.2f cliche=%.2f novelty=%.2f "
-        "coherence=%.2f (seam=%.0f arc=%.0f) object_repeat=%.2f | n=%d judge=%s",
+        "coherence=%s object_repeat=%.2f | n=%d judge=%s",
         walk_id, r.tier, r.score, r.grounded_rate, r.cliche_rate, r.novelty_mean,
-        r.coherence_mean, r.seamlessness, r.arc_coherence,
-        diag.get("object_repeat_rate", 0.0), r.n_blurbs, r.used_judge,
+        coh, diag.get("object_repeat_rate", 0.0), r.n_blurbs, r.used_judge,
     )
     tax = diag.get("taxonomy") or {}
     if tax:

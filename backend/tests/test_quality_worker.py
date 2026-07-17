@@ -109,7 +109,24 @@ def test_silence_cannot_masquerade_as_coherence():
     ]
     rc = asyncio.run(score_blurbs(connected))
     rs = asyncio.run(score_blurbs(silenced))
+    # both still have ≥2 non-silent blurbs → comparable; silence must not inflate coherence
     assert rs.coherence_mean <= rc.coherence_mean
+
+
+def test_coherence_not_applicable_for_short_walks():
+    # <2 non-silent blurbs → coherence is n/a: no disjoint flag, no ±15% penalty, columns None.
+    one = asyncio.run(score_blurbs([Blurb("Справа футбольное поле «Олимп».", "ru",
+                                          category="pitch")]))
+    assert one.coherence_mean is None
+    assert one.seamlessness is None and one.arc_coherence is None
+    assert "disjoint" not in one.diagnostics["taxonomy"]
+    assert one.diagnostics["coherence"]["applicable"] is False
+    # a single real blurb keeps its full gated score (no coherence shave)
+    from app.services.agent.interest_metrics import build_idf, score_blurb
+    from app.services.agent.interest_score import composite
+    t = "Справа футбольное поле «Олимп»."
+    base = 100 * composite(score_blurb(t, prior=[], idf=build_idf([t]), language="ru")).score
+    assert abs(one.score - base) < 1e-6
 
 
 def test_score_blurbs_records_tier_and_passes_it_to_judge():
