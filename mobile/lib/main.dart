@@ -1287,6 +1287,7 @@ class _HomePageState extends State<HomePage>
   List<GuideStop> _stops = [];
   int _curStop = 0; // index of the next pending stop
   bool _guidedActive = false; // a route was accepted, leading in progress
+  bool _guidedBuilding = false; // planning a route (chooser confirmed, awaiting the proposal)
   Map<String, dynamic>? _pendingGuided; // start_guided frame to send once we have a position
 
   // What the player shows now.
@@ -1305,15 +1306,35 @@ class _HomePageState extends State<HomePage>
   // Live GPS breadcrumb of the current walk ([[lat, lon(, 1.0 if paused)], ...]) — drawn as a
   // growing track on the map and shown in the end-of-walk summary. Reset when a session starts.
   final List<List<double>> _track = [];
+  // Backend street-snapped track (OSRM /match), arrives in a "track" frame; drawn instead of the
+  // raw `_track` on the live map when present. Same [[lat, lon(, 1.0)]] shape.
+  List<List<double>> _matchedTrack = [];
+  // Client-side outlier gate + jitter smoothing for the DRAWN track (mirrors the backend's
+  // accept_fix): reject spoof/glitch teleports, EMA-smooth the rest, so the line isn't ragged.
+  List<double>? _lastTrackPt; // last ACCEPTED raw fix (for the speed check)
+  DateTime? _lastTrackAt;
+  double? _emaLat, _emaLon; // exponential moving average of the accepted position
+  static const double _kMaxTrackSpeedMps = 15; // ~54 km/h — above this a jump is a spoof/glitch
+  static const double _kTrackJumpFloorM = 40; // don't reject small jumps (normal GPS wander)
   // The structured end-of-walk recap (arrives async over the WS after Stop); the summary sheet
   // shows a spinner until it lands. null = not ready.
   final ValueNotifier<String?> _walkSummary = ValueNotifier<String?>(null);
   Timer? _summaryTimer; // keeps the socket open briefly after Stop so the recap can arrive
   static const _kMinRecord = Duration(minutes: 10); // shorter walks are discarded, not saved
+  // An `end` frame Stop couldn't deliver because the socket was down at that moment —
+  // parked here and flushed by the next (re)connect so the keep/discard verdict always
+  // reaches the server. Cleared when a new tour starts (the old verdict is then stale;
+  // the server-side rotation prune covers that walk instead).
+  Map<String, dynamic>? _pendingEnd;
 
   bool _speaking = false; // TTS currently talking
   int _narrationsSinceAd = 0; // free-tier mid-tour ad cadence (every kMidTourAdEvery)
   bool _paused = false; // tour paused from the notification's Pause button
+  // Pause-and-ask (A6): a reply may speak THROUGH a pause only when the question came
+  // after the pause. Pressing Pause flips this off, so pausing DURING an answer actually
+  // silences the rest of it (the server streams replies sentence-by-sentence — without
+  // this gate the next queued reply sentence started right back up ~a second later).
+  bool _replyOkWhilePaused = false;
   bool _askedBatteryOpt = false; // only nudge battery-optimization once per launch
   bool _wantConnected = false; // user intends a live connection (drives auto-reconnect)
   Timer? _reconnectTimer;
@@ -1538,9 +1559,9 @@ class _HomePageState extends State<HomePage>
     _speakQueue.add(
         _Speech(text, isNarration, title: title, isReply: isReply, audio: audio, mime: mime));
     // Paused: narration paragraphs stay queued and un-acked so the server's paced
-    // producer waits — BUT a reply (barge-in answer) may speak, so the user who
-    // stopped to ask actually HEARS the answer (pause-and-ask, A6). Tour stays paused.
-    if (!_speaking && (!_paused || !isNarration)) _speakNext();
+    // producer waits — BUT a reply (barge-in answer) may speak IF the question came
+    // after the pause (pause-and-ask, A6; `_replyOkWhilePaused`). Tour stays paused.
+    if (!_speaking && (!_paused || (!isNarration && _replyOkWhilePaused))) _speakNext();
   }
 
   // A narration about an object you're passing RIGHT NOW (server `interrupt` flag): cut
@@ -1554,10 +1575,12 @@ class _HomePageState extends State<HomePage>
 
   Future<void> _speakNext() async {
     if (_speaking || _speakQueue.isEmpty) return;
-    // While paused, only a reply may play; narration stays queued until resume. Speak
+    // While paused, only a pause-and-ask reply may play; narration (and, after Pause was
+    // pressed mid-answer, the rest of that answer) stays queued until resume. Speak
     // the first reply, skipping any queued narration ahead of it (it waits its turn).
     var idx = 0;
     if (_paused) {
+      if (!_replyOkWhilePaused) return; // user paused — nothing speaks until resume/ask
       idx = _speakQueue.indexWhere((s) => !s.isNarration);
       if (idx < 0) return; // only narration queued -> stay silent while paused
     }
@@ -1595,7 +1618,9 @@ class _HomePageState extends State<HomePage>
       // mid-phrase. Speak in sentence-sized chunks so each stays well under that.
       final chunks = kIsWeb ? _chunkForTts(s.text) : [s.text];
       for (final c in chunks) {
-        if (!mounted || !_voice) break; // unmounted or muted mid-line
+        // Stop mid-line when unmounted, muted, or paused (a pause-and-ask reply is the
+        // one thing allowed to keep speaking through a pause).
+        if (!mounted || !_voice || (_paused && (s.isNarration || !_replyOkWhilePaused))) break;
         try {
           if (kIsWeb) {
             // Per-chunk watchdog: release if the browser drops the 'end' event so the
@@ -1929,6 +1954,12 @@ class _HomePageState extends State<HomePage>
             final ci = m['current_index']; // optional server progress correction
             if (ci is int) setState(() => _curStop = ci);
             break;
+          case 'track':
+            // Backend street-snapped walked track (OSRM /match) — drawn instead of the raw
+            // local track on the live map. Same [[lat,lon(,paused)]] shape.
+            final poly = _parseTrack(m['polyline']);
+            if (poly.length >= 2) setState(() => _matchedTrack = poly);
+            break;
           case 'transcript':
             _add('you', m['text'] as String);
             break;
@@ -1963,6 +1994,18 @@ class _HomePageState extends State<HomePage>
     if (_theme.isNotEmpty) _send({'type': 'theme', 'theme': _theme});
     _sendAuth(); // bind the signed-in user to this (resumable) session, if any
     _sendAddressForm(); // the walker's optional grammatical form of address
+    // A Stop happened while the socket was down: this connection exists only to deliver
+    // the parked end/discard verdict (auth above binds the user first, so the server can
+    // prune the walk). Don't replay position/pause — the tour is already over locally.
+    if (_pendingEnd != null) {
+      final end = _pendingEnd!;
+      _pendingEnd = null;
+      _send(end);
+      // A discarded walk needs nothing back; a kept one stays open for the async recap
+      // (the summary timer armed in _endSession closes the socket either way).
+      if (end['discard'] == true) _disconnect();
+      return;
+    }
     // Replay the last position so the tour resumes immediately on reconnect instead of
     // sitting idle until the next GPS fix. Only a real fix (never the startup default).
     if (_lastPositionMsg != null) _send(_lastPositionMsg!);
@@ -2059,11 +2102,10 @@ class _HomePageState extends State<HomePage>
   // Primary action: one button to start the experience and to stop it.
   void _primary() {
     if (_active) {
-      _stopWalk();
-      _disconnect();
-      _clearWalkArtifacts(); // hard end here too — leave nothing on the home map
-      // A tour just ended — refresh counts (tours_today / saved-walk count changed).
-      if (AccountsConfig.enabled) AuthService.instance.refreshEntitlement();
+      // Full session end — the SAME path as the Stop control. Ending with a bare
+      // _stopWalk()+_disconnect() skipped the end/discard frame, so every walk (however
+      // short) stayed in history.
+      _endSession();
     } else {
       _startWithGate(); // async (daily-quota gate + pre-roll ad); intentionally not awaited
     }
@@ -2084,6 +2126,7 @@ class _HomePageState extends State<HomePage>
     // A brand-new tour: mint a FRESH session id so the backend starts clean instead of
     // resuming the just-finished walk, and wipe the previous walk's residue off the map.
     _summaryTimer?.cancel(); // a prior Stop's recap window must not disconnect THIS new tour
+    _pendingEnd = null; // stale verdict for the OLD sid — must never fire on this session
     _sid = _genSessionId();
     _clearWalkArtifacts();
     // Flip active + rebuild NOW so the activation choreography plays right after the
@@ -2140,6 +2183,22 @@ class _HomePageState extends State<HomePage>
     return out;
   }
 
+  // Like _parseLine but keeps the optional 3rd element (paused flag 1.0) so the matched track
+  // preserves its grey-dashed paused stretches.
+  List<List<double>> _parseTrack(dynamic poly) {
+    final out = <List<double>>[];
+    if (poly is List) {
+      for (final p in poly) {
+        if (p is List && p.length >= 2) {
+          final pt = [(p[0] as num).toDouble(), (p[1] as num).toDouble()];
+          if (p.length > 2) pt.add((p[2] as num).toDouble());
+          out.add(pt);
+        }
+      }
+    }
+    return out;
+  }
+
   void _onRouteProposal(Map<String, dynamic> m) {
     setState(() {
       _stops = _parseStops(m['stops']);
@@ -2149,6 +2208,8 @@ class _HomePageState extends State<HomePage>
     });
     _fitRoute();
     if (_stops.isEmpty) {
+      setState(() => _guidedBuilding = false);
+      if (!_touring) _disconnect(); // nothing to lead — drop the planning socket
       _toast('Рядом мало интересных мест — попробуйте другой режим или дольше.');
       return;
     }
@@ -2181,33 +2242,56 @@ class _HomePageState extends State<HomePage>
     _toast('Маршрут пройден 🎉');
   }
 
-  // Send start_guided once we actually have a position on the server (the backend needs a
-  // fresh fix to plan from). Stashed here and flushed on the first _sendPosition.
+  // Plan the route WITHOUT entering the tour UI: mint a fresh session, connect, push our
+  // current position so the backend can plan, and send start_guided. The map stays on the
+  // home screen (just a "building route" overlay) — the session activates only on accept.
   void _startGuided(String mode, double budgetMin) {
+    _summaryTimer?.cancel();
+    _pendingEnd = null; // stale verdict for a prior sid must never fire on this session
+    _sid = _genSessionId(); // fresh planning session
+    _clearWalkArtifacts();
     _pendingGuided = {
       'type': 'start_guided',
       'mode': mode,
       if (mode == 'loop') 'budget_min': budgetMin,
       if (mode == 'destination') 'pick_landmark': true,
     };
-    _toast('Строю маршрут…');
-    _startWithGate(); // same activation as a free walk; start_guided flushes on first fix
+    setState(() => _guidedBuilding = true);
+    // Fresh socket with the new sid (tears down any lingering one), then push our position;
+    // start_guided flushes right after it (see _sendPosition). No _start()/GPS, no _touring.
+    _connect();
+    _sendPosition(_here.latitude, _here.longitude, _heading, 'slow');
+  }
+
+  // Enter the active-tour UI (choreography + GPS) WITHOUT reconnecting — the socket + sid are
+  // already live from planning, and the drawn route must be kept (no _clearWalkArtifacts).
+  void _activateTour() {
+    _narrationsSinceAd = 0;
+    _sessionStart = DateTime.now();
+    _sessionMeters = 0;
+    _walkSummary.value = null;
+    setState(() => _touring = true);
+    _start(); // GPS/sim for leading
   }
 
   void _acceptRoute() {
     _send({'type': 'route_accept'});
     setState(() {
+      _guidedBuilding = false;
       _guidedActive = true;
     });
+    _activateTour(); // NOW switch the UI into session mode
   }
 
   void _rejectRoute() {
     _send({'type': 'route_reject'});
     setState(() {
+      _guidedBuilding = false;
       _guidedActive = false;
       _stops = [];
       _routeLine = [];
     });
+    if (!_touring) _disconnect(); // planning socket no longer needed — back to home
   }
 
   void _fitRoute() {
@@ -2460,6 +2544,24 @@ class _HomePageState extends State<HomePage>
   // Send a position and reflect it on the map. `gaze` is 'low' by default (GPS
   // course / simulated walk); the real-GPS path passes 'high' when the held-up
   // compass gives a trustworthy facing.
+  // True if this fix may join the drawn track. Rejects a jump that implies an impossible speed
+  // from the last accepted point (spoof/GPS glitch); re-anchors after a long gap (lost signal)
+  // so a genuine move isn't stranded. Mirrors the backend's accept_fix, for the map line.
+  bool _acceptTrackFix(double lat, double lon) {
+    final now = DateTime.now();
+    final last = _lastTrackPt;
+    if (last != null && _lastTrackAt != null) {
+      final dt = now.difference(_lastTrackAt!).inMilliseconds / 1000.0;
+      final d = _dist([last[0], last[1]], [lat, lon]);
+      if (dt > 0 && dt < 10 && d > _kTrackJumpFloorM && d / dt > _kMaxTrackSpeedMps) {
+        return false; // implausible teleport -> don't draw it
+      }
+    }
+    _lastTrackPt = [lat, lon];
+    _lastTrackAt = now;
+    return true;
+  }
+
   void _sendPosition(double lat, double lon, double dir, String pace,
       {String gaze = 'low'}) {
     final msg = {
@@ -2484,10 +2586,16 @@ class _HomePageState extends State<HomePage>
     if (_sessionStart != null) {
       final step = _dist([_here.latitude, _here.longitude], [lat, lon]);
       if (step >= 1 && step < 200) _sessionMeters += step;
-      // Grow the live track, distance-gated (~12 m, like the backend breadcrumb) so jitter and
-      // standing still don't spam it; a point walked while PAUSED carries a trailing 1.0 flag.
-      if (_track.isEmpty || _dist(_track.last, [lat, lon]) >= 12) {
-        _track.add(_paused ? [lat, lon, 1.0] : [lat, lon]);
+      // Reject spoof/glitch teleports and EMA-smooth jitter BEFORE growing the drawn track, so a
+      // discarded jump never becomes a ragged line. The distance-gate (~12 m, like the backend
+      // breadcrumb) and the paused flag (trailing 1.0) still apply.
+      if (_acceptTrackFix(lat, lon)) {
+        _emaLat = _emaLat == null ? lat : 0.4 * lat + 0.6 * _emaLat!;
+        _emaLon = _emaLon == null ? lon : 0.4 * lon + 0.6 * _emaLon!;
+        final tlat = _emaLat!, tlon = _emaLon!;
+        if (_track.isEmpty || _dist(_track.last, [tlat, tlon]) >= 12) {
+          _track.add(_paused ? [tlat, tlon, 1.0] : [tlat, tlon]);
+        }
       }
     }
     setState(() {
@@ -2598,6 +2706,7 @@ class _HomePageState extends State<HomePage>
     _compassReading = null;
     _recentCourses.clear();
     _paused = false;
+    _replyOkWhilePaused = false;
     _stopForegroundService(); // drops the shade card + frees the foreground service
     RealtimeService.instance.updateSelf(walking: false); // clear live "на прогулке"
     setState(() {});
@@ -2723,12 +2832,12 @@ class _HomePageState extends State<HomePage>
     if (data == _kFgPauseAction) {
       _togglePause();
     } else if (data == _kFgFinishAction) {
-      // Finish: end the tour entirely. _stopWalk() also stops the service, so the
-      // shade card disappears. Mirrors tapping Stop on the primary button.
+      // Finish: end the tour entirely — through the SAME path as the in-app Stop, so
+      // the end/discard verdict reaches the server (a bare _stopWalk()+_disconnect()
+      // here silently kept every short walk in history) and the summary sheet is ready
+      // when the user opens the app. _stopWalk() inside also drops the shade card.
       if (_active) {
-        _stopWalk();
-        _disconnect();
-        if (AccountsConfig.enabled) AuthService.instance.refreshEntitlement();
+        _endSession();
       } else {
         _stopForegroundService();
       }
@@ -2747,6 +2856,9 @@ class _HomePageState extends State<HomePage>
       _speakNext(); // resume — play whatever queued up while paused
     } else {
       _send({'type': 'pause'});
+      // Pausing silences EVERYTHING, including a reply mid-answer — queued reply
+      // sentences park until resume (or until a NEW question re-arms pause-and-ask).
+      _replyOkWhilePaused = false;
       setState(() => _paused = true);
       await _tts.stop();
       await _stopAudio(); // halt neural playback too (paid tier)
@@ -2760,6 +2872,7 @@ class _HomePageState extends State<HomePage>
     if (t.isEmpty || _ch == null) return;
     _hush(); // barge-in: hush the narration while we ask
     _add('you', t);
+    _replyOkWhilePaused = true; // asked (possibly while paused) — the answer may speak
     _send({'type': 'utterance', 'text': t});
     _askCtrl.clear();
   }
@@ -2853,6 +2966,7 @@ class _HomePageState extends State<HomePage>
     _audioBuf.clear();
     HapticFeedback.lightImpact(); // "sent" — haptic, not audio (keep the audio session clean)
     // The audio frame is itself the barge-in; the server answers then resumes.
+    _replyOkWhilePaused = true; // asked (possibly while paused) — the answer may speak
     _send({'type': 'audio', 'data_b64': base64Encode(wav), 'format': 'wav'});
   }
 
@@ -3187,9 +3301,14 @@ class _HomePageState extends State<HomePage>
         // The walked GPS track, growing live (under the pins). Only while touring — otherwise it
         // would stay frozen under the blur on the inactive home. Glow + grey dashed on paused
         // stretches — same renderer as the summary / history so it looks identical everywhere.
-        if (_touring && _track.length >= 2)
+        // Prefer the backend street-snapped track (_matchedTrack) when it has arrived; else the
+        // locally-filtered raw track.
+        if (_touring && (_matchedTrack.length >= 2 || _track.length >= 2))
           PolylineLayer(
-            polylines: trackPolylines(_track, liveColor: Theme.of(context).colorScheme.primary),
+            polylines: trackPolylines(
+              _matchedTrack.length >= 2 ? _matchedTrack : _track,
+              liveColor: Theme.of(context).colorScheme.primary,
+            ),
           ),
         // Guided mode: numbered stop markers (next = accent, reached = check, others grey).
         if (_stops.isNotEmpty)
@@ -3736,10 +3855,16 @@ class _HomePageState extends State<HomePage>
   // the GPS track and the current-narration card — so the idle map (under the blur) is clean
   // and a new tour never shows the previous walk's residue.
   void _clearWalkArtifacts() {
+    // Reset the track filter/smoother so a new walk starts fresh.
+    _lastTrackPt = null;
+    _lastTrackAt = null;
+    _emaLat = null;
+    _emaLon = null;
     if (!mounted) {
       _places.clear();
       _nearby = [];
       _track.clear();
+      _matchedTrack = [];
       _routeLine = [];
       _stops = [];
       _guidedActive = false;
@@ -3749,6 +3874,7 @@ class _HomePageState extends State<HomePage>
       _places.clear();
       _nearby = [];
       _track.clear();
+      _matchedTrack = [];
       _curTitle = null;
       _curText = null;
       _curIsReply = false;
@@ -3764,22 +3890,36 @@ class _HomePageState extends State<HomePage>
     final elapsed = start == null ? Duration.zero : DateTime.now().difference(start);
     final recorded = elapsed >= _kMinRecord;
     final places = _places.where((p) => p.text.trim().isNotEmpty).toList();
-    final track = List<List<double>>.from(_track); // snapshot for the summary before we wipe
+    // Snapshot for the summary before we wipe — prefer the backend street-snapped track (arrives
+    // in real time, ~last 25 s tail may be raw) over the local filtered one.
+    final track = List<List<double>>.from(_matchedTrack.length >= 2 ? _matchedTrack : _track);
     final meters = _sessionMeters;
     _walkSummary.value = null; // fresh spinner in the sheet until the recap arrives
     _hush(); // cut narration/neural audio IMMEDIATELY (the deferred _disconnect no longer does it)
     // Tell the backend to keep or discard this session's walk BEFORE closing the socket.
-    if (_connected) _send({'type': 'end', 'discard': !recorded});
+    // If the socket is down right at Stop (common on a real walk — cell handover / the
+    // watchdog mid-reconnect when the phone comes out of the pocket), PARK the frame and
+    // let the auto-reconnect deliver it: silently skipping it left every short walk
+    // saved in history (the server never learned it should be discarded).
+    final endMsg = {'type': 'end', 'discard': !recorded};
+    if (_connected) {
+      _send(endMsg);
+    } else if (_wantConnected) {
+      _pendingEnd = endMsg; // flushed right after the next (re)connect, see _connect
+    }
     _stopWalk();
     // A kept walk gets an async structured recap over the WS — keep the socket open briefly so
-    // it can land in the Stop sheet, then close. A discarded walk closes at once (no recap).
+    // it can land in the Stop sheet, then close. A discarded walk closes at once (no recap) —
+    // unless its discard is still parked, in which case the reconnect window stays open too.
     _summaryTimer?.cancel();
-    if (recorded && _connected) {
-      // Keep the socket open for the async recap; if it never lands, stop the spinner (empty ==
-      // section hidden, not an infinite load) and close.
+    if ((recorded && _connected) || _pendingEnd != null) {
+      // Keep the socket (or the reconnect loop) alive to deliver/receive what's left; if
+      // nothing lands, stop the spinner (empty == section hidden, not an infinite load),
+      // drop the parked frame and close.
       _summaryTimer = Timer(const Duration(seconds: 24), () {
         if (!mounted) return;
         if (_walkSummary.value == null) _walkSummary.value = '';
+        _pendingEnd = null; // give up — the server-side rotation prune is the backstop
         _disconnect();
       });
     } else {
@@ -4141,6 +4281,26 @@ class _HomePageState extends State<HomePage>
           right: 16,
           top: MediaQuery.of(context).padding.top + 64,
           child: Center(child: _guidedChip()),
+        ),
+      // Guided mode: a "building route" overlay while the backend plans (chooser confirmed,
+      // proposal not yet in). The map stays on home — the tour hasn't started.
+      if (_guidedBuilding && _routeLine.isEmpty)
+        Positioned.fill(
+          child: ColoredBox(
+            color: Colors.black.withValues(alpha: 0.32),
+            child: Center(
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const SizedBox(
+                  width: 34, height: 34,
+                  child: CircularProgressIndicator(strokeWidth: 3, color: Colors.white),
+                ),
+                const SizedBox(height: 16),
+                Text('Строю маршрут…',
+                    style: GoogleFonts.manrope(
+                        color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+              ]),
+            ),
+          ),
         ),
     ]);
   }
