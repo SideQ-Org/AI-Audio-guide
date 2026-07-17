@@ -603,6 +603,68 @@ class _RouteStopPin extends StatelessWidget {
   }
 }
 
+// A segmented two-mode selector styled like the app's bottom nav bar (ui.FloatingTabBar):
+// a glass pill with a primary "puck" that slides under the active segment.
+class _ModeToggle extends StatelessWidget {
+  const _ModeToggle({required this.index, required this.labels, required this.onChanged});
+  final int index;
+  final List<String> labels;
+  final ValueChanged<int> onChanged;
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    final br = BorderRadius.circular(ui.Radii.pill);
+    return Container(
+      padding: const EdgeInsets.all(5),
+      decoration: BoxDecoration(
+        color: c.glassFill(0.06),
+        borderRadius: br,
+        border: Border.all(color: c.glassBorder, width: 1),
+      ),
+      child: LayoutBuilder(builder: (context, cons) {
+        final segW = cons.maxWidth / labels.length;
+        return SizedBox(
+          height: 42,
+          child: Stack(children: [
+            AnimatedPositioned(
+              duration: ui.Motion.med,
+              curve: ui.Motion.emphasized,
+              left: index * segW, top: 0, bottom: 0, width: segW,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: c.primary,
+                  borderRadius: br,
+                  boxShadow: [
+                    BoxShadow(
+                        color: c.primary.withValues(alpha: .4),
+                        blurRadius: 16, spreadRadius: -6, offset: const Offset(0, 6)),
+                  ],
+                ),
+              ),
+            ),
+            Row(children: [
+              for (var i = 0; i < labels.length; i++)
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => onChanged(i),
+                    child: Center(
+                      child: Text(labels[i],
+                          style: GoogleFonts.manrope(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w700,
+                              color: i == index ? c.onPrimary : c.textSecondary)),
+                    ),
+                  ),
+                ),
+            ]),
+          ]),
+        );
+      }),
+    );
+  }
+}
+
 // A found-but-not-yet-narrated object from the search disc (lite: name + type),
 // pinned faintly on the map so the user sees everything around them, not only the
 // place currently being narrated. Server pushes these in a "places" frame.
@@ -1224,7 +1286,6 @@ class _HomePageState extends State<HomePage>
   List<List<double>> _routeLine = []; // [[lat, lon], ...] proposed/active route polyline
   List<GuideStop> _stops = [];
   int _curStop = 0; // index of the next pending stop
-  bool _guidedProposed = false; // a route was offered, awaiting accept/reject
   bool _guidedActive = false; // a route was accepted, leading in progress
   Map<String, dynamic>? _pendingGuided; // start_guided frame to send once we have a position
 
@@ -2084,7 +2145,6 @@ class _HomePageState extends State<HomePage>
       _stops = _parseStops(m['stops']);
       _routeLine = _parseLine(m['polyline']);
       _curStop = 0;
-      _guidedProposed = true;
       _guidedActive = false;
     });
     _fitRoute();
@@ -2137,7 +2197,6 @@ class _HomePageState extends State<HomePage>
   void _acceptRoute() {
     _send({'type': 'route_accept'});
     setState(() {
-      _guidedProposed = false;
       _guidedActive = true;
     });
   }
@@ -2145,7 +2204,6 @@ class _HomePageState extends State<HomePage>
   void _rejectRoute() {
     _send({'type': 'route_reject'});
     setState(() {
-      _guidedProposed = false;
       _guidedActive = false;
       _stops = [];
       _routeLine = [];
@@ -2167,57 +2225,88 @@ class _HomePageState extends State<HomePage>
     ));
   }
 
-  // The pre-walk chooser: pick a walk shape and (for a loop) its length, then plan.
+  // A small pill drag-handle in the app's glass idiom (CardSheet has no built-in one).
+  Widget _sheetGrip(BuildContext ctx) => Center(
+        child: Container(
+          width: 40, height: 4,
+          decoration: BoxDecoration(
+            color: ctx.colors.textFaint.withValues(alpha: .4),
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+      );
+
+  // The pre-walk chooser: pick the walk mode (loop / to-a-place) and its length, then plan.
+  // Styled with the app's design system (CardSheet, Manrope, AppButton, nav-bar-style toggle).
   void _openGuidedSheet() {
+    int mode = 0; // 0 = loop (прогулка), 1 = destination (до места)
     double minutes = 30;
     showModalBottomSheet<void>(
       context: context,
-      showDragHandle: true,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => Padding(
-          padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Text('Проведи меня',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
-            const SizedBox(height: 4),
-            const Text('Гид сам составит маршрут по интересным местам и проведёт по нему.',
-                style: TextStyle(fontSize: 13, color: Colors.grey)),
-            const SizedBox(height: 16),
-            Row(children: [
-              Text('Прогулка-петля: ${minutes.round()} мин',
-                  style: const TextStyle(fontWeight: FontWeight.w600)),
-            ]),
-            Slider(
-              value: minutes, min: 15, max: 120, divisions: 21,
-              label: '${minutes.round()} мин',
-              onChanged: (v) => setSheet(() => minutes = v),
-            ),
-            const SizedBox(height: 4),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                icon: const Icon(Icons.route),
-                label: Text('Построить петлю на ${minutes.round()} мин'),
-                onPressed: () {
-                  Navigator.of(ctx).pop();
-                  _startGuided('loop', minutes);
-                },
+        builder: (ctx, setSheet) {
+          final c = ctx.colors;
+          return ui.CardSheet(
+            scrollable: false,
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(ui.Gap.xl, ui.Gap.lg, ui.Gap.xl,
+                  ui.Gap.xl + MediaQuery.of(ctx).padding.bottom),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _sheetGrip(ctx),
+                  const SizedBox(height: ui.Gap.lg),
+                  Text('Прогулка с гидом', style: ui.h2(ctx)),
+                  const SizedBox(height: ui.Gap.xs),
+                  Text('Гид сам составит маршрут по интересным местам и проведёт по нему.',
+                      style: ui.body(ctx).copyWith(color: c.textSecondary)),
+                  const SizedBox(height: ui.Gap.lg),
+                  _ModeToggle(
+                    index: mode,
+                    labels: const ['Прогулка', 'До места'],
+                    onChanged: (i) => setSheet(() => mode = i),
+                  ),
+                  const SizedBox(height: ui.Gap.lg),
+                  Text(
+                    mode == 0
+                        ? 'Кольцевой маршрут: гид проведёт вас по интересным местам поблизости и приведёт примерно туда, откуда вы начали.'
+                        : 'Гид доведёт вас до заметной достопримечательности неподалёку, рассказывая обо всём интересном по пути.',
+                    style: ui.body(ctx).copyWith(color: c.textSecondary),
+                  ),
+                  const SizedBox(height: ui.Gap.lg),
+                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                    Text('Сколько гуляем', style: ui.body(ctx)),
+                    Text('≈ ${minutes.round()} мин',
+                        style: ui.titleS(ctx).copyWith(color: c.primary)),
+                  ]),
+                  SliderTheme(
+                    data: SliderTheme.of(ctx).copyWith(
+                      activeTrackColor: c.primary,
+                      thumbColor: c.primary,
+                      inactiveTrackColor: c.glassFill(0.12),
+                      overlayColor: c.primary.withValues(alpha: .12),
+                    ),
+                    child: Slider(
+                      value: minutes, min: 15, max: 120, divisions: 21,
+                      label: '${minutes.round()} мин',
+                      onChanged: (v) => setSheet(() => minutes = v),
+                    ),
+                  ),
+                  const SizedBox(height: ui.Gap.md),
+                  ui.AppButton('Построить маршрут',
+                      icon: Icons.route_rounded,
+                      onTap: () {
+                        Navigator.of(ctx).pop();
+                        _startGuided(mode == 0 ? 'loop' : 'destination', minutes);
+                      }),
+                ],
               ),
             ),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                icon: const Icon(Icons.flag_outlined),
-                label: const Text('До главного места рядом'),
-                onPressed: () {
-                  Navigator.of(ctx).pop();
-                  _startGuided('destination', minutes);
-                },
-              ),
-            ),
-          ]),
-        ),
+          );
+        },
       ),
     );
   }
@@ -2228,45 +2317,59 @@ class _HomePageState extends State<HomePage>
     final dist = ((m['total_distance_m'] as num?) ?? 0) / 1000.0;
     showModalBottomSheet<void>(
       context: context,
-      showDragHandle: true,
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Маршрут готов',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 6),
-          Text(
-            '${_stops.length} точек · ~${dur.round()} мин · ${dist.toStringAsFixed(1)} км',
-            style: const TextStyle(fontSize: 14, color: Colors.grey),
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final c = ctx.colors;
+        return ui.CardSheet(
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(ui.Gap.xl, ui.Gap.lg, ui.Gap.xl,
+                ui.Gap.xl + MediaQuery.of(ctx).padding.bottom),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _sheetGrip(ctx),
+                const SizedBox(height: ui.Gap.lg),
+                Text('Маршрут готов', style: ui.h2(ctx)),
+                const SizedBox(height: ui.Gap.xs),
+                Text('${_stops.length} точек · ≈ ${dur.round()} мин · ${dist.toStringAsFixed(1)} км',
+                    style: ui.body(ctx).copyWith(color: c.textSecondary)),
+                const SizedBox(height: ui.Gap.lg),
+                for (final s in _stops.take(6))
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(children: [
+                      Container(
+                        width: 26, height: 26, alignment: Alignment.center,
+                        decoration: BoxDecoration(color: c.primary, shape: BoxShape.circle),
+                        child: Text('${s.index + 1}',
+                            style: GoogleFonts.manrope(
+                                color: c.onPrimary, fontSize: 12, fontWeight: FontWeight.w700)),
+                      ),
+                      const SizedBox(width: ui.Gap.md),
+                      Expanded(child: Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ui.body(ctx))),
+                    ]),
+                  ),
+                const SizedBox(height: ui.Gap.lg),
+                Row(children: [
+                  Expanded(
+                    child: ui.AppButton('Отклонить',
+                        kind: ui.AppBtnKind.secondary,
+                        onTap: () { Navigator.of(ctx).pop(); _rejectRoute(); }),
+                  ),
+                  const SizedBox(width: ui.Gap.md),
+                  Expanded(
+                    child: ui.AppButton('Поехали',
+                        icon: Icons.navigation_rounded,
+                        onTap: () { Navigator.of(ctx).pop(); _acceptRoute(); }),
+                  ),
+                ]),
+              ],
+            ),
           ),
-          const SizedBox(height: 14),
-          for (final s in _stops.take(6))
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 3),
-              child: Row(children: [
-                CircleAvatar(radius: 12, child: Text('${s.index + 1}', style: const TextStyle(fontSize: 12))),
-                const SizedBox(width: 10),
-                Expanded(child: Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis)),
-              ]),
-            ),
-          const SizedBox(height: 14),
-          Row(children: [
-            Expanded(
-              child: OutlinedButton(
-                onPressed: () { Navigator.of(ctx).pop(); _rejectRoute(); },
-                child: const Text('Отклонить'),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: FilledButton(
-                onPressed: () { Navigator.of(ctx).pop(); _acceptRoute(); },
-                child: const Text('Поехали'),
-              ),
-            ),
-          ]),
-        ]),
-      ),
+        );
+      },
     );
   }
 
@@ -3639,7 +3742,6 @@ class _HomePageState extends State<HomePage>
       _track.clear();
       _routeLine = [];
       _stops = [];
-      _guidedProposed = false;
       _guidedActive = false;
       return;
     }
@@ -3653,7 +3755,6 @@ class _HomePageState extends State<HomePage>
       _routeLine = [];
       _stops = [];
       _curStop = 0;
-      _guidedProposed = false;
       _guidedActive = false;
     });
   }
@@ -4015,6 +4116,7 @@ class _HomePageState extends State<HomePage>
           onFocus: _setTheme,
           swipeLabel: l.swipeToStart,
           onStart: _primary,
+          onGuided: _openGuidedSheet, // proactive "Проведи меня" mode entry
           statusLabel: s.label,
           statusColor: s.color,
           statusActive: s.active,
@@ -4039,27 +4141,6 @@ class _HomePageState extends State<HomePage>
           right: 16,
           top: MediaQuery.of(context).padding.top + 64,
           child: Center(child: _guidedChip()),
-        ),
-      // Pre-walk entry point for the proactive guide — only on the inactive home, above the
-      // swipe-to-start affordance (hidden while a proposed route is awaiting accept/reject).
-      if (!active && !_guidedProposed)
-        Positioned(
-          left: 0,
-          right: 0,
-          bottom: MediaQuery.of(context).padding.bottom + 150,
-          child: Center(
-            child: TextButton.icon(
-              style: TextButton.styleFrom(
-                backgroundColor: Colors.black.withValues(alpha: 0.28),
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-              ),
-              icon: const Icon(Icons.assistant_navigation, size: 20),
-              label: const Text('Проведи меня'),
-              onPressed: _openGuidedSheet,
-            ),
-          ),
         ),
     ]);
   }

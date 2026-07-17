@@ -32,6 +32,8 @@ class HomeModules extends StatefulWidget {
   // swipe
   final String swipeLabel;
   final VoidCallback onStart;
+  // proactive guided mode ("Проведи меня") entry — opens the route chooser
+  final VoidCallback? onGuided;
   // status
   final String statusLabel;
   final Color statusColor;
@@ -60,6 +62,7 @@ class HomeModules extends StatefulWidget {
     required this.onFocus,
     required this.swipeLabel,
     required this.onStart,
+    this.onGuided,
     required this.statusLabel,
     required this.statusColor,
     required this.statusActive,
@@ -156,6 +159,14 @@ class _HomeModulesState extends State<HomeModules> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         FocusPicker(title: widget.focusTitle, items: widget.focusItems, selected: widget.focusSelected, onSelect: widget.onFocus),
+                        if (widget.onGuided != null) ...[
+                          const SizedBox(height: Gap.md),
+                          AppButton('Проведи меня',
+                              icon: Icons.assistant_navigation,
+                              kind: AppBtnKind.secondary,
+                              height: 48,
+                              onTap: widget.onGuided),
+                        ],
                         const SizedBox(height: Gap.lg),
                         SwipeToStart(label: widget.swipeLabel, onComplete: widget.onStart),
                       ],

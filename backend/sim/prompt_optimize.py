@@ -177,7 +177,11 @@ async def evaluate_prompt(
     g_ok = c_ok = 0
     for it, text in zip(items, texts, strict=True):
         bm = score_blurb(text, prior=prior, idf=idf, language=it.language)
-        verdict = await judge.score(text, facts=it.facts, language=it.language, tier=it.tier)
+        try:
+            verdict = await judge.score(text, facts=it.facts, language=it.language, tier=it.tier)
+        except Exception as e:  # noqa: BLE001 — a judge hiccup (empty/invalid JSON) must not abort
+            _log.warning("judge failed on a blurb (%s) — neutral verdict", e)
+            verdict = None
         cs = composite(bm, verdict)
         prior.append(text)
         scores.append(cs.score)

@@ -111,8 +111,11 @@ class LLMJudge:
         """Pointwise rubric score for one blurb. ``tier`` (free|paid) tells the judge which model
         class wrote it, so interest is judged fairly for the tier — hard-gates are unaffected."""
         system = system_for_judge(language)
+        # A verbose gold judge (e.g. glm-4.6) writes a long CoT rationale; too small a cap truncates
+        # the JSON -> empty/invalid response. 2000 leaves room for rationale + the axes/gates.
         data = await self._llm.complete_json(
-            Role.JUDGE, system, _user(blurb, facts=facts, context=context, tier=tier), JUDGE_SCHEMA
+            Role.JUDGE, system, _user(blurb, facts=facts, context=context, tier=tier),
+            JUDGE_SCHEMA, max_tokens=2000,
         )
         return JudgeVerdict(
             rationale=str(data.get("rationale", "")),
