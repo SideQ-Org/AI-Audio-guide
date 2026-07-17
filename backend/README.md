@@ -19,9 +19,11 @@ cp .env.example .env        # then add OPENAI_API_KEY (OpenRouter sk-or-...)
 - `GET /health` — liveness
 - `GET /` — WebSocket test client (`web/index.html`)
 - `WS  /ws` — drives the agent: `position` / `utterance` / `audio` / `language` / `ping` in →
-  `narration` / `reply` / `transcript` / `state` / `ping` out. Connect with `?sid=<stable-id>`
-  to **resume** the same session across reconnects (WiFi/cell drops); both sides send a `ping`
-  keepalive so an idle socket isn't reaped mid-walk. See `../CONTINUE.md` §0.
+  `narration` / `reply` / `transcript` / `state` / `ping` out. **Guided mode ("Проведи меня"):**
+  `start_guided` / `route_accept` / `route_reject` / `skip_stop` in → `route` / `stop_reached` /
+  `reroute` / `route_done` out; plus a `track` frame carrying the street-snapped walked track.
+  Connect with `?sid=<stable-id>` to **resume** the same session across reconnects (WiFi/cell
+  drops); both sides send a `ping` keepalive so an idle socket isn't reaped mid-walk.
 
 ## Checks
 ```bash
@@ -74,14 +76,16 @@ app/
   config.py                  # settings (.env)
   shared/schemas.py          # domain + role I/O + WebSocket contract
   services/
-    agent/                   # orchestrator, pipeline, scorer/narrator/companion, languages
-    geo/                     # Overpass provider, ranking, categories
+    agent/                   # orchestrator, pipeline, scorer/narrator/companion, planner,
+                             #   tour_scripter (whole-route guided arc), summarizer, director
+    geo/                     # Overpass provider, ranking, categories (+ is_junk filter),
+                             #   routing (OSRM foot/straight), route_planner, track_match
     enrichment/enricher.py   # Wiki + WebSearch + Composite + cache
     llm/                     # OpenAI-compatible client, role router
     stt/                     # faster-whisper / mock
-prompts/                     # CORE / scorer / narrator / companion templates
+prompts/                     # CORE / scorer / narrator / planner / scripter / companion templates
 sim/                         # virtual walk, run_orchestrator, eval_live, e2e_regions, smoke_*
 tests/                       # pytest
-Dockerfile, docker-compose.yml   # LAN deploy
+Dockerfile, docker-compose.yml   # LAN deploy (backend · quality-worker · osrm-foot)
 web/index.html               # WS test client
 ```

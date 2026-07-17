@@ -7,6 +7,11 @@ No tapping, no reading, no planning a route. Walking *is* the interface.
 At any point you can **interrupt by voice** ("what's that building on the left?") — it answers in the
 same voice and remembers the conversation, then picks the tour back up where it left off.
 
+Prefer a planned outing? **"Проведи меня"** (guided mode) plans a route of interesting places, draws
+it along the streets, and leads you stop to stop — and because it knows the whole route up front, it
+tells the walk as **one coherent tour** (an opening overview, transitions and anticipations between
+stops, callbacks, a finale), not a string of disconnected blurbs.
+
 > Status: working MVP. Python/FastAPI backend + Flutter client, talking over a single WebSocket.
 > Runs end-to-end on cloud LLMs (OpenRouter/Anthropic/Gemini) or a local model (LM Studio), and
 > ships as an Android APK, an iOS build, and a browser web app.
@@ -133,8 +138,18 @@ Point the client at your backend with `--dart-define=WS_URL=ws://<host>:8000/ws`
   you in the grammatical form you choose (or stay neutral by default) — it's about phrasing, not identity.
 - 🔊 **Neural voice (paid tier)** — a lifelike server-synthesized voice, pre-synthesized so it plays
   gaplessly; the free tier uses the on-device voice.
-- 🗺️ **Live GPS track** — the route is drawn on the map as you walk, shown in the end-of-walk
-  **structured recap**, and kept as a thumbnail in your walk history.
+- 🧭 **Guided mode ("Проведи меня")** — the guide can also *lead*: pick a loop (by time/distance) or
+  a destination, and it plans a route of worthwhile stops, draws it **along the streets** (self-hosted
+  OSRM foot routing), and navigates you stop to stop with a single scripted tour arc. Skips the noise
+  (see below) and won't route you to a hospital — those stay map landmarks.
+- 🗺️ **Clean, street-snapped track** — the walked route is drawn live on the map (and in the
+  end-of-walk **structured recap** + walk history). Raw GPS is cleaned twice: the client rejects
+  spoof/glitch teleports and smooths jitter, and the backend map-matches the trace to the footpath
+  network (OSRM) — with an honesty guard that keeps the *real* line when you cut through an unmapped
+  alley, instead of drawing a wrong detour around the block.
+- 🧹 **No noise on the map** — the wide search finds a lot, but private service/commerce with no
+  sightseeing value (clinics, dentists, vet clinics, pharmacies, kindergartens…) is filtered out by
+  tag before it's ever shown or narrated, while landmarks stay.
 - 🌍 **8 languages** — narration and place names localized, proper names transliterated.
 - 🔒 **Background walking** — keeps narrating with the screen off or an earbud in; a shade-card
   **Pause** button really halts the tour (no generation, no spend).
@@ -211,11 +226,11 @@ and `Блок4_Интересность_метрики_и_луп_самоулу�
 
 ## Tech stack
 
-**Backend:** Python, FastAPI, asyncio, WebSocket · OSM Overpass (discovery) · Wikipedia/Wikidata +
-web search (facts) · provider-agnostic LLM client (Anthropic / OpenAI-compatible / OpenRouter) ·
-deterministic narrative director over a per-walk memory graph · STT (cloud Whisper via OpenRouter, or
-local faster-whisper) · optional neural TTS (OpenAI-compatible `/audio/speech`) · SQLAlchemy +
-Postgres (optional durable layer).
+**Backend:** Python, FastAPI, asyncio, WebSocket · OSM Overpass (discovery) · self-hosted OSRM
+(foot routing + track map-matching, geo-block-proof) · Wikipedia/Wikidata + web search (facts) ·
+provider-agnostic LLM client (Anthropic / OpenAI-compatible / OpenRouter) · deterministic narrative
+director over a per-walk memory graph · STT (cloud Whisper via OpenRouter, or local faster-whisper) ·
+optional neural TTS (OpenAI-compatible `/audio/speech`) · SQLAlchemy + Postgres (optional durable layer).
 **Mobile:** Flutter/Dart · OpenStreetMap tiles + live GPS-track polyline · `flutter_tts` (on-device
 voice) + `audioplayers` (neural voice playback) · foreground-service background location.
-**Deploy:** Caddy (automatic HTTPS) + Docker Compose.
+**Deploy:** Caddy (automatic HTTPS) + Docker Compose (backend · quality-worker · osrm-foot).

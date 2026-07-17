@@ -18,6 +18,14 @@ an **OpenStreetMap** map, lets you **ask by voice or text**, and runs in **8 lan
   language, speaker, settings.
 - **Tappable pins** — tap any place pin to open a sheet with its name and full story
   (follow-up narrations about the same place accumulate).
+- **Guided mode ("Проведи меня")** — a chooser sheet (nav-bar-style mode toggle Прогулка / До
+  места + a duration slider) asks the backend to plan a route. **Planning doesn't start the tour**:
+  it shows a "building route" overlay, and only on **accept** ("Поехали") does the UI enter the
+  active-tour state. The planned route draws as a dashed street-following line with numbered stop
+  pins, plus a next-stop chip (name · distance · a locally-computed direction arrow).
+- **Clean GPS track** — the drawn track rejects spoof/glitch teleports and smooths jitter locally,
+  and prefers the backend's **street-snapped** track (OSRM map-matching) when it arrives — so the
+  line follows footpaths instead of showing raw GPS wander, live and in the summary/history.
 - **Smooth camera** — animated (eased) follow + recenter instead of snapping; a **compass**
   FAB (shown when the map is rotated) orients back to north; the camera keeps your **cursor
   above the bottom card** so it's never hidden. A follow / free-browse FAB re-centres after you pan.
