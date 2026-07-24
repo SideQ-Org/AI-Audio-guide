@@ -91,3 +91,25 @@ def test_side_no_left_right_at_low_gaze_but_ahead_behind_ok():
     # ...but ahead/behind are knowable from the GPS course
     assert by["north"].side == "ahead"
     assert by["south"].side == "behind"
+
+
+def test_side_needs_clear_lateral_angle():
+    """Left/right only for a CLEARLY-lateral object (>=50°): a near-ahead object stays
+    'ahead' so a skewed heading (magnetic declination ~12°) can't flip left<->right."""
+    from app.services.geo.ranking import _side
+    from app.shared.schemas import GazeConfidence as GC
+
+    # near-ahead (within 50°) => ahead regardless of sign, even at high confidence
+    assert _side(30, GC.HIGH) == "ahead"
+    assert _side(-30, GC.HIGH) == "ahead"
+    assert _side(48, GC.HIGH) == "ahead"
+    # a 12° heading error near dead-ahead can't produce a side (both stay 'ahead')
+    assert _side(10, GC.HIGH) == _side(-14, GC.HIGH) == "ahead"
+    # clearly lateral => a stable side
+    assert _side(90, GC.HIGH) == "right"
+    assert _side(-90, GC.HIGH) == "left"
+    assert _side(70, GC.HIGH) == "right"
+    # behind
+    assert _side(170, GC.HIGH) == "behind"
+    # low confidence never names a side
+    assert _side(90, GC.LOW) == ""

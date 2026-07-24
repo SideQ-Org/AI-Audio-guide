@@ -1,15 +1,24 @@
 // Presentational widgets for the premium redesign. Ported from
 // design/flutter_wip/redesign_preview.dart, stripped of mock data: every widget
 // takes plain data + callbacks and owns no app mechanics.
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:io' show Platform;
 import 'dart:ui' show ImageFilter;
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:google_fonts/google_fonts.dart';
 
 import 'design.dart';
+
+bool get _simulatorSafeVisuals =>
+    !kIsWeb &&
+    defaultTargetPlatform == TargetPlatform.iOS &&
+    Platform.environment.containsKey('SIMULATOR_DEVICE_NAME');
 
 /// On-brand confirmation dialog (rounded, Manrope, symmetric buttons). Returns true if
 /// the user confirms. Use instead of the stock [AlertDialog].
@@ -37,23 +46,41 @@ Future<bool> showBrandConfirm(
             color: dark ? c.header : Colors.white,
             borderRadius: BorderRadius.circular(Radii.xl),
             border: Border.all(color: c.glassBorder),
-            boxShadow: [BoxShadow(color: c.shadow, blurRadius: 40, spreadRadius: -8, offset: const Offset(0, 20))],
+            boxShadow: [
+              BoxShadow(
+                  color: c.shadow,
+                  blurRadius: 40,
+                  spreadRadius: -8,
+                  offset: const Offset(0, 20))
+            ],
           ),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Container(
-              width: 56, height: 56, alignment: Alignment.center,
-              decoration: BoxDecoration(shape: BoxShape.circle, color: accent.withValues(alpha: 0.14)),
+              width: 56,
+              height: 56,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: accent.withValues(alpha: 0.14)),
               child: Icon(icon, size: 27, color: accent),
             ),
             const SizedBox(height: 16),
             Text(title, textAlign: TextAlign.center, style: h2(ctx)),
             const SizedBox(height: 8),
-            Text(message, textAlign: TextAlign.center, style: body(ctx).copyWith(color: c.textSecondary, height: 1.4)),
+            Text(message,
+                textAlign: TextAlign.center,
+                style: body(ctx).copyWith(color: c.textSecondary, height: 1.4)),
             const SizedBox(height: 22),
             Row(children: [
-              Expanded(child: AppButton(cancelLabel, kind: AppBtnKind.secondary, onTap: () => Navigator.pop(ctx, false))),
+              Expanded(
+                  child: AppButton(cancelLabel,
+                      kind: AppBtnKind.secondary,
+                      onTap: () => Navigator.pop(ctx, false))),
               const SizedBox(width: 10),
-              Expanded(child: AppButton(confirmLabel, color: destructive ? c.err : null, onTap: () => Navigator.pop(ctx, true))),
+              Expanded(
+                  child: AppButton(confirmLabel,
+                      color: destructive ? c.err : null,
+                      onTap: () => Navigator.pop(ctx, true))),
             ]),
           ]),
         ),
@@ -121,6 +148,13 @@ class CardSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
+    // Content fades in with a small upward settle while the modal route slides the
+    // sheet up — softens the stock showModalBottomSheet snap (no blur, Impeller-safe).
+    final body = FadeSlideIn(
+      duration: Motion.enter,
+      dy: 0.03,
+      child: scrollable ? SingleChildScrollView(child: child) : child,
+    );
     return Container(
       constraints: BoxConstraints(
         maxHeight: MediaQuery.of(context).size.height * maxHeightFactor,
@@ -132,9 +166,10 @@ class CardSheet extends StatelessWidget {
           end: Alignment.bottomCenter,
           colors: [c.bgTop, c.bgBottom],
         ),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(Radii.xl)),
+        borderRadius:
+            const BorderRadius.vertical(top: Radius.circular(Radii.xl)),
       ),
-      child: scrollable ? SingleChildScrollView(child: child) : child,
+      child: body,
     );
   }
 }
@@ -147,48 +182,234 @@ class RoundedSheet extends StatelessWidget {
   final Widget child;
   const RoundedSheet({super.key, required this.child});
   @override
-  Widget build(BuildContext context) => CardSheet(scrollable: false, child: child);
+  Widget build(BuildContext context) =>
+      CardSheet(scrollable: false, child: child);
 }
 
 /// Wraps a tappable widget with a subtle scale-down press animation so it clearly
-/// reads as pressable. Use anywhere a card/chip/icon is tapped.
+/// reads as pressable. Use anywhere a card/chip/icon is tapped. The unified press
+/// effect: gentle scale (~0.96) + a light dim, easeOutCubic, no overshoot.
 class Pressable extends StatefulWidget {
   final Widget child;
   final VoidCallback? onTap;
   final double scale;
-  const Pressable({super.key, required this.child, this.onTap, this.scale = 0.9});
+  const Pressable(
+      {super.key, required this.child, this.onTap, this.scale = 0.96});
   @override
   State<Pressable> createState() => _PressableState();
 }
 
 class _PressableState extends State<Pressable> {
   bool _down = false;
-  void _set(bool v) {
-    if (widget.onTap != null && _down != v) setState(() => _down = v);
+  Timer? _armTimer;
+
+  // Engage the pressed (dimmed) look only AFTER a tiny delay: inside a scroll view a
+  // finger-down on a button fires onTapDown, but if it turns into a scroll the tap
+  // recognizer loses the gesture arena and onTapCancel arrives within a few ms — which
+  // cancels this timer before the dim ever shows. A real press (no movement) engages
+  // after ~50 ms, imperceptibly. Fixes "кнопки на мгновение сереют" on overscroll.
+  void _press() {
+    if (widget.onTap == null) return;
+    _armTimer?.cancel();
+    _armTimer = Timer(const Duration(milliseconds: 50), () {
+      if (mounted && !_down) setState(() => _down = true);
+    });
+  }
+
+  void _release() {
+    _armTimer?.cancel();
+    if (widget.onTap != null && _down) setState(() => _down = false);
+  }
+
+  @override
+  void dispose() {
+    _armTimer?.cancel();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Accessibility: collapse the press animation when the OS minimizes motion.
+    final still = reduceMotion(context);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: widget.onTap,
-      onTapDown: (_) => _set(true),
-      onTapUp: (_) => _set(false),
-      onTapCancel: () => _set(false),
+      onTapDown: (_) => _press(),
+      onTapUp: (_) => _release(),
+      onTapCancel: _release,
       child: AnimatedScale(
-        scale: _down ? widget.scale : 1,
-        // A touch of overshoot on release makes the press clearly felt.
-        duration: Duration(milliseconds: _down ? 110 : 240),
-        curve: _down ? Curves.easeOut : Curves.easeOutBack,
+        scale: (_down && !still) ? widget.scale : 1,
+        duration: _down ? Motion.press : Motion.release,
+        curve: Motion.easeOut,
         child: AnimatedOpacity(
-          opacity: _down ? 0.82 : 1,
-          duration: const Duration(milliseconds: 110),
+          opacity: (_down && !still) ? 0.82 : 1,
+          duration: Motion.press,
           child: widget.child,
         ),
       ),
     );
   }
 }
+
+/// One-shot entrance: fades in + slides up slightly on first build. [delay] offsets
+/// the start, so mapping a list with increasing delays yields a staggered reveal.
+/// Respects `MediaQuery.disableAnimations` (renders settled immediately).
+class FadeSlideIn extends StatefulWidget {
+  final Widget child;
+  final Duration delay;
+  final Duration duration;
+
+  /// Slide distance as a fraction of the child height (positive = from below).
+  final double dy;
+  const FadeSlideIn({
+    super.key,
+    required this.child,
+    this.delay = Duration.zero,
+    this.duration = Motion.enter,
+    this.dy = 0.06,
+  });
+
+  /// Staggered-list convenience: item [i] enters after `i * Motion.stagger`
+  /// (capped so late list items never wait noticeably long).
+  FadeSlideIn.stagger(int i,
+      {super.key,
+      required this.child,
+      this.duration = Motion.enter,
+      this.dy = 0.06})
+      : delay = Motion.stagger * math.min(i, 10);
+
+  @override
+  State<FadeSlideIn> createState() => _FadeSlideInState();
+}
+
+class _FadeSlideInState extends State<FadeSlideIn>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+      vsync: this, duration: widget.delay + widget.duration);
+  late final CurvedAnimation _t = CurvedAnimation(
+    parent: _c,
+    // The leading interval is the stagger delay; the tail is the actual entrance.
+    curve: Interval(
+      widget.delay.inMilliseconds / math.max(1, _c.duration!.inMilliseconds),
+      1,
+      curve: Motion.easeOut,
+    ),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _c.forward();
+  }
+
+  @override
+  void dispose() {
+    _t.dispose();
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (reduceMotion(context)) return widget.child;
+    return FadeTransition(
+      opacity: _t,
+      child: SlideTransition(
+        position: Tween<Offset>(begin: Offset(0, widget.dy), end: Offset.zero)
+            .animate(_t),
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+/// [IndexedStack] with a soft fade-through on tab change: the incoming tab fades in
+/// (with a barely-there scale settle) over the background. All children stay alive —
+/// state, map, sockets are NOT recreated. Hidden tabs get `TickerMode(enabled:false)`,
+/// so their looping animations stop ticking AND their [FadeSlideIn] entrances hold
+/// until the tab is first shown (the stagger plays on first visit, not at app launch).
+class FadeIndexedStack extends StatefulWidget {
+  final int index;
+  final List<Widget> children;
+  const FadeIndexedStack(
+      {super.key, required this.index, required this.children});
+
+  @override
+  State<FadeIndexedStack> createState() => _FadeIndexedStackState();
+}
+
+class _FadeIndexedStackState extends State<FadeIndexedStack>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 240), value: 1);
+  late final CurvedAnimation _t =
+      CurvedAnimation(parent: _c, curve: Motion.easeOut);
+
+  @override
+  void didUpdateWidget(covariant FadeIndexedStack old) {
+    super.didUpdateWidget(old);
+    if (widget.index != old.index) _c.forward(from: 0);
+  }
+
+  @override
+  void dispose() {
+    _t.dispose();
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final stack = IndexedStack(
+      index: widget.index,
+      children: [
+        for (var i = 0; i < widget.children.length; i++)
+          TickerMode(enabled: i == widget.index, child: widget.children[i]),
+      ],
+    );
+    if (reduceMotion(context)) return stack;
+    // Only wrap in the fade/scale transform WHILE actually cross-fading between tabs.
+    // At rest we return the bare IndexedStack: a permanent ScaleTransition/FadeTransition
+    // layer over the full-screen flutter_map made the map miss its first size event and
+    // render grey until a relayout (background→foreground healed it) — the "серый экран
+    // после входа" regression. AnimatedBuilder rebuilds this only during the animation.
+    return AnimatedBuilder(
+      animation: _c,
+      child: stack,
+      builder: (context, child) {
+        if (!_c.isAnimating) return child!;
+        return FadeTransition(
+          opacity: _t,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.985, end: 1).animate(_t),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Page route with a gentle fade-through transition (fade + tiny upward settle) —
+/// for detail pushes where the stock side-slide feels heavy (e.g. history → walk).
+Route<T> fadeThroughRoute<T>(WidgetBuilder builder) => PageRouteBuilder<T>(
+      transitionDuration: const Duration(milliseconds: 280),
+      reverseTransitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (context, _, __) => builder(context),
+      transitionsBuilder: (context, anim, _, child) {
+        if (reduceMotion(context)) return child;
+        final t = CurvedAnimation(parent: anim, curve: Motion.easeOut);
+        return FadeTransition(
+          opacity: t,
+          child: SlideTransition(
+            position:
+                Tween<Offset>(begin: const Offset(0, 0.02), end: Offset.zero)
+                    .animate(t),
+            child: child,
+          ),
+        );
+      },
+    );
 
 /// The login/register primary button from the mockup: fills with the brand gradient +
 /// The big "sign in / create account" submit button — a live status indicator.
@@ -225,8 +446,8 @@ class InteractiveAuthButton extends StatefulWidget {
 class _InteractiveAuthButtonState extends State<InteractiveAuthButton>
     with SingleTickerProviderStateMixin {
   // One-shot flare: 0 = the red strike, 1 = fully settled back to the resting look.
-  late final AnimationController _flare =
-      AnimationController(vsync: this, duration: const Duration(milliseconds: 760));
+  late final AnimationController _flare = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 760));
 
   static const _brightRed = Color(0xFFFF3B30);
 
@@ -268,12 +489,16 @@ class _InteractiveAuthButtonState extends State<InteractiveAuthButton>
 
     final content = widget.busy
         ? const SizedBox(
-            width: 22, height: 22,
-            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+            width: 22,
+            height: 22,
+            child:
+                CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
         : Row(mainAxisSize: MainAxisSize.min, children: [
             Text(widget.label,
                 style: GoogleFonts.manrope(
-                    fontSize: 16, fontWeight: FontWeight.w800, color: Colors.white)),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.white)),
             const SizedBox(width: 8),
             const Icon(AppIcons.arrowRight, size: 18, color: Colors.white),
           ]);
@@ -295,12 +520,16 @@ class _InteractiveAuthButtonState extends State<InteractiveAuthButton>
                   restingGrad,
                   ct)!
               : restingGrad;
-          final glow = flaring ? Color.lerp(_brightRed, restingGlow, ct)! : restingGlow;
-          final glowA = flaring ? (0.6 * (1 - ct) + restingGlowA * ct) : restingGlowA;
+          final glow =
+              flaring ? Color.lerp(_brightRed, restingGlow, ct)! : restingGlow;
+          final glowA =
+              flaring ? (0.6 * (1 - ct) + restingGlowA * ct) : restingGlowA;
           // A few damped horizontal jolts — the button "vibrating" with the device.
           final shake = flaring ? math.sin(t * math.pi * 5) * 7 * (1 - t) : 0.0;
           // A quick scale pop on the strike, settled by mid-flare.
-          final pop = flaring ? 1 + 0.05 * math.sin(math.pi * (t / 0.5).clamp(0.0, 1.0)) : 1.0;
+          final pop = flaring
+              ? 1 + 0.05 * math.sin(math.pi * (t / 0.5).clamp(0.0, 1.0))
+              : 1.0;
 
           final decoration = BoxDecoration(
             borderRadius: br,
@@ -310,7 +539,9 @@ class _InteractiveAuthButtonState extends State<InteractiveAuthButton>
                 : [
                     BoxShadow(
                       color: glow.withValues(alpha: glowA),
-                      blurRadius: 26, spreadRadius: -6, offset: const Offset(0, 10),
+                      blurRadius: 26,
+                      spreadRadius: -6,
+                      offset: const Offset(0, 10),
                     ),
                   ],
           );
@@ -326,7 +557,8 @@ class _InteractiveAuthButtonState extends State<InteractiveAuthButton>
                       opacity: (1 - ct).clamp(0.0, 1.0),
                       child: LayoutBuilder(builder: (context, cons) {
                         final w = cons.maxWidth;
-                        final p = (t / 0.6).clamp(0.0, 1.0); // one pass, done by ~60%
+                        final p =
+                            (t / 0.6).clamp(0.0, 1.0); // one pass, done by ~60%
                         final dx = (p * 1.6 - 0.35) * w;
                         return Transform.translate(
                           offset: Offset(dx, 0),
@@ -352,10 +584,18 @@ class _InteractiveAuthButtonState extends State<InteractiveAuthButton>
           // While flaring we drive the colour per-frame (plain Container). At rest, an
           // AnimatedContainer tweens the green↔grey change smoothly as the form validates.
           final box = flaring
-              ? Container(height: 56, alignment: Alignment.center, decoration: decoration, child: inner)
+              ? Container(
+                  height: 56,
+                  alignment: Alignment.center,
+                  decoration: decoration,
+                  child: inner)
               : AnimatedContainer(
-                  duration: Motion.med, curve: Motion.curve,
-                  height: 56, alignment: Alignment.center, decoration: decoration, child: inner);
+                  duration: Motion.med,
+                  curve: Motion.curve,
+                  height: 56,
+                  alignment: Alignment.center,
+                  decoration: decoration,
+                  child: inner);
 
           return Transform.translate(
             offset: Offset(shake, 0),
@@ -373,16 +613,19 @@ class _InteractiveAuthButtonState extends State<InteractiveAuthButton>
 class SwipeToStart extends StatefulWidget {
   final String label;
   final VoidCallback onComplete;
-  const SwipeToStart({super.key, required this.label, required this.onComplete});
+  const SwipeToStart(
+      {super.key, required this.label, required this.onComplete});
   @override
   State<SwipeToStart> createState() => _SwipeToStartState();
 }
 
-class _SwipeToStartState extends State<SwipeToStart> with SingleTickerProviderStateMixin {
+class _SwipeToStartState extends State<SwipeToStart>
+    with SingleTickerProviderStateMixin {
   double _dx = 0;
   // Repeating light sweep across the track — invites the user to drag the knob.
-  late final AnimationController _shimmer =
-      AnimationController(vsync: this, duration: const Duration(milliseconds: 2000))..repeat();
+  late final AnimationController _shimmer = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 2000))
+    ..repeat();
 
   @override
   void dispose() {
@@ -399,85 +642,137 @@ class _SwipeToStartState extends State<SwipeToStart> with SingleTickerProviderSt
       final w = cons.maxWidth;
       final maxDx = (w - knob - pad * 2).clamp(0.0, double.infinity);
       final progress = maxDx <= 0 ? 0.0 : (_dx / maxDx).clamp(0.0, 1.0);
-      return Container(
-        height: h,
-        decoration: BoxDecoration(
-          borderRadius: br,
-          gradient: LinearGradient(
-            begin: Alignment.topLeft, end: Alignment.bottomRight,
-            colors: [Color.lerp(c.primary, Colors.white, 0.10)!, c.primary, Color.lerp(c.primary, Colors.black, 0.36)!],
-            stops: const [0, 0.5, 1],
+      // The WHOLE bar is the gesture surface (opaque, so it always wins the iOS gesture
+      // arena over the map/scroll behind it) — dragging just the 72-px knob was flaky on
+      // iPhone: touches landing a few px off the knob went to the parent and the swipe
+      // "didn't take" until pressed dead-centre.
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: (d) =>
+            setState(() => _dx = (_dx + d.delta.dx).clamp(0.0, maxDx)),
+        onHorizontalDragEnd: (d) {
+          // Complete on 2/3 travel OR a right fling past 1/4 — demanding the knob be
+          // parked at the very end (old: maxDx-16) made natural quick swipes fail.
+          final vx = d.velocity.pixelsPerSecond.dx;
+          final done = _dx >= maxDx * 0.66 || (vx > 600 && _dx >= maxDx * 0.25);
+          if (done) widget.onComplete();
+          setState(() => _dx = 0);
+        },
+        onHorizontalDragCancel: () => setState(() => _dx = 0),
+        // Accessibility tap-to-start stays, but only on the knob itself — a bar-wide
+        // tap would start tours from accidental touches.
+        onTapUp: (d) {
+          final withinKnob = d.localPosition.dx >= pad + _dx &&
+              d.localPosition.dx <= pad + _dx + knob;
+          if (withinKnob) widget.onComplete();
+        },
+        child: Container(
+          height: h,
+          decoration: BoxDecoration(
+            borderRadius: br,
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Color.lerp(c.primary, Colors.white, 0.10)!,
+                c.primary,
+                Color.lerp(c.primary, Colors.black, 0.36)!
+              ],
+              stops: const [0, 0.5, 1],
+            ),
+            boxShadow: [
+              BoxShadow(
+                  color: c.primary.withValues(alpha: .55),
+                  blurRadius: 42,
+                  spreadRadius: -6,
+                  offset: const Offset(0, 18))
+            ],
           ),
-          boxShadow: [BoxShadow(color: c.primary.withValues(alpha: .55), blurRadius: 42, spreadRadius: -6, offset: const Offset(0, 18))],
-        ),
-        child: ClipRRect(
-          borderRadius: br,
-          child: Stack(alignment: Alignment.center, children: [
-            // Soft top sheen for depth.
-            Positioned(
-              top: 0, left: 0, right: 0, height: h * 0.5,
-              child: IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter, end: Alignment.bottomCenter,
-                      colors: [Colors.white.withValues(alpha: 0.16), Colors.transparent],
+          child: ClipRRect(
+            borderRadius: br,
+            child: Stack(alignment: Alignment.center, children: [
+              // Soft top sheen for depth.
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: h * 0.5,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.white.withValues(alpha: 0.16),
+                          Colors.transparent
+                        ],
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-            // Diagonal light band sweeping left → right.
-            AnimatedBuilder(
-              animation: _shimmer,
-              builder: (_, __) => Positioned(
-                left: -0.45 * w + _shimmer.value * (w * 1.45),
-                top: 0, bottom: 0,
-                child: IgnorePointer(
-                  child: Transform.rotate(
-                    angle: 0.35,
-                    child: Container(
-                      width: 120,
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [Colors.transparent, Colors.white.withValues(alpha: 0.24), Colors.transparent],
+              // Diagonal light band sweeping left → right.
+              AnimatedBuilder(
+                animation: _shimmer,
+                builder: (_, __) => Positioned(
+                  left: -0.45 * w + _shimmer.value * (w * 1.45),
+                  top: 0,
+                  bottom: 0,
+                  child: IgnorePointer(
+                    child: Transform.rotate(
+                      angle: 0.35,
+                      child: Container(
+                        width: 120,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              Colors.transparent,
+                              Colors.white.withValues(alpha: 0.24),
+                              Colors.transparent
+                            ],
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
-            // Label fades out as the knob travels.
-            Opacity(
-              opacity: (1 - progress * 1.6).clamp(0.0, 1.0),
-              child: Padding(
-                padding: const EdgeInsets.only(left: knob * 0.5),
-                child: Text(widget.label,
-                    style: GoogleFonts.manrope(fontSize: 17, fontWeight: FontWeight.w800, letterSpacing: 0.3, color: Colors.white)),
+              // Label fades out as the knob travels.
+              Opacity(
+                opacity: (1 - progress * 1.6).clamp(0.0, 1.0),
+                child: Padding(
+                  padding: const EdgeInsets.only(left: knob * 0.5),
+                  child: Text(widget.label,
+                      style: GoogleFonts.manrope(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.3,
+                          color: Colors.white)),
+                ),
               ),
-            ),
-            Positioned(
-              left: pad + _dx, top: pad,
-              child: GestureDetector(
-                onHorizontalDragUpdate: (d) => setState(() => _dx = (_dx + d.delta.dx).clamp(0, maxDx)),
-                onHorizontalDragEnd: (_) {
-                  if (_dx > maxDx - 16) widget.onComplete();
-                  setState(() => _dx = 0);
-                },
-                onTap: widget.onComplete,
+              // The knob is purely visual now — gestures live on the whole bar above.
+              Positioned(
+                left: pad + _dx,
+                top: pad,
                 child: Container(
-                  width: knob, height: knob,
+                  width: knob,
+                  height: knob,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: Colors.white,
-                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.20), blurRadius: 10, offset: const Offset(0, 3))],
+                    boxShadow: [
+                      BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.20),
+                          blurRadius: 10,
+                          offset: const Offset(0, 3))
+                    ],
                   ),
                   child: Icon(AppIcons.arrowRight, size: 28, color: c.primary),
                 ),
               ),
-            ),
-          ]),
+            ]),
+          ),
         ),
       );
     });
@@ -485,17 +780,34 @@ class _SwipeToStartState extends State<SwipeToStart> with SingleTickerProviderSt
 }
 
 // ── status chip ────────────────────────────────────────────────────────────
+
+/// Shared [AnimatedSwitcher] transition for changing labels/counters: fade + a
+/// small upward slide — the incoming value settles into place.
+Widget fadeSlideSwitch(Widget child, Animation<double> anim) => FadeTransition(
+      opacity: anim,
+      child: SlideTransition(
+        position: Tween<Offset>(begin: const Offset(0, 0.35), end: Offset.zero)
+            .animate(CurvedAnimation(parent: anim, curve: Motion.easeOut)),
+        child: child,
+      ),
+    );
+
 /// The active-tour status pill: a coloured pulse dot + label, on glass.
 class StatusChip extends StatefulWidget {
   final String label;
   final Color color;
   final bool active;
-  const StatusChip({super.key, required this.label, required this.color, required this.active});
+  const StatusChip(
+      {super.key,
+      required this.label,
+      required this.color,
+      required this.active});
   @override
   State<StatusChip> createState() => _StatusChipState();
 }
 
-class _StatusChipState extends State<StatusChip> with SingleTickerProviderStateMixin {
+class _StatusChipState extends State<StatusChip>
+    with SingleTickerProviderStateMixin {
   // Created eagerly in initState (not a lazy `late final`): build() only reads _c when
   // active, so a lazy field would first initialise inside dispose() — creating a ticker
   // against a deactivated element tree and crashing.
@@ -503,7 +815,8 @@ class _StatusChipState extends State<StatusChip> with SingleTickerProviderStateM
   @override
   void initState() {
     super.initState();
-    _c = AnimationController(vsync: this, duration: const Duration(milliseconds: 1100))
+    _c = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 1100))
       ..repeat(reverse: true);
   }
 
@@ -522,14 +835,22 @@ class _StatusChipState extends State<StatusChip> with SingleTickerProviderStateM
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         FadeTransition(
           opacity: widget.active ? _c : const AlwaysStoppedAnimation(1.0),
-          child: Container(width: 9, height: 9, decoration: BoxDecoration(shape: BoxShape.circle, color: widget.color)),
+          child: Container(
+              width: 9,
+              height: 9,
+              decoration:
+                  BoxDecoration(shape: BoxShape.circle, color: widget.color)),
         ),
         const SizedBox(width: 9),
         AnimatedSwitcher(
           duration: Motion.fast,
+          transitionBuilder: fadeSlideSwitch,
           child: Text(widget.label,
               key: ValueKey(widget.label),
-              style: GoogleFonts.manrope(fontSize: 13, fontWeight: FontWeight.w800, color: c.textPrimary)),
+              style: GoogleFonts.manrope(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  color: c.textPrimary)),
         ),
       ]),
     );
@@ -567,49 +888,75 @@ class PlayerModule extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    Widget ctl(IconData i, {Color? color, VoidCallback? onTap, String? tip}) => IconButton(
+    Widget ctl(IconData i, {Color? color, VoidCallback? onTap, String? tip}) =>
+        IconButton(
           tooltip: tip,
           onPressed: onTap,
-          icon: Icon(i, size: 24, color: onTap == null ? c.textFaint.withValues(alpha: .5) : (color ?? c.textSecondary)),
+          icon: Icon(i,
+              size: 24,
+              color: onTap == null
+                  ? c.textFaint.withValues(alpha: .5)
+                  : (color ?? c.textSecondary)),
         );
     final hasText = (text != null && text!.isNotEmpty);
     return GlassModule(
       padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
-      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        if (title != null && title!.isNotEmpty) ...[
-          Text(title!, maxLines: 1, overflow: TextOverflow.ellipsis, style: h2(context)),
-          const SizedBox(height: 8),
-        ],
-        ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.22),
-          child: SingleChildScrollView(
-            child: Text(
-              hasText ? text! : '…',
-              style: GoogleFonts.manrope(fontSize: 15, fontWeight: FontWeight.w500, height: 1.5, color: c.textPrimary),
-            ),
-          ),
-        ),
-        const SizedBox(height: 14),
-        Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-          ctl(recording ? AppIcons.stop : AppIcons.microphone,
-              color: recording ? c.err : null, onTap: onMic, tip: 'mic'),
-          ctl(AppIcons.stop, color: c.err, onTap: onStop, tip: 'stop'),
-          // Big primary pause/resume.
-          GestureDetector(
-            onTap: onPause,
-            child: Container(
-              width: 60, height: 60,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle, color: c.primary,
-                boxShadow: [BoxShadow(color: c.primary.withValues(alpha: .45), blurRadius: 22, spreadRadius: -6, offset: const Offset(0, 10))],
+      child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (title != null && title!.isNotEmpty) ...[
+              Text(title!,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: h2(context)),
+              const SizedBox(height: 8),
+            ],
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.22),
+              child: SingleChildScrollView(
+                child: Text(
+                  hasText ? text! : '…',
+                  style: GoogleFonts.manrope(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                      height: 1.5,
+                      color: c.textPrimary),
+                ),
               ),
-              child: Icon(paused ? AppIcons.play : AppIcons.pause, size: 24, color: c.onPrimary),
             ),
-          ),
-          ctl(AppIcons.question, onTap: onAsk, tip: 'ask'),
-          ctl(voice ? AppIcons.speakerHigh : AppIcons.speakerSlash, onTap: onToggleVoice, tip: 'mute'),
-        ]),
-      ]),
+            const SizedBox(height: 14),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+              ctl(recording ? AppIcons.stop : AppIcons.microphone,
+                  color: recording ? c.err : null, onTap: onMic, tip: 'mic'),
+              ctl(AppIcons.stop, color: c.err, onTap: onStop, tip: 'stop'),
+              // Big primary pause/resume.
+              GestureDetector(
+                onTap: onPause,
+                child: Container(
+                  width: 60,
+                  height: 60,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: c.primary,
+                    boxShadow: [
+                      BoxShadow(
+                          color: c.primary.withValues(alpha: .45),
+                          blurRadius: 22,
+                          spreadRadius: -6,
+                          offset: const Offset(0, 10))
+                    ],
+                  ),
+                  child: Icon(paused ? AppIcons.play : AppIcons.pause,
+                      size: 24, color: c.onPrimary),
+                ),
+              ),
+              ctl(AppIcons.question, onTap: onAsk, tip: 'ask'),
+              ctl(voice ? AppIcons.speakerHigh : AppIcons.speakerSlash,
+                  onTap: onToggleVoice, tip: 'mute'),
+            ]),
+          ]),
     );
   }
 }
@@ -622,14 +969,24 @@ class FocusPicker extends StatelessWidget {
   final List<({String code, IconData icon})> items;
   final String selected;
   final ValueChanged<String> onSelect;
-  const FocusPicker({super.key, required this.title, required this.items, required this.selected, required this.onSelect});
+  const FocusPicker(
+      {super.key,
+      required this.title,
+      required this.items,
+      required this.selected,
+      required this.onSelect});
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
     return GlassModule(
       padding: const EdgeInsets.all(16),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(title, style: GoogleFonts.manrope(fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: .4, color: c.textPrimary)),
+        Text(title,
+            style: GoogleFonts.manrope(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                letterSpacing: .4,
+                color: c.textPrimary)),
         const SizedBox(height: 12),
         Row(children: [
           for (var i = 0; i < items.length; i++) ...[
@@ -642,11 +999,19 @@ class FocusPicker extends StatelessWidget {
                   height: 46,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
-                    color: items[i].code == selected ? c.primary : c.glassFill(0.06),
+                    color: items[i].code == selected
+                        ? c.primary
+                        : c.glassFill(0.06),
                     borderRadius: BorderRadius.circular(Radii.md),
-                    border: items[i].code == selected ? null : Border.all(color: c.glassBorder),
+                    border: items[i].code == selected
+                        ? null
+                        : Border.all(color: c.glassBorder),
                   ),
-                  child: Icon(items[i].icon, size: 21, color: items[i].code == selected ? c.onPrimary : c.textSecondary),
+                  child: Icon(items[i].icon,
+                      size: 21,
+                      color: items[i].code == selected
+                          ? c.onPrimary
+                          : c.textSecondary),
                 ),
               ),
             ),
@@ -662,7 +1027,11 @@ class GoPremiumCard extends StatelessWidget {
   final String title;
   final String subtitle;
   final VoidCallback onTap;
-  const GoPremiumCard({super.key, required this.title, required this.subtitle, required this.onTap});
+  const GoPremiumCard(
+      {super.key,
+      required this.title,
+      required this.subtitle,
+      required this.onTap});
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
@@ -672,19 +1041,40 @@ class GoPremiumCard extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(16, 15, 14, 15),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(Radii.lg),
-          gradient: const LinearGradient(colors: [Color(0xFF181820), Color(0xFF2B2B33)]),
-          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: .35), blurRadius: 30, spreadRadius: -12, offset: const Offset(0, 14))],
+          gradient: const LinearGradient(
+              colors: [Color(0xFF181820), Color(0xFF2B2B33)]),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withValues(alpha: .35),
+                blurRadius: 30,
+                spreadRadius: -12,
+                offset: const Offset(0, 14))
+          ],
         ),
         child: Row(children: [
           Icon(AppIcons.lightning, size: 22, color: c.lime),
           const SizedBox(width: 12),
           Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(title, style: GoogleFonts.manrope(fontSize: 15, fontWeight: FontWeight.w800, color: Colors.white)),
-              Text(subtitle, style: GoogleFonts.manrope(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white70)),
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title,
+                  style: GoogleFonts.manrope(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white)),
+              Text(subtitle,
+                  style: GoogleFonts.manrope(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white70)),
             ]),
           ),
-          Container(width: 34, height: 34, decoration: BoxDecoration(shape: BoxShape.circle, color: c.lime), child: const Icon(AppIcons.caretRight, size: 16, color: Color(0xFF181820))),
+          Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: c.lime),
+              child: const Icon(AppIcons.caretRight,
+                  size: 16, color: Color(0xFF181820))),
         ]),
       ),
     );
@@ -700,7 +1090,14 @@ class SettingRow extends StatelessWidget {
   final bool chevron;
   final Widget? trailing;
   final VoidCallback? onTap;
-  const SettingRow({super.key, required this.icon, required this.title, this.value, this.chevron = false, this.trailing, this.onTap});
+  const SettingRow(
+      {super.key,
+      required this.icon,
+      required this.title,
+      this.value,
+      this.chevron = false,
+      this.trailing,
+      this.onTap});
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
@@ -711,10 +1108,23 @@ class SettingRow extends StatelessWidget {
         child: Row(children: [
           Icon(icon, size: 20, color: c.primary),
           const SizedBox(width: 14),
-          Expanded(child: Text(title, style: GoogleFonts.manrope(fontSize: 14, fontWeight: FontWeight.w700, color: c.textPrimary))),
-          if (value != null) Padding(padding: const EdgeInsets.only(right: 6), child: Text(value!, style: GoogleFonts.manrope(fontSize: 13, fontWeight: FontWeight.w700, color: c.textFaint))),
+          Expanded(
+              child: Text(title,
+                  style: GoogleFonts.manrope(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: c.textPrimary))),
+          if (value != null)
+            Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: Text(value!,
+                    style: GoogleFonts.manrope(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: c.textFaint))),
           if (trailing != null) trailing!,
-          if ((value != null || chevron) && trailing == null) Icon(AppIcons.caretRight, size: 16, color: c.textFaint),
+          if ((value != null || chevron) && trailing == null)
+            Icon(AppIcons.caretRight, size: 16, color: c.textFaint),
         ]),
       ),
     );
@@ -724,8 +1134,12 @@ class SettingRow extends StatelessWidget {
 class RowDivider extends StatelessWidget {
   const RowDivider({super.key});
   @override
-  Widget build(BuildContext context) =>
-      Divider(height: 1, thickness: 1, color: context.colors.glassBorder, indent: 16, endIndent: 16);
+  Widget build(BuildContext context) => Divider(
+      height: 1,
+      thickness: 1,
+      color: context.colors.glassBorder,
+      indent: 16,
+      endIndent: 16);
 }
 
 /// Small pill segmented control (generic value). Used for the theme switch.
@@ -733,13 +1147,19 @@ class SegControl<T> extends StatelessWidget {
   final List<({T value, String label})> items;
   final T selected;
   final ValueChanged<T> onChanged;
-  const SegControl({super.key, required this.items, required this.selected, required this.onChanged});
+  const SegControl(
+      {super.key,
+      required this.items,
+      required this.selected,
+      required this.onChanged});
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
     return Container(
       padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(borderRadius: BorderRadius.circular(Radii.pill), color: c.textFaint.withValues(alpha: .18)),
+      decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(Radii.pill),
+          color: c.textFaint.withValues(alpha: .18)),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         for (final it in items)
           GestureDetector(
@@ -747,8 +1167,16 @@ class SegControl<T> extends StatelessWidget {
             child: AnimatedContainer(
               duration: Motion.fast,
               padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
-              decoration: BoxDecoration(borderRadius: BorderRadius.circular(Radii.pill), color: it.value == selected ? c.primary : Colors.transparent),
-              child: Text(it.label, style: GoogleFonts.manrope(fontSize: 11, fontWeight: FontWeight.w800, color: it.value == selected ? c.onPrimary : c.textSecondary)),
+              decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(Radii.pill),
+                  color: it.value == selected ? c.primary : Colors.transparent),
+              child: Text(it.label,
+                  style: GoogleFonts.manrope(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      color: it.value == selected
+                          ? c.onPrimary
+                          : c.textSecondary)),
             ),
           ),
       ]),
@@ -784,15 +1212,28 @@ class XpBar extends StatelessWidget {
       return Stack(children: [
         Container(
           height: height,
-          decoration: BoxDecoration(color: c.textFaint.withValues(alpha: .22), borderRadius: BorderRadius.circular(Radii.pill)),
+          decoration: BoxDecoration(
+              color: c.textFaint.withValues(alpha: .22),
+              borderRadius: BorderRadius.circular(Radii.pill)),
         ),
         AnimatedContainer(
-          duration: Motion.med, curve: Motion.emphasized,
-          height: height, width: fillW,
+          duration: Motion.med,
+          curve: Motion.emphasized,
+          height: height,
+          width: fillW,
           decoration: BoxDecoration(
-            gradient: LinearGradient(colors: [Color.lerp(c.primary, c.lime, .35)!, c.primary]),
+            gradient: LinearGradient(
+                colors: [Color.lerp(c.primary, c.lime, .35)!, c.primary]),
             borderRadius: BorderRadius.circular(Radii.pill),
-            boxShadow: v > 0 ? [BoxShadow(color: c.primary.withValues(alpha: .35), blurRadius: 8, spreadRadius: -2, offset: const Offset(0, 2))] : null,
+            boxShadow: v > 0
+                ? [
+                    BoxShadow(
+                        color: c.primary.withValues(alpha: .35),
+                        blurRadius: 8,
+                        spreadRadius: -2,
+                        offset: const Offset(0, 2))
+                  ]
+                : null,
           ),
         ),
       ]);
@@ -808,14 +1249,26 @@ class PremiumBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: size, height: size, alignment: Alignment.center,
+      width: size,
+      height: size,
+      alignment: Alignment.center,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFFFFD873), Color(0xFFF2A93B)]),
+        gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xFFFFD873), Color(0xFFF2A93B)]),
         border: Border.all(color: Colors.white, width: 2),
-        boxShadow: [BoxShadow(color: const Color(0xFFF2A93B).withValues(alpha: 0.5), blurRadius: 8, spreadRadius: -1, offset: const Offset(0, 2))],
+        boxShadow: [
+          BoxShadow(
+              color: const Color(0xFFF2A93B).withValues(alpha: 0.5),
+              blurRadius: 8,
+              spreadRadius: -1,
+              offset: const Offset(0, 2))
+        ],
       ),
-      child: Icon(Icons.workspace_premium_rounded, size: size * 0.6, color: Colors.white),
+      child: Icon(Icons.workspace_premium_rounded,
+          size: size * 0.6, color: Colors.white),
     );
   }
 }
@@ -827,7 +1280,8 @@ class TravelerAvatar extends StatelessWidget {
   final double size;
   final String? imageUrl; // user-chosen avatar (network); null => default asset
   final bool premium;
-  const TravelerAvatar({super.key, this.size = 96, this.imageUrl, this.premium = false});
+  const TravelerAvatar(
+      {super.key, this.size = 96, this.imageUrl, this.premium = false});
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
@@ -837,18 +1291,29 @@ class TravelerAvatar extends StatelessWidget {
       height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [c.sage, c.primary]),
+        gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [c.sage, c.primary]),
         border: Border.all(color: c.glassBorder, width: 3),
-        boxShadow: [BoxShadow(color: c.primary.withValues(alpha: .35), blurRadius: 20, spreadRadius: -6, offset: const Offset(0, 8))],
+        boxShadow: [
+          BoxShadow(
+              color: c.primary.withValues(alpha: .35),
+              blurRadius: 20,
+              spreadRadius: -6,
+              offset: const Offset(0, 8))
+        ],
       ),
       child: ClipOval(child: SizedBox.expand(child: inner)),
     );
     if (!premium) return avatar;
     return SizedBox(
-      width: size, height: size,
+      width: size,
+      height: size,
       child: Stack(clipBehavior: Clip.none, children: [
         avatar,
-        Positioned(right: -2, bottom: -2, child: PremiumBadge(size: size * 0.3)),
+        Positioned(
+            right: -2, bottom: -2, child: PremiumBadge(size: size * 0.3)),
       ]),
     );
   }
@@ -860,18 +1325,22 @@ class TravelerAvatar extends StatelessWidget {
     if (url.startsWith('data:')) {
       try {
         final bytes = base64Decode(url.substring(url.indexOf(',') + 1));
-        return Image.memory(bytes, fit: BoxFit.cover, errorBuilder: (_, __, ___) => _defaultAvatar(size));
+        return Image.memory(bytes,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => _defaultAvatar(size));
       } catch (_) {
         return _defaultAvatar(size);
       }
     }
-    return Image.network(url, fit: BoxFit.cover, errorBuilder: (_, __, ___) => _defaultAvatar(size));
+    return Image.network(url,
+        fit: BoxFit.cover, errorBuilder: (_, __, ___) => _defaultAvatar(size));
   }
 
   static Widget _defaultAvatar(double size) => Image.asset(
         'assets/avatar_traveler.png',
         fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => CustomPaint(painter: _BackpackerPainter(), size: Size.square(size)),
+        errorBuilder: (_, __, ___) =>
+            CustomPaint(painter: _BackpackerPainter(), size: Size.square(size)),
       );
 }
 
@@ -887,7 +1356,9 @@ class _BackpackerPainter extends CustomPainter {
     // Backpack body — a rounded pack peeking behind the left shoulder.
     p.color = tan;
     canvas.drawRRect(
-      RRect.fromRectAndRadius(Rect.fromLTWH(s * 0.20, s * 0.42, s * 0.30, s * 0.34), Radius.circular(s * 0.09)),
+      RRect.fromRectAndRadius(
+          Rect.fromLTWH(s * 0.20, s * 0.42, s * 0.30, s * 0.34),
+          Radius.circular(s * 0.09)),
       p,
     );
     // Pack pocket line.
@@ -901,7 +1372,9 @@ class _BackpackerPainter extends CustomPainter {
     // Torso / shoulders (a capsule rising from the bottom).
     p.color = cream;
     canvas.drawRRect(
-      RRect.fromRectAndRadius(Rect.fromLTWH(s * 0.30, s * 0.52, s * 0.40, s * 0.44), Radius.circular(s * 0.18)),
+      RRect.fromRectAndRadius(
+          Rect.fromLTWH(s * 0.30, s * 0.52, s * 0.40, s * 0.44),
+          Radius.circular(s * 0.18)),
       p,
     );
     // Shoulder strap across the chest.
@@ -918,10 +1391,13 @@ class _BackpackerPainter extends CustomPainter {
     canvas.drawCircle(Offset(s * 0.50, s * 0.40), s * 0.145, p);
     // Little cap.
     p.color = strap;
-    final capRect = Rect.fromCircle(center: Offset(s * 0.50, s * 0.335), radius: s * 0.155);
+    final capRect =
+        Rect.fromCircle(center: Offset(s * 0.50, s * 0.335), radius: s * 0.155);
     canvas.drawArc(capRect, 3.14159, 3.14159, false, p);
     canvas.drawRRect(
-      RRect.fromRectAndRadius(Rect.fromLTWH(s * 0.345, s * 0.325, s * 0.31, s * 0.028), Radius.circular(s * 0.02)),
+      RRect.fromRectAndRadius(
+          Rect.fromLTWH(s * 0.345, s * 0.325, s * 0.31, s * 0.028),
+          Radius.circular(s * 0.02)),
       p,
     );
   }
@@ -940,22 +1416,42 @@ class AchievementBadge extends StatelessWidget {
     if (locked) {
       // Muted: faint fill, dim emoji — reads clearly as "not yet earned".
       return Container(
-        width: 48, height: 48, alignment: Alignment.center,
-        decoration: BoxDecoration(borderRadius: BorderRadius.circular(15), color: c.glassFill(0.03), border: Border.all(color: c.glassBorder.withValues(alpha: 0.5))),
-        child: Opacity(opacity: 0.38, child: Text(emoji, style: const TextStyle(fontSize: 20))),
+        width: 48,
+        height: 48,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(15),
+            color: c.glassFill(0.03),
+            border: Border.all(color: c.glassBorder.withValues(alpha: 0.5))),
+        child: Opacity(
+            opacity: 0.38,
+            child: Text(emoji, style: const TextStyle(fontSize: 20))),
       );
     }
     // Earned: vibrant lime→primary tint + soft glow so it pops.
     return Container(
-      width: 48, height: 48, alignment: Alignment.center,
+      width: 48,
+      height: 48,
+      alignment: Alignment.center,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(15),
         gradient: LinearGradient(
-          begin: Alignment.topLeft, end: Alignment.bottomRight,
-          colors: [c.lime.withValues(alpha: 0.28), c.primary.withValues(alpha: 0.20)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            c.lime.withValues(alpha: 0.28),
+            c.primary.withValues(alpha: 0.20)
+          ],
         ),
-        border: Border.all(color: c.primary.withValues(alpha: 0.45), width: 1.2),
-        boxShadow: [BoxShadow(color: c.primary.withValues(alpha: 0.18), blurRadius: 12, spreadRadius: -4, offset: const Offset(0, 4))],
+        border:
+            Border.all(color: c.primary.withValues(alpha: 0.45), width: 1.2),
+        boxShadow: [
+          BoxShadow(
+              color: c.primary.withValues(alpha: 0.18),
+              blurRadius: 12,
+              spreadRadius: -4,
+              offset: const Offset(0, 4))
+        ],
       ),
       child: Text(emoji, style: const TextStyle(fontSize: 22)),
     );
@@ -967,7 +1463,11 @@ class AchievementBadge extends StatelessWidget {
 /// Status shown top-center during a tour, shaped like the Dynamic Island: a dark
 /// blurred capsule with a pulsing state dot + label.
 class StatusIsland extends StatefulWidget {
-  const StatusIsland({super.key, required this.label, required this.color, required this.active});
+  const StatusIsland(
+      {super.key,
+      required this.label,
+      required this.color,
+      required this.active});
   final String label;
   final Color color;
   final bool active;
@@ -975,12 +1475,17 @@ class StatusIsland extends StatefulWidget {
   State<StatusIsland> createState() => _StatusIslandState();
 }
 
-class _StatusIslandState extends State<StatusIsland> with SingleTickerProviderStateMixin {
+class _StatusIslandState extends State<StatusIsland>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _c;
+
   @override
   void initState() {
     super.initState();
-    _c = AnimationController(vsync: this, duration: const Duration(milliseconds: 1100))..repeat(reverse: true);
+    _c = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1100),
+    )..repeat(reverse: true);
   }
 
   @override
@@ -991,39 +1496,70 @@ class _StatusIslandState extends State<StatusIsland> with SingleTickerProviderSt
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(Radii.pill),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
-          decoration: BoxDecoration(
-            color: const Color(0xE6101012),
-            borderRadius: BorderRadius.circular(Radii.pill),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.35), blurRadius: 22, spreadRadius: -6, offset: const Offset(0, 10))],
-          ),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            FadeTransition(
-              opacity: widget.active ? _c : const AlwaysStoppedAnimation(1.0),
-              child: Container(
-                width: 9, height: 9,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle, color: widget.color,
-                  boxShadow: [BoxShadow(color: widget.color.withValues(alpha: 0.7), blurRadius: 8, spreadRadius: 1)],
+    final content = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
+      decoration: BoxDecoration(
+        color: const Color(0xE6101012),
+        borderRadius: BorderRadius.circular(Radii.pill),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        boxShadow: _simulatorSafeVisuals
+            ? null
+            : [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.35),
+                  blurRadius: 22,
+                  spreadRadius: -6,
+                  offset: const Offset(0, 10),
                 ),
+              ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FadeTransition(
+            opacity: widget.active ? _c : const AlwaysStoppedAnimation(1.0),
+            child: Container(
+              width: 9,
+              height: 9,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: widget.color,
+                boxShadow: [
+                  BoxShadow(
+                    color: widget.color.withValues(alpha: 0.7),
+                    blurRadius: 8,
+                    spreadRadius: 1,
+                  ),
+                ],
               ),
             ),
-            const SizedBox(width: 10),
-            AnimatedSwitcher(
-              duration: Motion.fast,
-              child: Text(widget.label,
-                  key: ValueKey(widget.label),
-                  style: GoogleFonts.manrope(fontSize: 13.5, fontWeight: FontWeight.w800, color: Colors.white, letterSpacing: 0.2)),
+          ),
+          const SizedBox(width: 10),
+          AnimatedSwitcher(
+            duration: Motion.fast,
+            transitionBuilder: fadeSlideSwitch,
+            child: Text(
+              widget.label,
+              key: ValueKey(widget.label),
+              style: GoogleFonts.manrope(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w800,
+                color: Colors.white,
+                letterSpacing: 0.2,
+              ),
             ),
-          ]),
-        ),
+          ),
+        ],
       ),
+    );
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(Radii.pill),
+      child: _simulatorSafeVisuals
+          ? content
+          : BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+              child: content,
+            ),
     );
   }
 }
@@ -1053,17 +1589,29 @@ class RoundCtlButton extends StatelessWidget {
     final enabled = onTap != null;
     final fg = primary
         ? c.onPrimary
-        : (danger ? c.err : (enabled ? c.textPrimary : c.textFaint.withValues(alpha: 0.5)));
+        : (danger
+            ? c.err
+            : (enabled ? c.textPrimary : c.textFaint.withValues(alpha: 0.5)));
     return Pressable(
       onTap: onTap,
       child: Container(
-        width: size, height: size,
+        width: size,
+        height: size,
         alignment: Alignment.center,
         decoration: primary
             ? BoxDecoration(
                 shape: BoxShape.circle,
-                gradient: LinearGradient(colors: [c.primary, c.ok], begin: Alignment.topLeft, end: Alignment.bottomRight),
-                boxShadow: [BoxShadow(color: c.primary.withValues(alpha: 0.45), blurRadius: 20, spreadRadius: -4, offset: const Offset(0, 8))],
+                gradient: LinearGradient(
+                    colors: [c.primary, c.ok],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight),
+                boxShadow: [
+                  BoxShadow(
+                      color: c.primary.withValues(alpha: 0.45),
+                      blurRadius: 20,
+                      spreadRadius: -4,
+                      offset: const Offset(0, 8))
+                ],
               )
             : BoxDecoration(
                 shape: BoxShape.circle,
@@ -1086,12 +1634,14 @@ class MicButton extends StatefulWidget {
   State<MicButton> createState() => _MicButtonState();
 }
 
-class _MicButtonState extends State<MicButton> with SingleTickerProviderStateMixin {
+class _MicButtonState extends State<MicButton>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _pulse;
   @override
   void initState() {
     super.initState();
-    _pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200));
+    _pulse = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 1200));
     if (widget.recording) _pulse.repeat();
   }
 
@@ -1120,7 +1670,8 @@ class _MicButtonState extends State<MicButton> with SingleTickerProviderStateMix
     return Pressable(
       onTap: widget.onTap,
       child: SizedBox(
-        width: 92, height: 92,
+        width: 92,
+        height: 92,
         child: Stack(alignment: Alignment.center, children: [
           if (rec)
             AnimatedBuilder(
@@ -1128,7 +1679,8 @@ class _MicButtonState extends State<MicButton> with SingleTickerProviderStateMix
               builder: (context, _) {
                 final t = _pulse.value;
                 return Container(
-                  width: 68 + 24 * t, height: 68 + 24 * t,
+                  width: 68 + 24 * t,
+                  height: 68 + 24 * t,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: base.withValues(alpha: 0.28 * (1 - t)),
@@ -1137,18 +1689,27 @@ class _MicButtonState extends State<MicButton> with SingleTickerProviderStateMix
               },
             ),
           Container(
-            width: 68, height: 68,
+            width: 68,
+            height: 68,
             alignment: Alignment.center,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               gradient: LinearGradient(
                 colors: [Color.lerp(base, Colors.white, 0.12)!, base],
-                begin: Alignment.topLeft, end: Alignment.bottomRight,
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
               border: Border.all(color: context.colors.glassBorder, width: 3),
-              boxShadow: [BoxShadow(color: base.withValues(alpha: 0.5), blurRadius: 22, spreadRadius: -2, offset: const Offset(0, 8))],
+              boxShadow: [
+                BoxShadow(
+                    color: base.withValues(alpha: 0.5),
+                    blurRadius: 22,
+                    spreadRadius: -2,
+                    offset: const Offset(0, 8))
+              ],
             ),
-            child: Icon(rec ? AppIcons.stop : AppIcons.microphone, size: 30, color: c.onPrimary),
+            child: Icon(rec ? AppIcons.stop : AppIcons.microphone,
+                size: 30, color: c.onPrimary),
           ),
         ]),
       ),
@@ -1173,6 +1734,7 @@ class TourControls extends StatelessWidget {
     this.onToggleVoice,
     this.onHistory,
   });
+
   final String? title;
   final String? text;
   final bool paused;
@@ -1188,61 +1750,110 @@ class TourControls extends StatelessWidget {
     final bottomPad = MediaQuery.of(context).padding.bottom;
     final panelH = (size.height * 0.34).clamp(240.0, 360.0);
     final hasText = text != null && text!.isNotEmpty;
-    // Frosted glass: translucent enough to see the map move through it, strong blur
-    // keeps the subtitles legible.
     final fill = dark ? const Color(0xB81B1E24) : const Color(0xC2FFFFFF);
     const radius = BorderRadius.vertical(top: Radius.circular(28));
 
-    return SizedBox(
-      height: panelH + 30,
-      child: Stack(clipBehavior: Clip.none, alignment: Alignment.topCenter, children: [
-        Positioned(
-          top: 30, left: 0, right: 0, bottom: 0,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: radius,
-              boxShadow: [BoxShadow(color: c.shadow, blurRadius: 34, spreadRadius: -10, offset: const Offset(0, -6))],
+    final content = Container(
+      decoration: BoxDecoration(
+        color: fill,
+        borderRadius: radius,
+        border: Border(top: BorderSide(color: c.glassBorder, width: 1)),
+      ),
+      padding: EdgeInsets.fromLTRB(20, 46, 20, bottomPad + 14),
+      child: Column(
+        mainAxisSize: MainAxisSize.max,
+        children: [
+          if (title != null && title!.isNotEmpty) ...[
+            Text(
+              title!,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: h2(context),
             ),
-            child: ClipRRect(
-              borderRadius: radius,
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 34, sigmaY: 34),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: fill,
-                    borderRadius: radius,
-                    border: Border(top: BorderSide(color: c.glassBorder, width: 1)),
-                  ),
-                  padding: EdgeInsets.fromLTRB(20, 46, 20, bottomPad + 14),
-                  child: Column(mainAxisSize: MainAxisSize.max, children: [
-                    if (title != null && title!.isNotEmpty) ...[
-                      Text(title!, maxLines: 1, overflow: TextOverflow.ellipsis, style: h2(context)),
-                      const SizedBox(height: 8),
-                    ],
-                    Expanded(
-                      child: SingleChildScrollView(
-                        child: Text(
-                          hasText ? text! : '…',
-                          style: GoogleFonts.manrope(fontSize: 15.5, fontWeight: FontWeight.w500, height: 1.5, color: c.textPrimary),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                      RoundCtlButton(icon: AppIcons.history, onTap: onHistory, size: 52),
-                      RoundCtlButton(icon: voice ? AppIcons.speakerHigh : AppIcons.speakerSlash, onTap: onToggleVoice, size: 52),
-                      RoundCtlButton(icon: paused ? AppIcons.play : AppIcons.pause, onTap: onPause, size: 66, primary: true),
-                      RoundCtlButton(icon: AppIcons.question, onTap: onAsk, size: 52),
-                      RoundCtlButton(icon: AppIcons.stop, onTap: onStop, size: 52, danger: true),
-                    ]),
-                  ]),
+            const SizedBox(height: 8),
+          ],
+          Expanded(
+            child: SingleChildScrollView(
+              child: Text(
+                hasText ? text! : '…',
+                style: GoogleFonts.manrope(
+                  fontSize: 15.5,
+                  fontWeight: FontWeight.w500,
+                  height: 1.5,
+                  color: c.textPrimary,
                 ),
               ),
             ),
           ),
-        ),
-        MicButton(recording: recording, onTap: onMic),
-      ]),
+          const SizedBox(height: 14),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              RoundCtlButton(
+                  icon: AppIcons.history, onTap: onHistory, size: 52),
+              RoundCtlButton(
+                icon: voice ? AppIcons.speakerHigh : AppIcons.speakerSlash,
+                onTap: onToggleVoice,
+                size: 52,
+              ),
+              RoundCtlButton(
+                icon: paused ? AppIcons.play : AppIcons.pause,
+                onTap: onPause,
+                size: 66,
+                primary: true,
+              ),
+              RoundCtlButton(icon: AppIcons.question, onTap: onAsk, size: 52),
+              RoundCtlButton(
+                icon: AppIcons.stop,
+                onTap: onStop,
+                size: 52,
+                danger: true,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+
+    return SizedBox(
+      height: panelH + 30,
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.topCenter,
+        children: [
+          Positioned(
+            top: 30,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: radius,
+                boxShadow: _simulatorSafeVisuals
+                    ? null
+                    : [
+                        BoxShadow(
+                          color: c.shadow,
+                          blurRadius: 34,
+                          spreadRadius: -10,
+                          offset: const Offset(0, -6),
+                        ),
+                      ],
+              ),
+              child: ClipRRect(
+                borderRadius: radius,
+                child: _simulatorSafeVisuals
+                    ? content
+                    : BackdropFilter(
+                        filter: ImageFilter.blur(sigmaX: 34, sigmaY: 34),
+                        child: content,
+                      ),
+              ),
+            ),
+          ),
+          MicButton(recording: recording, onTap: onMic),
+        ],
+      ),
     );
   }
 }

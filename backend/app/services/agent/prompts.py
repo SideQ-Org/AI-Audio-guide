@@ -182,6 +182,33 @@ _COMPANION_STREAM_BLOCK = (
     "ВЫХОД: только сам текст ответа — обычной речью, без JSON, разметки и служебных полей."
 )
 
+# Tier-1 fast narration opener: ONE short spoken line, normal narration voice, no filler.
+_NARRATE_FAST_BLOCK = (
+    "Ты пишешь ПЕРВУЮ реплику экскурсовода для текущего narration block. Дай РОВНО ОДНО короткое "
+    "естественное предложение — не служебное, не 'если коротко', не 'вот что важно', а нормальное "
+    "начало самой экскурсионной реплики. Опирайся на FACTS/PLACE/TOPIC/CONTEXT. Язык пользователя. "
+    "Никаких списков, разметки, пояснений о процессе, никаких обещаний 'сейчас расскажу подробнее'. "
+    "Это должно звучать как реальное первое предложение экскурсии, которое потом можно естественно "
+    "продолжить более подробным рассказом."
+)
+
+# Tier-1 fast guided opener: ONE substantive spoken first line after route accept — greeting +
+# where we are + what the route starts with. Must feel like the actual tour beginning, not filler.
+_GUIDED_NARRATE_FAST_BLOCK = (
+    "Ты пишешь САМУЮ ПЕРВУЮ реплику гида сразу после того, как пользователь принял маршрут. "
+    "Дай РОВНО ОДНО содержательное, живое, грамматически безупречное предложение на языке "
+    "пользователя. Это предложение должно звучать как настоящее начало экскурсии, а не как "
+    "заглушка. Внутри него обязательно должны быть: 1) короткое приветствие, 2) где мы сейчас "
+    "находимся, 3) на какой сюжет сначала посмотрим или с чего начнём маршрут. Формулируй по-русски "
+    "естественно: не ломай падежи, не вставляй сырые куски темы или названия остановки как шаблон. "
+    "Если TOPIC звучит канцелярски, обрывочно или неграмматично, обязательно перефразируй его в "
+    "нормальную живую речь. Не копируй TOPIC дословно, если он начинается инфинитивом, обрывком "
+    "или служебной конструкцией; встрои его в фразу естественно. Фраза может быть чуть объёмнее "
+    "обычного fast-ответа, но всё ещё одной фразой и без списков, разметки, служебных вводок и "
+    "обещаний вроде 'сейчас расскажу подробнее'."
+)
+
+
 # Tier-1 fast answer: ONE short sentence, instant. Kept minimal so a tiny fast model nails it.
 _ANSWER_FAST_BLOCK = (
     "Пользователь прервал экскурсию вопросом. Ты — тот же гид. Дай МГНОВЕННЫЙ ответ — РОВНО\n"
@@ -190,6 +217,16 @@ _ANSWER_FAST_BLOCK = (
     "предложением, без выдумок и без «я ИИ». Никаких вступлений, списков, разметки — одно\n"
     "предложение и всё (продолжение придёт следом отдельно)."
 )
+
+
+def system_for_narrate_fast(language: str) -> str:
+    """CORE(language) + the tier-1 fast one-sentence narration block."""
+    return f"{_core(language)}\n\n---\n\n{_NARRATE_FAST_BLOCK}"
+
+
+def system_for_guided_narrate_fast(language: str) -> str:
+    """CORE(language) + the tier-1 fast one-sentence guided-route opener block."""
+    return f"{_core(language)}\n\n---\n\n{_GUIDED_NARRATE_FAST_BLOCK}"
 
 
 def system_for_answer_fast(language: str) -> str:
@@ -292,6 +329,7 @@ def build_narrator_user(inp: NarratorInput) -> str:
                 "elaborate": inp.flags.elaborate,
                 "passing": inp.flags.passing,
                 "passed": inp.flags.passed,  # already behind us -> past tense (see role block)
+                "approaching_road": inp.flags.approaching_road,  # big road, can't walk it
                 "preferences": (
                     inp.flags.preferences.model_dump() if inp.flags.preferences else None
                 ),
@@ -301,9 +339,17 @@ def build_narrator_user(inp: NarratorInput) -> str:
 
 
 def build_area_user(inp: AreaInput) -> str:
+    # When the walker is NOT physically on the street, drop the street from ADDRESS so the
+    # model literally has no street to anchor to — it tells the district/city instead of
+    # "здесь, на <улице>" about a road we merely passed near.
+    addr = inp.address.model_dump(exclude_none=True)
+    if not inp.on_street:
+        addr.pop("street", None)
+        addr.pop("street_confident", None)
     return _json(
         {
-            "ADDRESS": inp.address.model_dump(exclude_none=True),
+            "ADDRESS": addr,
+            "ON_STREET": inp.on_street,
             "FACTS": inp.facts,
             "THEME": inp.theme,
             "TOPIC": inp.topic,
@@ -311,6 +357,9 @@ def build_area_user(inp: AreaInput) -> str:
             "NEXT_HOOK": inp.next_hook,
             "LAST_PLACE": inp.last_place_name,
             "BEAT_MODE": inp.beat_mode,  # rotating rhetorical angle for variety (A1)
+            # What the walker can ACTUALLY SEE right now — spatial anchoring («вот этот
+            # дом», «справа») is allowed ONLY for these names (visible-or-abstract).
+            "VISIBLE": inp.visible or None,
             # continue this voice (A1), filtering terse bridges/floor lines
             "CONTINUE_FROM": clean_continuation(inp.history, inp.language),
             # The openings you JUST used — do NOT start this paragraph any of these ways (A1).
@@ -336,6 +385,11 @@ def build_scripter_user(inp: RouteScriptInput) -> str:
         {
             "ADDRESS": inp.address.model_dump(exclude_none=True),
             "THEME_OVERRIDE": inp.theme_override,
+            "ROUTE_FACTS": inp.route_facts,
+            "ROUTE_OUTLINE": inp.route_outline,
+            "ROUTE_STREETS": inp.route_streets,
+            # The whole-route scripter sees ordered stops + their ranked facts and must
+            # also produce a route-wide intro/lead-in and continuity between the stops.
             "STOPS": [
                 {
                     "order": i,

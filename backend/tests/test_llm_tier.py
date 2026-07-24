@@ -55,16 +55,20 @@ def test_model_resolves_by_tier():
     def run():
         llm = OpenAICompatLLM(base_url="http://x/v1", api_key="k")
         free = llm._model_for(Role.NARRATOR)
+        free_fast = llm._model_for(Role.NARRATE_FAST)
         SESSION_TIER.set("paid")
         paid = llm._model_for(Role.NARRATOR)
         paid_scorer = llm._model_for(Role.SCORER)  # paid uses premium on EVERY role
+        paid_fast = llm._model_for(Role.NARRATE_FAST)
         asyncio.run(llm._client.aclose())
-        return free, paid, paid_scorer
+        return free, free_fast, paid, paid_scorer, paid_fast
 
-    free, paid, paid_scorer = _with_tier_settings(run)
+    free, free_fast, paid, paid_scorer, paid_fast = _with_tier_settings(run)
     assert free == "deepseek/deepseek-chat"
+    assert free_fast == "deepseek/deepseek-chat"
     assert paid == "google/gemini-3.5-flash"
     assert paid_scorer == "google/gemini-3.5-flash"
+    assert paid_fast == "deepseek/deepseek-chat"
 
 
 def test_reasoning_only_for_paid_when_tiers_on():

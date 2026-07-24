@@ -1586,17 +1586,53 @@ abstract class AppLocalizations {
   /// **'Your stats will appear here'**
   String get statsSoon;
 
-  /// No description provided for @communitySoonTitle.
+  /// No description provided for @communityStreakLeave.
   ///
   /// In en, this message translates to:
-  /// **'Community is coming soon'**
-  String get communitySoonTitle;
+  /// **'Leave streak'**
+  String get communityStreakLeave;
 
-  /// No description provided for @communitySoonBody.
+  /// No description provided for @communityUnfriend.
   ///
   /// In en, this message translates to:
-  /// **'Friends, shared routes and challenges will live here.'**
-  String get communitySoonBody;
+  /// **'Remove friend'**
+  String get communityUnfriend;
+
+  /// No description provided for @communityUnfriendConfirm.
+  ///
+  /// In en, this message translates to:
+  /// **'Remove {name} from friends?'**
+  String communityUnfriendConfirm(String name);
+
+  /// No description provided for @communityRequestOutgoing.
+  ///
+  /// In en, this message translates to:
+  /// **'Request sent: @{handle}'**
+  String communityRequestOutgoing(String handle);
+
+  /// No description provided for @communityAlreadyFriends.
+  ///
+  /// In en, this message translates to:
+  /// **'Already friends'**
+  String get communityAlreadyFriends;
+
+  /// No description provided for @feedWalkShared.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} shared a walk'**
+  String feedWalkShared(String name);
+
+  /// No description provided for @communityCoWalkShare.
+  ///
+  /// In en, this message translates to:
+  /// **'Share code'**
+  String get communityCoWalkShare;
+
+  /// No description provided for @communityCoWalkShareMsg.
+  ///
+  /// In en, this message translates to:
+  /// **'Walk with me in AI Guide! Co-walk code: {code}'**
+  String communityCoWalkShareMsg(String code);
 
   /// No description provided for @sectionAccount.
   ///

@@ -24,6 +24,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 import app.main as main  # noqa: E402
 from app.config import settings  # noqa: E402
+from app.services.accounts import community as comm  # noqa: E402
 from app.services.accounts import db  # noqa: E402
 from app.services.accounts import repository as repo  # noqa: E402
 from app.services.accounts.models import Base  # noqa: E402
@@ -342,3 +343,75 @@ def test_owner_views_own_walk():
 
     code, d = _run(scenario)
     assert code == 200 and len(d["events"]) == 1
+
+
+def test_streak_days_respect_local_timezone():
+    """Day bucketing is LOCAL (tz_offset_min), not UTC: a 21:30 UTC walk belongs to the
+    NEXT local day in MSK (+180). In UTC bucketing the streak visibly broke at local
+    midnight — the field-reported timezone bug."""
+
+    async def scenario():
+        uid = str(uuid.uuid4())
+        async with db.session_scope() as s:
+            await repo.get_or_create_user(s, provider="supabase", provider_uid=uid, user_id=uid)
+            w = await repo.start_walk(
+                s, walk_id=uuid.uuid4(), user_id=uid, sid="s" * 20, language="ru",
+                city="Москва", district=None, title="Ночная",
+            )
+            from datetime import UTC as _UTC
+            from datetime import datetime as _dt
+
+            w.started_at = _dt(2026, 7, 17, 21, 30, tzinfo=_UTC)  # 00:30 (18.07) MSK
+        async with db.session_scope() as s:
+            utc_days = await comm._walk_days(s, uuid.UUID(uid))
+            msk_days = await comm._walk_days(s, uuid.UUID(uid), tz_offset_min=180)
+        return utc_days, msk_days
+
+    utc_days, msk_days = _run(scenario)
+    assert utc_days[0].day == 17
+    assert msk_days[0].day == 18  # the MSK walker sees the walk on their local date
+
+
+def test_friends_endpoint_query_count_is_fixed():
+    """The community tab measured 2-6 s per endpoint live: every friend cost 3 extra
+    ~200 ms round-trips to the remote pooler (count + streak + presence). The bulk path
+    must keep the statement count FLAT regardless of how many friends there are."""
+
+    async def scenario():
+        uids = [str(uuid.uuid4()) for _ in range(4)]
+        me = uids[0]
+        async with db.session_scope() as s:
+            for u in uids:
+                await repo.get_or_create_user(s, provider="supabase", provider_uid=u, user_id=u)
+        for u in uids:
+            await _seed_walk(u)
+        async with _client() as c:
+            await c.post("/community/profile", json={"handle": f"u{me[:8]}"}, headers=_auth(me))
+            for f in uids[1:]:
+                async with db.session_scope() as s:
+                    await comm.send_friend_request(s, user_id=me, target_id=f)
+                    await comm.respond_friend_request(
+                        s, user_id=f, requester_id=me, accept=True
+                    )
+
+            counts = {"n": 0}
+            from sqlalchemy import event
+
+            eng = db.get_engine()
+
+            def _count(conn, cursor, statement, parameters, context, executemany):
+                counts["n"] += 1
+
+            event.listen(eng.sync_engine, "before_cursor_execute", _count)
+            try:
+                r = await c.get("/community/friends", headers=_auth(me))
+            finally:
+                event.remove(eng.sync_engine, "before_cursor_execute", _count)
+            assert r.status_code == 200
+            assert len(r.json()["friends"]) == 3
+            return counts["n"]
+
+    n = _run(scenario)
+    # ensure(user) + friend_ids + users-bulk + walks-sweep + presence (+ txn overhead).
+    # The old shape was 2 + 3×friends; with 3 friends that was 11+. Keep it flat & small.
+    assert n <= 7, f"friends endpoint made {n} SQL statements — N+1 crept back in"

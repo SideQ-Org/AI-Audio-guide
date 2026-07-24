@@ -1,14 +1,13 @@
 # Automatic HTTPS via Let's Encrypt. The sslip.io hostname resolves to the server IP,
 # so no domain purchase is needed.
 #
-# Caddy serves the Flutter **web build** (static, identical to the mobile app) and
-# reverse-proxies only the API + WebSocket to the backend container. Access logging is
-# on (JSON to stdout -> `docker logs ai-guide-caddy`) so we can see real client IP/geo
-# of testers (the backend only ever sees Caddy's internal IP).
+# Caddy terminates TLS and reverse-proxies the API + WebSocket to the backend container.
+# Non-API paths no longer serve the Flutter web build — they return a tiny plain response
+# instead. Access logging is on (JSON to stdout -> `docker logs ai-guide-caddy`) so we can
+# see real client IP/geo of testers (the backend only ever sees Caddy's internal IP).
 #
-# NOTE: use `handle` blocks (mutually exclusive, source-ordered) so the static
-# try_files fallback can't swallow the API paths — a plain matcher + try_files would
-# rewrite /health -> /index.html before the proxy matcher runs.
+# NOTE: use `handle` blocks (mutually exclusive, source-ordered) so the non-API fallback
+# can't swallow the proxied routes.
 178.83.121.62.sslip.io {
 	encode zstd gzip
 

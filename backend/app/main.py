@@ -28,6 +28,7 @@ from app.services.accounts.api import router as accounts_router
 from app.services.accounts.auth import verify_token
 from app.services.accounts.community_api import router as community_router
 from app.services.agent.companion import heuristic_patch
+from app.services.agent.director import atomize_facts
 from app.services.agent.factory import build_orchestrator
 from app.services.agent.languages import (
     normalize,
@@ -37,12 +38,14 @@ from app.services.agent.languages import (
 )
 from app.services.agent.narration_schedule import NarrationScheduler
 from app.services.agent.orchestrator import (
+    _HISTORY_CAP,
+    _SEEN_CAP,
     Orchestrator,
     OrchestratorOutput,
     State,
     merge_patch,
 )
-from app.services.agent.walklog import get_logger
+from app.services.agent.walklog import CURRENT_SID, clip, get_logger
 from app.services.billing.api import router as billing_router
 from app.services.llm.client import (
     METER,
@@ -63,6 +66,8 @@ from app.shared.schemas import (
     WSAuth,
     WSControl,
     WSPositionUpdate,
+    WSPrewarm,
+    WSReservePlayed,
     WSRouteProposal,
     WSRouteStop,
     WSSetAddressForm,
@@ -275,10 +280,11 @@ async def _warm_db_pool() -> None:
             await s.execute(text("select 1"))
 
     async def _keepalive() -> None:
-        # Five concurrent pings so every core pooled connection (pool_size=5) stays warm + fresh.
+        # Keep only the real core pooled connections warm. The durable layer currently uses a
+        # small pool (pool_size=3) on purpose to avoid session-pooler exhaustion under bursts.
         while True:
             try:
-                await asyncio.gather(*[_ping() for _ in range(5)], return_exceptions=True)
+                await asyncio.gather(*[_ping() for _ in range(3)], return_exceptions=True)
             except Exception:  # noqa: BLE001 — pool warming must never crash the app
                 pass
             await asyncio.sleep(60)
@@ -443,12 +449,47 @@ async def _send(
                 # the text with its on-device voice.
                 "audio_b64": audio_b64,
                 "audio_mime": audio_mime,
+                # Turn-by-turn cue: the client speaks it immediately (_speakInterrupting,
+                # already shipped) instead of queueing behind narration. Old clients
+                # ignore the flag and enqueue — degraded but correct.
+                # Only the imminent turn COMMAND cuts the current sentence; the far
+                # pre-announce queues behind it like normal narration (seamlessness).
+                "interrupt": True if (out.nav_cue and out.nav_urgent) else None,
             }
         )
     elif out.kind == "reply" and out.text:
         await ws.send_json(
             {"type": "reply", "text": out.text, "audio_b64": audio_b64, "audio_mime": audio_mime}
         )
+
+
+async def _send_reserve(ws: WebSocket, items: list[dict]) -> None:
+    if not items:
+        return
+    await ws.send_json({"type": "reserve", "items": items})
+
+
+async def _reserve_payload(
+    items: list[dict], *, tier: str, language: str
+) -> list[dict]:
+    """Attach optional neural-audio payloads to reserve items, so paid-tier offline playback
+    can keep the same cloud voice through short disconnects. Best-effort: any synth failure leaves
+    the reserve item text-only, and the client falls back to on-device TTS for that one item."""
+    if not items:
+        return items
+
+    async def _one(item: dict) -> dict:
+        text = (item.get("text") or "").strip()
+        if not text:
+            return item
+        audio_b64, audio_mime = await _synth_audio(text, tier, language)
+        if audio_b64:
+            item = dict(item)
+            item["audio_b64"] = audio_b64
+            item["audio_mime"] = audio_mime
+        return item
+
+    return await asyncio.gather(*(_one(it) for it in items))
 
 
 class _SessionRuntime:
@@ -475,6 +516,13 @@ class _SessionRuntime:
         self.live_position: GeoPoint | None = None
         self.live_heading = Heading()
         self.live_pace = Pace.SLOW
+        # A start_guided that arrived BEFORE the first position (the guided client sends
+        # it right after connect). Drained by the position branch before waking the
+        # producer, so route planning always precedes the first reactive tick.
+        self.pending_guided: WSStartGuided | None = None
+        # Home-screen prewarm gate for the GEO warm (reverse-geocode + plan + area facts):
+        # the geocoder has no cache, so repeated pings must not re-query it in place.
+        self._last_prewarm: tuple[GeoPoint, float] | None = None
         # GPS outlier gate: a phone in dense/suburban cover spikes 100-200 m between
         # fixes and snaps back. Trusting those makes the guide narrate objects near a
         # phantom position ("talks about a kindergarten you never approached") and churn
@@ -517,7 +565,16 @@ class _SessionRuntime:
         # orchestrator (no state mutation); committed single-threaded in _step.
         self._area_prefetch: asyncio.Task | None = None
         self._last_track_at: float | None = None  # throttle the street-snapped track push
+        self._last_reserve_sig: tuple[str, ...] = ()  # skip resending unchanged reserve payloads
+        self._reserve_task: asyncio.Task | None = None
         self.send_lock = asyncio.Lock()
+        # Startup/gap observability: per-session monotonic stamps for correlating startup prewarm,
+        # first live position, first narration send, first played ack, and queue starvation gaps.
+        self._startup_trace_started_at: float | None = None
+        self._startup_trace_first_position_at: float | None = None
+        self._startup_trace_first_narration_sent_at: float | None = None
+        self._startup_trace_first_played_at: float | None = None
+        self._gap_wait_started_at: float | None = None
         # Inbound-message token bucket (anti-flood). Starts full so a normal reconnect
         # burst (auth + language + theme + resume position) is never throttled.
         self._bucket_tokens = float(settings.ws_msg_burst)
@@ -605,8 +662,15 @@ class _SessionRuntime:
         audio_b64 = audio_mime = None
         if out.kind in ("narration", "reply") and out.text and out.text.strip() != "[SILENCE]":
             audio_b64, audio_mime = await _synth_audio(out.text, self.tier, self.language)
+        if out.kind == "narration" and out.text and out.text.strip() != "[SILENCE]":
+            now = time.perf_counter()
+            if self._startup_trace_first_narration_sent_at is None:
+                self._startup_trace_first_narration_sent_at = now
         async with self.send_lock:
-            await _send(self.ws, out, audio_b64, audio_mime)
+            # Best-effort: the peer may vanish mid-send (RuntimeError from Starlette's
+            # closed-socket state). Teardown is receive-loop-driven; a lost frame is fine.
+            with contextlib.suppress(WebSocketDisconnect, RuntimeError):
+                await _send(self.ws, out, audio_b64, audio_mime)
 
     def _present(self, out: OrchestratorOutput) -> None:
         """Make `out` the current line AND pre-synthesize all its sentences in the background,
@@ -633,7 +697,37 @@ class _SessionRuntime:
 
     async def send_json(self, obj: dict) -> None:
         async with self.send_lock:
-            await self.ws.send_json(obj)
+            # Best-effort (see send_out): a send racing the disconnect must not crash ASGI.
+            with contextlib.suppress(WebSocketDisconnect, RuntimeError):
+                await self.ws.send_json(obj)
+
+    def _start_reserve_refresh(self) -> None:
+        if self._reserve_task is not None and not self._reserve_task.done():
+            return
+        task = asyncio.create_task(self.send_fact_reserve())
+        self._reserve_task = task
+        task.add_done_callback(lambda _t: setattr(self, "_reserve_task", None))
+
+    async def send_fact_reserve(self) -> None:
+        items = await self.orch.refresh_fact_reserve(self.session_id)
+        sig = tuple(it.id for it in items)
+        if sig == self._last_reserve_sig:
+            return
+        payload = [it.model_dump() for it in items]
+        payload = await _reserve_payload(payload, tier=self.tier, language=self.language)
+        audio_ready = sum(1 for it in payload if it.get("audio_b64"))
+        self._last_reserve_sig = sig
+        if items:
+            _walk.info(
+                "reserve send sid=%s items=%d audio=%d order=%s",
+                self.session_id,
+                len(items),
+                audio_ready,
+                [f"{it.kind}:{it.subject_key}" for it in items],
+            )
+        async with self.send_lock:
+            with contextlib.suppress(WebSocketDisconnect, RuntimeError):
+                await _send_reserve(self.ws, payload)
 
     async def finalize_and_summarize(self) -> None:
         """End-of-walk (kept): map-match the final track (smooth history + summary), push it,
@@ -644,6 +738,59 @@ class _SessionRuntime:
                 with contextlib.suppress(Exception):
                     await self.send_json({"type": "track", "polyline": matched, "final": True})
         await self.send_walk_summary()
+
+    async def send_startup_block(self) -> bool:
+        """If a guaranteed startup block was prepared for this session, send it immediately after
+        the greeting and clear it from state. Returns True when it sent one."""
+        st = await self.orch.store.load(self.session_id)
+        block = st.startup_block
+        if block is None or not (block.text or "").strip():
+            return False
+        # Guided route proposals must stay completely silent until the user explicitly accepts.
+        # A fast guided startup block may already be warmed while the route sheet is open, but it
+        # must not be spoken until nav.accepted flips on route_accept.
+        if st.guide_mode == "guided" and st.nav.active and not st.nav.accepted:
+            return False
+        out = OrchestratorOutput(
+            state=State.NARRATING.value,
+            kind="narration",
+            text=block.text,
+            place_id=block.place_id,
+            place_name=block.place_name,
+            category=block.category,
+        )
+        st.startup_block = None
+        st.narration_history = (st.narration_history + [block.text])[-_HISTORY_CAP:]
+        st.memory.mark_facts_told(atomize_facts(block.text))
+        if block.place_id:
+            st.seen_place_ids = (st.seen_place_ids + [block.place_id])[-_SEEN_CAP:]
+            st.last_place_id = block.place_id
+        if block.kind in ("area", "fallback") and block.area_key:
+            st.area_intro_done = True
+        if block.scope == "guided_start":
+            st.nav.intro_done = True
+        await self.orch.store.save(st)
+        now = time.perf_counter()
+        _walk.info(
+            "startup contract sid=%s source=%s scope=%s subject=%s tap_to_send=%dms pos_to_send=%sms | %s",
+            self.session_id,
+            block.kind,
+            block.scope,
+            block.subject_key,
+            int((now - self._startup_trace_started_at) * 1000) if self._startup_trace_started_at is not None else -1,
+            (
+                int((now - self._startup_trace_first_position_at) * 1000)
+                if self._startup_trace_first_position_at is not None
+                else "-"
+            ),
+            clip(block.text),
+        )
+        self._present(out)
+        frame = self.sched.next_frame()
+        if frame is not None:
+            await self.send_out(frame)
+            await self._wait_played(frame.text)
+        return True
 
     async def send_walk_summary(self) -> None:
         """Generate the end-of-walk structured recap and push it to the client (Stop sheet)."""
@@ -673,6 +820,9 @@ class _SessionRuntime:
                 return
 
     async def run_producer(self) -> None:
+        # Walklog attribution for everything the producer generates (step/weave/deliver):
+        # without it those lines log as sid=- and concurrent walks are inseparable.
+        CURRENT_SID.set(self.session_id)
         while True:
             self.step_task = asyncio.ensure_future(self._step())
             try:
@@ -707,6 +857,20 @@ class _SessionRuntime:
         counts as one tour — the common open-app-and-walk case)."""
         limit = settings.free_tier_daily_tours
         return self.tier != "paid" and limit > 0 and self.tours_today >= limit
+
+    def allow_geo_prewarm(self, pos: GeoPoint) -> bool:
+        """Gate for the prewarm GEO warm (ungated geocoder + planner/facts warms): allow
+        when moved >= prewarm_min_move_m from the last allowed one OR its age exceeds
+        prewarm_min_interval_s. Stamps the position on allow."""
+        now = time.monotonic()
+        last = self._last_prewarm
+        if last is not None:
+            moved = haversine_m(pos, last[0])
+            fresh = (now - last[1]) < settings.prewarm_min_interval_s
+            if moved < settings.prewarm_min_move_m and fresh:
+                return False
+        self._last_prewarm = (pos, now)
+        return True
 
     async def _step(self) -> None:
         if self.listening:  # mic open — stay silent until the question is handled
@@ -758,6 +922,11 @@ class _SessionRuntime:
             self._bridge_i += 1
             await self.send_out(bridge)
             await self._wait_played(bridge.text)
+            return
+
+        # 0.5) Guaranteed startup contract: after the canned greeting, if a prepared first
+        # meaningful block exists, speak it before the normal reactive area/object runtime path.
+        if await self.send_startup_block():
             return
 
         # 1) A fresh bubble object to weave in at this sentence boundary?
@@ -820,16 +989,57 @@ class _SessionRuntime:
         if out.nav_event:
             await self.send_json(out.nav_event)
         if out.kind == "narration" and out.text:
+            if getattr(out, "fast_hint", None):
+                fast = OrchestratorOutput(
+                    state=out.state,
+                    kind="narration",
+                    text=out.fast_hint,
+                    place_id=out.place_id,
+                    place_name=out.place_name,
+                    category=out.category,
+                )
+                await self.send_out(fast)
+                await self._wait_played(fast.text)
             self._present(out)
             if out.place_id is None:  # an area beat (not an object) -> warm the next one
                 self._start_area_prefetch()
+            self._start_reserve_refresh()
             frame = self.sched.next_frame()
             if frame is not None:
                 await self.send_out(frame)
                 await self._wait_played(frame.text)
                 return
         await self.send_out(out)  # state / silence
-        self.wake.clear()  # nothing to say -> idle until the context changes
+        # Free walk usually gets frequent context changes from discovery / bubble updates. Guided on a
+        # long leg can have ready route/area material BEFORE the next GPS fix arrives; if we sleep
+        # indefinitely here we stretch a 5-10 s leg/content opportunity into a 40-120 s pause under
+        # sparse position cadence. So for an active guided leg, re-check on a short heartbeat too.
+        self.wake.clear()
+        active_walk = self.live_position is not None
+        if active_walk:
+            self._start_area_prefetch()
+            try:
+                waiters = [asyncio.create_task(self.wake.wait())]
+                if self._area_prefetch is not None:
+                    waiters.append(self._area_prefetch)
+                done, pending = await asyncio.wait(
+                    waiters,
+                    timeout=6.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                if not done:
+                    raise TimeoutError
+                if any(task is not waiters[0] for task in done):
+                    _walk.info("idle: woke on prefetch completion")
+                    self.wake.set()
+                else:
+                    _walk.info("idle: woke on external signal")
+            except TimeoutError:
+                _walk.info("idle: self-wakeup after 6s")
+                self.wake.set()  # self-nudge: re-run the producer and consume any warmed beat
+            return
         await self.wake.wait()
 
     def _start_area_prefetch(self) -> None:
@@ -846,6 +1056,7 @@ class _SessionRuntime:
         SESSION_ID.set(self.session_id)  # attribute LLM cost to this session
         SESSION_TIER.set(self.tier)  # tier -> model routing for the warmed beat
         USER_ADDRESS.set(self.user_address)
+        CURRENT_SID.set(self.session_id)  # walklog attribution (seam stitch etc. logged here)
         return await self.orch.prefetch_area(self.session_id, self.live_pace)
 
     async def _take_prefetched_area(self) -> OrchestratorOutput | None:
@@ -942,13 +1153,14 @@ class _SessionRuntime:
 
     async def _wait_played(self, text: str) -> None:
         self.played.clear()
-        # The client acks `played` at TTS COMPLETION, so release the NEXT sentence the moment
-        # this one finishes — exact pacing, no queue pile-up, and a place weaves in right
-        # after the current sentence. A generous cap (if the ack is ever dropped) prevents a
-        # stall; the per-language duration estimate is only that ceiling now.
+        # The client now acks `played` at speech START, not completion: the next sentence arrives
+        # while this one is still being read, shrinking the gap between sentences/blocks. Keep a
+        # generous timeout fallback so a dropped ack cannot wedge the producer forever.
         cap = min(_speech_seconds(text, self.language) * 1.6, 25.0)
+        self._gap_wait_started_at = time.perf_counter()
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self.played.wait(), timeout=cap)
+        self._gap_wait_started_at = None
 
     async def pause_for_listen(self) -> None:
         """Mic opened (user about to ask): stop the producer's current step and hold,
@@ -1210,7 +1422,10 @@ async def ws(websocket: WebSocket) -> None:
                 await _dispatch(rt, orch, msg, kind)
             except ValidationError:
                 await rt.send_json({"type": "error", "message": "invalid message"})
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
+        # RuntimeError: Starlette raises a bare "WebSocket is not connected / need accept"
+        # when the peer drops during/around the handshake or a send already closed the
+        # socket — same teardown as a clean disconnect, not an application error.
         pass
     finally:
         n = _ip_conns.get(ip, 0) - 1
@@ -1242,6 +1457,9 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
     """Handle one inbound frame. Raises pydantic.ValidationError on a malformed typed
     message (position/language/theme/control), which the caller turns into an `error`
     frame without dropping the connection."""
+    # Walklog attribution for everything a message handler triggers in the orchestrator
+    # (route planning, accept/reject, commit paths) — otherwise those lines carry sid=-.
+    CURRENT_SID.set(rt.session_id)
     if kind == "position":
         p = WSPositionUpdate.model_validate(msg)
         fix = GeoPoint(lat=p.lat, lon=p.lon)
@@ -1265,6 +1483,17 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
             direction_deg=p.direction_deg, gaze_confidence=p.gaze_confidence
         )
         rt.live_pace = p.pace
+        now = time.perf_counter()
+        if rt._startup_trace_started_at is None:
+            rt._startup_trace_started_at = now
+        if rt._startup_trace_first_position_at is None:
+            rt._startup_trace_first_position_at = now
+        # Drain a stashed guided-plan request BEFORE waking the producer: planning sets
+        # nav.active/state=PROPOSED first, so the tick that follows sees the pending
+        # proposal and stays silent (no greeting during route planning).
+        if rt.pending_guided is not None:
+            g, rt.pending_guided = rt.pending_guided, None
+            await _plan_and_propose(rt, orch, g)
         rt.wake.set()
         # Object weaving: if a fresh place is now in the narrate bubble, flag it so the
         # producer slots it in at the NEXT sentence boundary (never mid-word). Cheap
@@ -1285,7 +1514,21 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
             # and keep the walk from rotating into a second one on a long pause.
             await orch.breadcrumb_paused(rt.session_id, rt.live_position)
     elif kind == "played":
+        now = time.perf_counter()
+        if rt._startup_trace_first_played_at is None:
+            rt._startup_trace_first_played_at = now
+        if rt._gap_wait_started_at is not None:
+            _walk.info(
+                "gap ack sid=%s wait=%dms",
+                rt.session_id,
+                int((now - rt._gap_wait_started_at) * 1000),
+            )
+            rt._gap_wait_started_at = None
         rt.played.set()
+    elif kind == "reserve_played":
+        rp = WSReservePlayed.model_validate(msg)
+        _walk.info("reserve played sid=%s id=%s", rt.session_id, rp.reserve_id)
+        await orch.ack_fact_reserve(rt.session_id, rp.reserve_id)
     elif kind == "listen":
         # mic opened/closed on the client: pause the tour while the user speaks
         if bool(msg.get("on")):
@@ -1365,43 +1608,73 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
             await rt.send_json({"type": "error", "message": "guided mode unavailable"})
             return
         if rt.live_position is None:
-            await rt.send_json({"type": "error", "message": "no position yet"})
+            # The guided client sends start_guided right after connect, BEFORE the first
+            # position. Stash it: the position branch drains the stash before waking the
+            # producer, so planning wins the race against the reactive tick — no greeting
+            # or area intro leaks out mid-planning. (An old client that sends position
+            # first takes the inline path below, unchanged.)
+            rt.pending_guided = g
+            _walk.info("start_guided stashed (no position yet) mode=%s", g.mode)
             return
-        dest = None
-        if g.dest_lat is not None and g.dest_lon is not None:
-            dest = GeoPoint(lat=g.dest_lat, lon=g.dest_lon)
-        try:
-            route = await orch.plan_route(
-                rt.session_id, rt.live_position, mode=g.mode,
-                budget_min=g.budget_min, budget_km=g.budget_km,
-                destination=dest, pick_landmark=g.pick_landmark, theme=g.theme,
-            )
-        except Exception:  # noqa: BLE001 — a planning failure must not drop the socket
-            _walk.exception("guided plan_route failed")
-            await rt.send_json({"type": "error", "message": "route planning failed"})
-            return
-        stops_ws: list[WSRouteStop] = []
-        prev = 0.0
-        for s in route.stops:
-            stops_ws.append(WSRouteStop(
-                index=s.order, name=s.place.name, category=s.place.category,
-                lat=s.place.location.lat, lon=s.place.location.lon,
-                significance=str(s.significance),
-                leg_distance_m=max(0.0, s.cum_distance_m - prev),
-            ))
-            prev = s.cum_distance_m
-        await rt.send_json(WSRouteProposal(
-            mode=route.mode, stops=stops_ws, polyline=route.polyline,
-            total_distance_m=route.total_distance_m, total_duration_s=route.total_duration_s,
-        ).model_dump())
+        await _plan_and_propose(rt, orch, g)
     elif kind == "route_accept":
+        _walk.info("route accepted")
+        SESSION_ID.set(rt.session_id)
+        SESSION_TIER.set(rt.tier)
+        USER_ADDRESS.set(rt.user_address)
         await orch.accept_route(rt.session_id)
+        # Explicit ack: the client must not flip into active guided UI until the server
+        # confirms it actually accepted the proposal. Without this, route_accept was a
+        # fire-and-forget race: if the socket died between proposal and tap, the client
+        # entered guided mode while the server still sat in PROPOSED.
+        await rt.send_json({"type": "route_accepted"})
         rt.wake.set()  # let the producer start leading (Phase 2)
     elif kind == "route_reject":
+        _walk.info("route rejected")
         await orch.cancel_route(rt.session_id)
     elif kind == "skip_stop":
         sk = WSSkipStop.model_validate(msg)
-        await orch.skip_stop(rt.session_id, sk.stop_index)
+        out = await orch.skip_stop(rt.session_id, sk.stop_index)
+        # A skip now replans the tail around the refused stop; forward the `reroute`
+        # frame so the client redraws the line/chip immediately.
+        if out is not None and out.nav_event:
+            await rt.send_json(out.nav_event)
+    elif kind == "prewarm":
+        # Home-screen prewarm: warm the session's Overpass disc (+ geocode/plan/facts) so
+        # the tour starts instantly on «Поехали». Deliberately touches NOTHING that could
+        # narrate: no live_position, no wake, no peek_bubble, no greeted — the producer
+        # stays parked (live_position is None), so no greeting, no walk row, no quota.
+        pw = WSPrewarm.model_validate(msg)
+        if not settings.prewarm_enabled or rt._quota_blocked():
+            return  # feature off / user can't start a tour anyway — spend nothing
+        pos = GeoPoint(lat=pw.lat, lon=pw.lon)
+        started = time.perf_counter()
+        orch._warm_inventory(rt.session_id, pos)  # self-gated (400 m re-anchor + 90 s cache)
+        st = await orch.store.load(rt.session_id)
+        orch._warm_startup_candidates(rt.session_id, pos, st.language)
+        orch._prewarm_startup_contract(
+            rt.session_id,
+            pos,
+            st.language,
+            st.narrative_plan.theme_override,
+        )
+        if rt.allow_geo_prewarm(pos):
+            orch._warm_area_intro(pos, st.language, st.narrative_plan.theme_override)
+            _walk.info(
+                "prewarm lat=%.5f lon=%.5f (geo+startup+contract warm) sid=%s t=%dms",
+                pw.lat,
+                pw.lon,
+                rt.session_id,
+                int((time.perf_counter() - started) * 1000),
+            )
+        else:
+            _walk.info(
+                "prewarm lat=%.5f lon=%.5f (inventory+startup+contract warm) sid=%s t=%dms",
+                pw.lat,
+                pw.lon,
+                rt.session_id,
+                int((time.perf_counter() - started) * 1000),
+            )
     elif kind == "address_form":
         # The user's optional grammatical form of address ("masculine"|"feminine"|"" neutral).
         af = WSSetAddressForm.model_validate(msg)
@@ -1412,3 +1685,49 @@ async def _dispatch(rt: _SessionRuntime, orch: Orchestrator, msg: dict, kind: st
         rt.user_address = form
     else:
         await rt.send_json({"type": "error", "message": f"unknown type: {kind}"})
+
+
+async def _plan_and_propose(rt: _SessionRuntime, orch: Orchestrator, g: WSStartGuided) -> None:
+    """Plan a guided route from the live position and send the proposal. Shared by the
+    inline start_guided path (position already known — old clients) and the stashed path
+    (start_guided arrived before the first position; drained by the position branch)."""
+    SESSION_ID.set(rt.session_id)
+    SESSION_TIER.set(rt.tier)
+    USER_ADDRESS.set(rt.user_address)
+    dest = None
+    if g.dest_lat is not None and g.dest_lon is not None:
+        dest = GeoPoint(lat=g.dest_lat, lon=g.dest_lon)
+    _walk.info(
+        "start_guided mode=%s budget_min=%s budget_km=%s dest=%s landmark=%s",
+        g.mode, g.budget_min, g.budget_km, bool(dest), g.pick_landmark,
+    )
+    try:
+        route = await orch.plan_route(
+            rt.session_id, rt.live_position, mode=g.mode,
+            budget_min=g.budget_min, budget_km=g.budget_km,
+            destination=dest, pick_landmark=g.pick_landmark, theme=g.theme,
+        )
+    except Exception:  # noqa: BLE001 — a planning failure must not drop the socket
+        _walk.exception("guided plan_route failed")
+        await rt.send_json({"type": "error", "message": "route planning failed"})
+        return
+    stops_ws: list[WSRouteStop] = []
+    prev = 0.0
+    for s in route.stops:
+        stops_ws.append(WSRouteStop(
+            index=s.order, name=s.place.name, category=s.place.category,
+            lat=s.place.location.lat, lon=s.place.location.lon,
+            significance=str(s.significance),
+            leg_distance_m=max(0.0, s.cum_distance_m - prev),
+        ))
+        prev = s.cum_distance_m
+    await rt.send_json(WSRouteProposal(
+        mode=route.mode, stops=stops_ws, polyline=route.polyline,
+        total_distance_m=route.total_distance_m, total_duration_s=route.total_duration_s,
+        steps=[st.model_dump() for st in route.nav_steps] if route.nav_steps else None,
+    ).model_dump())
+    _walk.info(
+        "route proposed stops=%d dist=%.0fm dur=%.0fs steps=%d source=%s",
+        len(route.stops), route.total_distance_m, route.total_duration_s,
+        len(route.nav_steps or []), settings.routing_source,
+    )

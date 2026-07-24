@@ -11,7 +11,7 @@ class AccountsConfig {
 
   // The REST base for /me + /walks. Defaults to deriving it from the WS URL
   // (ws://host/ws -> http://host), overridable with --dart-define=API_URL.
-  static const _wsUrl =
+  static const wsUrl =
       String.fromEnvironment('WS_URL', defaultValue: 'ws://localhost:8000/ws');
   static const _apiUrlOverride =
       String.fromEnvironment('API_URL', defaultValue: '');
@@ -26,8 +26,42 @@ class AccountsConfig {
   static bool get enabled =>
       supabaseUrl.isNotEmpty && supabaseAnonKey.isNotEmpty;
 
+  static bool get hasApiOverride => _apiUrlOverride.isNotEmpty;
+
   static String get apiBase =>
-      _apiUrlOverride.isNotEmpty ? _apiUrlOverride : _deriveApiBase(_wsUrl);
+      hasApiOverride ? _apiUrlOverride : _deriveApiBase(wsUrl);
+
+  static Uri? get wsUri => Uri.tryParse(wsUrl);
+  static Uri? get apiUri => Uri.tryParse(apiBase);
+
+  static String? endpointConfigError({required bool isReleaseBuild}) {
+    final ws = wsUri;
+    if (ws == null || !_validUri(ws, const {'ws', 'wss'})) {
+      return 'Некорректный WS_URL: $wsUrl';
+    }
+    final api = apiUri;
+    if (api == null || !_validUri(api, const {'http', 'https'})) {
+      final source = hasApiOverride ? 'API_URL' : 'WS_URL';
+      return 'Некорректный $source: $apiBase';
+    }
+    if (isReleaseBuild) {
+      if (_looksLocalHost(ws.host)) {
+        return 'APK собран без prod WS_URL: $wsUrl';
+      }
+      if (_looksLocalHost(api.host)) {
+        return 'APK собран без prod API_URL: $apiBase';
+      }
+    }
+    return null;
+  }
+
+  static bool _validUri(Uri uri, Set<String> schemes) =>
+      schemes.contains(uri.scheme) && uri.host.isNotEmpty;
+
+  static bool _looksLocalHost(String host) {
+    final h = host.trim().toLowerCase();
+    return h == 'localhost' || h == '127.0.0.1' || h == '0.0.0.0';
+  }
 
   static String _deriveApiBase(String wsUrl) {
     var u = wsUrl;

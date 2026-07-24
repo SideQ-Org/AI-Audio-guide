@@ -143,6 +143,19 @@ class Settings(BaseSettings):
     # `overpass_url` at a paid or SELF-HOSTED Overpass (the public mirrors are a single
     # point of failure + fair-use rate-limited) and optionally list backups here.
     overpass_mirrors: str = ""
+    # Mirror RACE for a fetch: the first N mirrors are queried concurrently (staggered
+    # by overpass_race_stagger_s so a fast healthy primary usually answers alone) and
+    # the first success wins. Measured: the primary's server-side execution is ~5 s on a
+    # dense disc and public mirrors fail unpredictably — sequential failover stacked
+    # timeout+retry into the 10-26 s cold fetches seen in prod walk logs.
+    overpass_race: int = 2
+    overpass_race_stagger_s: float = 1.5
+    # L2 DISK cache of raw Overpass responses (dir path; "" = off). Survives restarts —
+    # prod restarts wiped every warm disc, so the next walk paid the cold fetch again —
+    # and is shared across sessions walking the same area. OSM data changes on the scale
+    # of days; the query center is snapped to a ~110 m grid so repeat walks re-hit it.
+    overpass_disk_cache: str = ""
+    overpass_disk_ttl_s: float = 86400.0
     # Reverse geocoding (city/district/street for the "general -> specific" monologue).
     #   overpass -> derive admin areas + street from the Overpass endpoint above
     #   none     -> no geocoding (guide won't name the area)
@@ -152,10 +165,49 @@ class Settings(BaseSettings):
     # is still off the hot-path and cheap relative to the LLM calls. 35 m (was 90): the
     # street was lagging up to 90 m behind, so the guide named the street you'd left.
     geocoder_min_move_m: float = 35.0
+    # Grid cache for reverse geocoding (~11 m cells — fine, so parallel streets never
+    # share a cached address and the street is resolved for where you actually are; a
+    # coarse cell named the wrong street after a turn). A block's address is stable, so
+    # a standing/slow walker resolves instantly from memory instead of a round-trip.
+    geocoder_cache_ttl_s: float = 21600.0
+    # Freshness vs latency (fixes the "рассказывал про Парковую, которую я прошёл" freeze):
+    # a cache MISS while barely past the move-gate carries the last address one tick +
+    # warms the cell in the background; but once the walker is more than this far from the
+    # last COMMITTED fix, the old street is stale — resolve NOW (bounded-blocking), because
+    # the pure background-carry never caught up while walking (each fresh 11 m cell missed,
+    # so the street froze on the first fix until the walker stopped). Self-hosted Overpass
+    # answers a point query in ~1 s, so a short blocking resolve keeps the street correct.
+    geocoder_carry_max_m: float = 40.0
+    geocoder_block_timeout_s: float = 3.0
 
     # Area-level monologue (the spine that fills gaps between objects)
     area_enrich: bool = True  # fetch verified facts about the district/city (web search)
+    # DEEPEN: when the current area facts are all told, fetch the NEXT rotated search
+    # angle (history → people → streets → today → events → names → industry → wars →
+    # temples → nature → daily life → curiosities → science → culture) and append the
+    # fresh facts, so a walker lingering in one area keeps hearing REAL new facts instead
+    # of going silent — the guide "постоянно ищет факты про место, пока рассказывает".
+    # Number of extra rounds beyond the first batch (0 disables deepening); capped at the
+    # number of _AREA_ANGLES (14). Each round is a background web search, gated by the
+    # per-angle in-flight dedup + disk cache, so this doesn't hammer the provider.
+    area_deepen_max: int = 13
+    # Trigger a deepen fetch once the not-yet-told area facts fall to this few. 3 (was 1):
+    # start fetching the next angle while ~3 facts (≈30-45 s of talking) still remain, so
+    # the fresh batch lands BEFORE the current runs dry — hides the ~15 s web-search gap
+    # that caused the 2-4 tick silences between rounds.
+    area_deepen_low_facts: int = 3
+    # Warm this many angle-rounds AHEAD in one go when deepening, so the pipeline stays a
+    # step in front of delivery (two searches in flight → the round after next is ready too).
+    area_deepen_prefetch_ahead: int = 2
     area_max_beats: int = 4  # area beats per area before easing off (objects reset this)
+    # Offline reserve target: build a queue by estimated spoken duration, not just a handful of
+    # fallback items. Guided mode can prepare more coherent long-form material, so it gets a
+    # bigger default budget than free walk. Hard caps bound queue growth and payload size.
+    reserve_target_s: float = 360.0
+    reserve_target_guided_s: float = 480.0
+    reserve_hard_cap_s: float = 600.0
+    reserve_max_items: int = 24
+    reserve_audio_head_items: int = 6
     # Anti-fabrication: the area cascade ("tell an atypical fact про <city/district/street>")
     # makes the model INVENT specifics when it has no verified facts (a field walk fabricated
     # a "метеоритный кратер" in a fact-less suburb — a facts-only violation). When True, the
@@ -170,6 +222,31 @@ class Settings(BaseSettings):
     # many grounded city lines in one dry stretch the fallback goes quiet; a real object or a new
     # area re-arms it. Keep small: a fact-less town deserves a line or two, not a lecture.
     area_cityless_max: int = 2
+    # Dry-area gate: after this many CONSECUTIVE empty/suppressed area beats stop calling
+    # the narrator for this area at all (each call burns 9-18 s of LLM latency to produce
+    # [SILENCE] — the 17.07 walk logged 4 in a row). A real object, a new street, or a
+    # new area re-opens the tap.
+    area_dry_max: int = 3
+    # Restore the OLD blocking inline area-facts fetch inside the tick (up to
+    # enrich_timeout_s of silence). Default off: the fetch is warmed in the background
+    # and the beat is skipped for one tick instead.
+    area_enrich_inline: bool = False
+    # Home-screen prewarm (WSPrewarm): the client pings its position before the tour so
+    # the Overpass disc / geocode / area plan+facts are warm when «Поехали» is tapped.
+    # The inventory warm self-gates (ensure() refetches only >400 m from the anchor +
+    # a 90 s Overpass HTTP cache); the GEO warm (reverse-geocode + planner LLM + web
+    # facts) is gated here because the geocoder has no cache of its own.
+    prewarm_enabled: bool = True
+    prewarm_min_move_m: float = 150.0
+    prewarm_min_interval_s: float = 120.0
+    # Shared persistent fact buffer (object + area facts). Keeps a warm factual substrate across
+    # startup / route planning / transient network drops; rendered narration still stays in memory.
+    fact_buffer_path: str = ""
+    # Soft anti-"вторая библиотека подряд": an ordinary (no facts, <HIGH) object whose
+    # category was narrated less than the cooldown ago is rank-demoted by the penalty
+    # factor (a lone candidate still wins — coverage is never lost, only reordered).
+    narrate_category_cooldown_s: float = 480.0
+    narrate_category_penalty: float = 2.5
     # Pre-generate the NEXT outline area beat in the background WHILE the current one is
     # being spoken, so its LLM latency (10-17 s cold on a field walk) is hidden behind
     # delivery instead of opening a silent gap between beats ("медленно переключался
@@ -202,6 +279,17 @@ class Settings(BaseSettings):
     resume_bridge: bool = True
     resume_bridge_obj_radius_m: float = 70.0
     resume_bridge_area_radius_m: float = 180.0
+    # Late-binding seam stitch: a pre-generated blurb (object _narr_cache / prefetched area beat)
+    # was rendered minutes before delivery against stale context, so its opening can't connect to
+    # what was just spoken — the "disconnected cards" seam. When ON, a fast cheap LLM call rewrites
+    # ONLY its first sentence at delivery time to continue the last spoken line; any failure or
+    # timeout falls back to the untouched text. Live (non-cached) renders already see a fresh
+    # CONTINUE_FROM and are never stitched. The timeout is deliberately tight: the one sensitive
+    # spot is the weave insert, where the stitch delays a "speak instantly" moment. 3.0 covers
+    # deepseek-chat's measured 1.6-2.9 s on the ANSWER_FAST route (probed live on prod, and the
+    # QUALITY winner there — Groq-pinned llama/kimi were faster but fabricated or garbled RU).
+    seam_stitch: bool = True
+    seam_stitch_timeout_s: float = 3.0
     # Speak a short neutral "let me think" filler the instant a question arrives, so the STT
     # (~3 s) + answer LLM (~2 s) gap after the user asks isn't dead silence. The real answer
     # follows as the next reply. Off => answer with no filler (the old behaviour).
@@ -229,13 +317,17 @@ class Settings(BaseSettings):
     # WebSearch enrichment (real facts via the OpenRouter "web" plugin). Kept off
     # the hot-path: only the top-K nearest candidates are enriched per tick, with a
     # timeout, and results are cached (in-memory + optional JSON file).
-    web_search_max_results: int = 2  # web results per place (OpenRouter bills per result)
-    web_search_max_tokens: int = 400
-    enrich_top_k: int = 2  # how many top-ranked candidates to enrich per tick (current narration)
+    # More facts per COURSE (both object and area enrichment use these): raised so each
+    # search returns a richer batch — the guide has more real material per angle before it
+    # rotates to the next course (people → events → architecture → …). OpenRouter bills per
+    # web result, but the paid tier wants depth ("пусть ищет все, больше фактов").
+    web_search_max_results: int = 5  # web results per place
+    web_search_max_tokens: int = 800
+    enrich_top_k: int = 3  # how many top-ranked candidates to enrich per tick (current narration)
     # Look-ahead fact warming: facts for objects you're walking TOWARD (in the course
     # cone, within the live window) are fetched in the background so they're cached
     # before you arrive — narration on approach is then instant, not a cold web search.
-    enrich_lookahead_k: int = 4
+    enrich_lookahead_k: int = 6
     # Web-search timeout. MUST exceed the real round-trip or EVERY area comes back factless and
     # the guide goes silent (cityless cap). Measured on prod: deepseek + the OpenRouter web plugin
     # distils ~3000 tokens of injected search results, which takes ~14-16 s for an area query — so
@@ -253,6 +345,19 @@ class Settings(BaseSettings):
     # quality (search every non-wiki place); raise it to trade some facts for cost.
     enrich_min_weight: float = 0.0
     enrich_cache_path: str = ""  # "" => memory only; a path persists facts across runs
+    # On a first web-search miss, retry ONCE with a broadened natural-language query
+    # (type words + name + city) before committing the permanent negative cache — the
+    # exact form misses small local monuments the loose form finds.
+    enrich_retry_broaden: bool = True
+    # A NEGATIVE web-search result (no facts found) is cached with this TTL instead of
+    # forever: a new/renamed object with no web presence today may gain an article — a
+    # permanent negative froze it factless for the lifetime of the cache file. 7 days.
+    enrich_negative_ttl_s: float = 604800.0
+    # Steering prefix for the OpenRouter web plugin's search query — bias the engine
+    # toward FRESH sources so «что здесь сейчас» reflects the current state.
+    web_search_prompt: str = (
+        "Prefer recent, authoritative sources; the place's CURRENT state and use matter."
+    )
 
     # STT (voice barge-in)
     stt_backend: str = "mock"  # mock | faster_whisper (local CPU/GPU) | openrouter (cloud, fast)
@@ -343,6 +448,35 @@ class Settings(BaseSettings):
     # ~110 m up the street) were falling just outside 100 m and going unnarrated on sparse walks.
     # Still much tighter than weave_radius_m so it doesn't announce a place 150-200 m off.
     reach_radius_m: float = 130.0
+    # A WIDER reach for genuinely notable objects (HIGH/LANDMARK significance or a
+    # museum-grade category weight): a museum 150 m ahead is worth reaching for even
+    # though a shop at that range isn't. Field-found: at ВДНХ the Tretyakov pavilion
+    # hovered at 115-146 m and was never narrated while entrance arches got told thrice.
+    reach_radius_notable_m: float = 190.0
+    # Major-road narration (МКАД, шоссе, named interchanges): you can't walk them, so the
+    # normal bubble/reach never fires — this WIDER, in-cone trigger narrates a big named
+    # road ONCE when you come near it. SECONDARY: it only runs when there's no real object
+    # in the bubble AND after the notable-object reach, so it can't outrank a museum you're
+    # passing; deduped by name (LINEAR) so "ты у МКАД" is said once, never repeated. 0 off.
+    narrate_major_roads: bool = True
+    road_reach_radius_m: float = 280.0
+    # An elaborate follow-up ("more about the last object") only makes sense while the
+    # walker is still NEAR that object. Past this distance the moment has passed — the
+    # guide must not keep talking about the courthouse the user already left behind
+    # ("я уже ушёл от суда, а он мне опять про суд" — field feedback).
+    elaborate_max_distance_m: float = 90.0
+    # ON again (19.07, paired with the DEEPEN mechanism above): a factless area beat is
+    # skipped, because without verified facts the model FABRICATES specific street
+    # history — "Хенель-Клаусс-штрассе, где ОТКРЫЛСЯ ПЕРВЫЙ в Дрездене магазин
+    # самообслуживания", "ИМЕННО ЗДЕСЬ в 1991-м..." (real prod fabrications that read as
+    # "путает улицы, врёт"). The reason this gate caused dead silence BEFORE was that
+    # nothing refilled the facts once spent; now `area_deepen_max` keeps fetching fresh
+    # REAL facts (history → people → streets → today), so the monologue talks on verified
+    # material and only goes quiet when a place genuinely has nothing left — which is the
+    # correct outcome (silence beats invented "first-in-the-city" claims). The capped
+    # fact-less CITY fallback (area_cityless_max, well-known city knowledge only) and an
+    # explicit user focus stay allowed.
+    area_beat_requires_new_facts: bool = True
     # Cap how many (nearest) candidates are considered per tick — bounds the
     # Scorer's input/output size (its JSON grows linearly with candidate count).
     scorer_max_candidates: int = 6
@@ -354,6 +488,14 @@ class Settings(BaseSettings):
     inventory_enabled: bool = True
     inventory_radius_m: float = 800.0  # wide prefetch disc cached per session
     inventory_refetch_frac: float = 0.5  # re-fetch after moving > frac*radius from the anchor
+    # PREDICTIVE background refresh: once the walker is past this fraction of the disc
+    # radius from the anchor, a re-centred disc is fetched in the BACKGROUND and swapped
+    # in when ready — the old walked-past-edge refetch ran inside the tick and blocked
+    # narration for the full cold fetch (10-26 s measured in prod walk logs). The stale
+    # disc keeps serving meanwhile (stale-while-revalidate); only a session with NO disc
+    # at all (or teleported outside it entirely) still fetches in the foreground.
+    inventory_predict_frac: float = 0.35
+    inventory_refresh_min_gap_s: float = 20.0  # min seconds between background refreshes
     inventory_pass_margin_m: float = 40.0  # recede this far past closest-approach => "passed"
     inventory_ttl_s: float = 3600.0  # evict idle session inventories
     inventory_max_sessions: int = 2000  # LRU cap on cached inventories
@@ -402,6 +544,25 @@ class Settings(BaseSettings):
     nav_arrival_radius_m: float = 35.0  # within this of a pending stop => "reached", narrate it
     nav_teaser_radius_m: float = 150.0  # tease the next stop once inside this
     nav_between_mode: str = "teaser"  # teaser | silent | area — what to do between stops
+    # Pass-by narration on the leg BETWEEN stops: the guide still tells the story of an
+    # interesting object it is leading the walker past (same narrate bubble + pipeline as
+    # the free walk), deduped against the route's own stops. Without it a guided leg is
+    # silence + turn cues, and the walker passes museums unremarked (field feedback).
+    nav_passby_enabled: bool = True
+    nav_passby_min_gap_s: float = 40.0  # min seconds between pass-by narrations on a leg
+    # Overshoot retire: a stop the walker came near (min approach <= near_m) but is now
+    # clearly receding from (current - min approach >= recede_m) is retired as passed —
+    # narrated in the past tense — instead of stalling the tour on it forever (GPS jump,
+    # a tight arrival radius, or the walker simply not stopping).
+    nav_overshoot_near_m: float = 110.0
+    nav_overshoot_recede_m: float = 60.0
+    # Turn-by-turn navigator cues (guided mode, OSRM steps): deterministic spoken
+    # directions («через сто метров поверни направо на Парковую») between stops. Only
+    # active when the route came from OSRM (straight-line routes carry no maneuvers).
+    nav_cues_enabled: bool = True
+    nav_cue_fire_m: float = 35.0  # speak the turn command inside this radius
+    nav_cue_preannounce_m: float = 110.0  # "через N метров …" heads-up inside this
+    nav_cue_min_gap_s: float = 8.0  # min seconds between spoken cues (anti-spam)
     nav_offroute_m: float = 50.0  # distance off the remaining route line that counts as "off-route"
     nav_offroute_debounce_s: float = 20.0  # hold off-route this long before rerouting
     nav_reroute_min_interval_s: float = 30.0  # min gap between reroutes (anti-spam)
@@ -529,7 +690,10 @@ class Settings(BaseSettings):
     # object (_start_fact_warm), so the fix for "no facts" is research, not fabrication/silence.
     # Defaults preserve today's behaviour (paid + MEDIUM+); broaden to research more.
     fact_warm_tier_min: str = "paid"    # paid | free  (free ⇒ research on the free tier too)
-    fact_warm_sig_min: str = "MEDIUM"   # min significance to research (LOW|MEDIUM|HIGH|LANDMARK)
+    fact_warm_sig_min: str = "LOW"      # min significance to research (LOW|MEDIUM|HIGH|LANDMARK)
+    # LOW (was MEDIUM): «пусть ищет все» — the background research now also covers
+    # ordinary-but-real objects; the paid-tier gate inside the enricher still bounds
+    # the spend, and the interest RANKING (rank_facts) keeps only the best on top.
 
     # --- Free/paid tier limits (feature: account tiers) --------------------------
     # Free accounts are cost-capped so ads roughly offset the (DeepSeek + wiki-only)

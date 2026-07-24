@@ -97,8 +97,12 @@ def get_engine() -> AsyncEngine:
             _engine = create_async_engine(
                 url,
                 echo=settings.db_echo,
-                pool_size=5,
-                max_overflow=10,
+                # Prod/supavisor session-mode exhaustion fix: community/profile screens fan out many
+                # concurrent requests, and the old 5+10 pool matched the pooler's hard 15-client cap
+                # exactly — bursts hit EMAXCONNSESSION instead of queueing. Keep a smaller local pool
+                # so callers wait briefly rather than blowing the session pooler up.
+                pool_size=3,
+                max_overflow=2,
                 pool_recycle=1500,
                 future=True,
             )

@@ -816,11 +816,36 @@ class AppLocalizationsRu extends AppLocalizations {
   String get statsSoon => 'Здесь появится ваша статистика';
 
   @override
-  String get communitySoonTitle => 'Комьюнити скоро';
+  String get communityStreakLeave => 'Покинуть стрик';
 
   @override
-  String get communitySoonBody =>
-      'Здесь появятся друзья, общие маршруты и челленджи.';
+  String get communityUnfriend => 'Удалить из друзей';
+
+  @override
+  String communityUnfriendConfirm(String name) {
+    return 'Удалить $name из друзей?';
+  }
+
+  @override
+  String communityRequestOutgoing(String handle) {
+    return 'Заявка отправлена: @$handle';
+  }
+
+  @override
+  String get communityAlreadyFriends => 'Уже в друзьях';
+
+  @override
+  String feedWalkShared(String name) {
+    return '$name поделился прогулкой';
+  }
+
+  @override
+  String get communityCoWalkShare => 'Поделиться кодом';
+
+  @override
+  String communityCoWalkShareMsg(String code) {
+    return 'Пойдём гулять вместе в AI Guide! Код совместной прогулки: $code';
+  }
 
   @override
   String get sectionAccount => 'Аккаунт';

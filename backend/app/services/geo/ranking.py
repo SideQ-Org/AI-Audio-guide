@@ -65,13 +65,23 @@ _GAZE_BOOST_HIGH = 1.5
 _GAZE_BOOST_LOW = 1.2
 
 
+# Left/right is asserted ONLY when the object is CLEARLY to the side (|rel| in this band).
+# The band starts well past the ahead cone on purpose: the left↔right sign only flips near
+# rel≈0, so requiring ≥_SIDE_MIN_DEG off-axis makes a residual heading error (magnetic
+# declination ~10-13°, compass jitter) UNABLE to flip the side of anything we call a side —
+# a near-ahead object stays "ahead" instead of ping-ponging left/right ("путается лево-право").
+_SIDE_MIN_DEG = 50.0   # below this => "ahead" (not lateral enough to name a side safely)
+_SIDE_MAX_DEG = 130.0  # above this => "behind"
+
+
 def _side(rel_bearing: float, confidence: GazeConfidence) -> str:
     """Map a signed relative bearing to a spoken side. ahead/behind are safe from
-    the GPS course; left/right require a real facing (gaze_confidence=high)."""
+    the GPS course; left/right require a real facing (gaze_confidence=high) AND a
+    clearly-lateral angle, so a skewed heading can't flip left↔right."""
     a = abs(rel_bearing)
-    if a <= GAZE_CONE_DEG:
+    if a < _SIDE_MIN_DEG:
         return "ahead"
-    if a >= 180.0 - GAZE_CONE_DEG:
+    if a > _SIDE_MAX_DEG:
         return "behind"
     if confidence is GazeConfidence.HIGH:
         return "left" if rel_bearing < 0 else "right"
@@ -112,8 +122,10 @@ def build_candidates(
         # snapped vertex (B1). A point object stays a plain haversine to its location.
         if place.geometry:
             distance, npt = nearest_on_geometry(position, place.geometry)
+            inside_geometry = distance < 1.0
         else:
             distance, npt = haversine_m(position, place.location), place.location
+            inside_geometry = False
         if distance > radius_m:
             continue
         in_cone = False
@@ -134,6 +146,8 @@ def build_candidates(
                 gaze_confidence=heading.gaze_confidence,
                 relative_bearing_deg=rel_bearing,
                 side=side,
+                nearest_point=npt,
+                inside_geometry=inside_geometry,
             )
         )
     candidates.sort(key=lambda c: _score(c, radius_m), reverse=True)

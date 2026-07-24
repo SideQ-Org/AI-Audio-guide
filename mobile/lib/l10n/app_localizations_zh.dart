@@ -807,10 +807,36 @@ class AppLocalizationsZh extends AppLocalizations {
   String get statsSoon => '你的统计将显示在这里';
 
   @override
-  String get communitySoonTitle => '社区即将上线';
+  String get communityStreakLeave => '退出连续打卡';
 
   @override
-  String get communitySoonBody => '好友、共享路线和挑战将在这里呈现。';
+  String get communityUnfriend => '删除好友';
+
+  @override
+  String communityUnfriendConfirm(String name) {
+    return '将 $name 从好友中删除？';
+  }
+
+  @override
+  String communityRequestOutgoing(String handle) {
+    return '已发送请求：@$handle';
+  }
+
+  @override
+  String get communityAlreadyFriends => '已是好友';
+
+  @override
+  String feedWalkShared(String name) {
+    return '$name 分享了一次散步';
+  }
+
+  @override
+  String get communityCoWalkShare => '分享代码';
+
+  @override
+  String communityCoWalkShareMsg(String code) {
+    return '来 AI Guide 和我一起散步吧！同行代码：$code';
+  }
 
   @override
   String get sectionAccount => '账户';

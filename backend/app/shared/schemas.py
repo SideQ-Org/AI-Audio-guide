@@ -145,6 +145,10 @@ class NarratorFlags(BaseModel):
     # The walker RETURNED to a place told earlier this walk — acknowledge it briefly and add a
     # FRESH detail (see the REVISIT block), never re-tell what HISTORY already covered.
     revisit: bool = False
+    # A big road / interchange (МКАД, шоссе) the walker is coming NEAR but can't walk onto:
+    # frame as "рядом/впереди — <road>, пешком не пройти", tell what it is + why notable,
+    # never "проходишь мимо" / "справа от тебя вход".
+    approaching_road: bool = False
     preferences: ControlPatch | None = None
 
 
@@ -221,6 +225,14 @@ class AreaInput(BaseModel):
     # Rotating rhetorical angle for this beat (observation|history|human|sensory|
     # transition) so consecutive area paragraphs differ in SHAPE, not just wording (A1).
     beat_mode: str | None = None
+    # What the walker can ACTUALLY SEE right now (nearby in-cone object names). Spatial
+    # anchoring («вот этот дом», «справа») is allowed ONLY for these; everything else
+    # must stay abstract — no pointing at a random building at the end of the street.
+    visible: list[str] = Field(default_factory=list)
+    # True only when the walker is PHYSICALLY on the named street (street_confident).
+    # When False they're in courtyards / between streets: the beat must NOT anchor to a
+    # street by name («здесь, на …»), it tells the district/city instead.
+    on_street: bool = False
     language: str = "ru"
 
 
@@ -293,6 +305,21 @@ class NavStopStatus(StrEnum):
     SKIPPED = "skipped"  # user (or a reroute) dropped it
 
 
+class NavManeuver(BaseModel):
+    """One turn-by-turn maneuver on a guided route (from OSRM steps): where it happens,
+    what to do, and the way turned onto. Persisted in NavState so the spoken-once flags
+    survive reconnect/resume. All fields defaulted — old persisted sessions parse."""
+
+    kind: str = ""  # OSRM maneuver type: turn / fork / end of road / roundabout / arrive
+    modifier: str = ""  # left / right / slight left / straight / uturn / ""
+    lat: float = 0.0
+    lon: float = 0.0
+    name: str = ""  # the way turned ONTO ("" for unnamed paths)
+    distance_m: float = 0.0  # to the NEXT maneuver along the way
+    pre_said: bool = False  # the "через N метров …" heads-up was spoken
+    said: bool = False  # the at-the-turn command was spoken
+
+
 class NavStop(BaseModel):
     """One planned stop on a guided route — a place worth stopping at, in visit order."""
 
@@ -306,18 +333,24 @@ class NavStop(BaseModel):
     status: NavStopStatus = NavStopStatus.PENDING
     leg_distance_m: float = 0.0  # walking distance from the previous stop to this one
     teased: bool = False  # the "coming up" teaser for this stop was already spoken
+    leg_said: bool = False  # the scripted leg beat from the PREVIOUS stop already spoken
+    # Closest approach so far (overshoot detection): once the walker was near and is now
+    # clearly receding, the stop is retired as passed instead of stalling the tour forever.
+    min_dist_m: float = 1e12
     # The full place — kept so the stop can be narrated even when it's outside the narrow
     # live inventory disc (the route is fetched over a wider radius than inventory_radius_m).
     place: Place | None = None
 
 
 class StopBeat(BaseModel):
-    """The scripted role of one stop inside the whole-route tour (TourScripter). A director's
-    note per stop — not the spoken text (that's generated per stop with this as context)."""
+    """The scripted role of one stop inside the whole-route tour. The stop itself gets an
+    `angle`; the leg AFTER it can also carry one short spoken `leg` beat so the route feels
+    like one continuous excursion, not stop blurbs separated by silence."""
 
     order: int
     angle: str = ""  # what to emphasise at this stop (its role in the overall story)
-    bridge: str = ""  # the transition + anticipation of the next stop (spoken on the leg between)
+    bridge: str = ""  # the transition + anticipation of the next stop (spoken on approach)
+    leg: str = ""  # one short spoken beat for the leg AFTER this stop, before the teaser zone
     callback: str = ""  # an optional reference back to an earlier stop ("" = none)
 
 
@@ -326,6 +359,7 @@ class RouteScript(BaseModel):
 
     theme: str = ""  # the through-line of the walk
     intro: str = ""  # the opening overview (first thing spoken after accept)
+    lead_in: str = ""  # one short opening leg beat before the first stop/teaser zone
     beats: list[StopBeat] = Field(default_factory=list)  # one per stop, in route order
     finale: str = ""  # the closing word at the end of the route
 
@@ -343,6 +377,9 @@ class RouteScriptInput(BaseModel):
     stops: list[ScriptStop] = Field(default_factory=list)  # ordered route stops
     theme_override: str | None = None  # a topic the user explicitly asked for (wins over theme)
     address: Address = Field(default_factory=Address)
+    route_facts: str | None = None  # verified route-wide context (city/district/street / today)
+    route_outline: list[str] = Field(default_factory=list)  # ordered topics for long legs
+    route_streets: list[str] = Field(default_factory=list)  # named streets actually traversed
     language: str = "ru"
 
 
@@ -373,12 +410,48 @@ class NavState(BaseModel):
     script: RouteScript | None = None
     script_ready: bool = False
     intro_done: bool = False  # the whole-route intro overview was already spoken (once)
+    lead_in_done: bool = False  # the opening first-leg beat was already spoken (once)
     finale_done: bool = False  # the closing word was already spoken (once)
+    # Turn-by-turn navigator (OSRM steps): the route's maneuvers with spoken-once flags.
+    # [] when the route came from the straight-line fallback (chip-only leading). All
+    # additive-with-defaults so pre-upgrade persisted sessions still parse.
+    steps: list[NavManeuver] = Field(default_factory=list)
+    next_step_i: int = 0  # index of the next un-passed maneuver
+    last_cue_at: float | None = None  # epoch s of the last spoken cue (rate limit)
+    # Pass-by narration on the leg between stops (nav_passby_*): rate-limit stamp.
+    last_passby_at: float | None = None
 
 
 # --------------------------------------------------------------------------- #
 # session
 # --------------------------------------------------------------------------- #
+class FactReserveItem(BaseModel):
+    """One buffered fallback utterance the client may speak while the live path is degraded.
+
+    Session-scoped and short-lived: it is NOT part of the global fact substrate, and it must not
+    mark facts as told until the client confirms it actually played the item."""
+
+    id: str
+    kind: Literal["object", "area", "fallback", "bridge"] = "fallback"
+    scope: str = "area"
+    subject_key: str = ""
+    language: str = "ru"
+    text: str
+    expires_at: float | None = None
+    card: str | None = None
+    image: str | None = None
+    category: str | None = None
+    place_id: str | None = None
+    place_name: str | None = None
+    estimated_seconds: float = 0.0
+    batch_id: str = ""
+    guide_mode: str = "free"
+    area_key: str | None = None
+    route_version: str = ""
+    stop_order: int | None = None
+    startup_contract: bool = False  # guaranteed first meaningful block after the greeting
+
+
 class SessionState(BaseModel):
     session_id: str
     # Supabase user id (JWT `sub`) once the client authenticates over WS; None = guest
@@ -440,6 +513,10 @@ class SessionState(BaseModel):
     # area-level monologue (general -> specific spine)
     last_geo_pos: GeoPoint | None = None  # where address was last resolved (move-gated)
     last_street: str | None = None  # last resolved street (a change => weave a transition)
+    # Names of objects the walker can SEE right now (in-cone, near) — refreshed per
+    # tick; area beats may spatially anchor ONLY to these (no «вот этот дом» pointing
+    # at something the user can't see).
+    visible_now: list[str] = Field(default_factory=list)
     area_key: str | None = None  # district|city signature; change => new area, reset below
     area_facts: str | None = None  # verified facts about the current area (fetched once)
     area_intro_done: bool = False  # the area opener (+ plan) was already delivered
@@ -453,12 +530,36 @@ class SessionState(BaseModel):
     # how many ungrounded city lines a dry stretch may emit before going quiet, since the
     # model fabricates fresh (non-repeating) specifics forever otherwise. Reset by object/area.
     area_cityless_beats: int = 0
+    # Dry-area gate: consecutive area beats that came back empty/[SILENCE]/suppressed.
+    # At area_dry_max the monologue stops spending 9-18 s LLM calls on a talked-out
+    # area; reset by a real object, a new street, or a new area.
+    area_silent_streak: int = 0
+    # Ticks the area beat was skipped waiting for the background facts warm (bounded at
+    # 2, then ONE inline fetch settles the area — a dry/failed warm can't skip forever).
+    area_warm_skips: int = 0
+    # Deepen round for area facts: when the current batch is all told, the guide fetches
+    # the NEXT rotated search angle (history → people → streets → today) and appends the
+    # fresh facts, so a long stay in one area keeps finding real material instead of
+    # going silent. Bounded by area_deepen_max; reset on a new area.
+    area_fetch_round: int = 0
+    # Category cooldown ledger (category -> epoch seconds when last narrated): softly
+    # demotes a SECOND ordinary same-category object right after the first ("вторая
+    # библиотека подряд" reads as a repeat). Small, capped in _commit_step.
+    last_cat_told: dict[str, float] = Field(default_factory=dict)
     # the story arc — formed when an area is entered, augmented along the route
     narrative_plan: NarrativePlan = Field(default_factory=NarrativePlan)
     # working memory of the whole walk (narrative memory graph, phase 1): what was said,
     # which objects/topics were covered — anti-repeat over the ENTIRE walk (not the
     # narration_history window) and the substrate for callbacks / long-term memory.
     memory: WalkMemory = Field(default_factory=WalkMemory)
+    # Guaranteed first meaningful block after the canned greeting. Prepared during prewarm/greeting
+    # and consumed before the normal reactive runtime path, so startup does not depend on whether
+    # planner/area/object generation happens to be ready live on the next tick.
+    startup_block: FactReserveItem | None = None
+    # Session-scoped reserve for degraded/offline playback. These lines are buffered from real
+    # facts but are NOT considered told until the client explicitly acks playback.
+    fact_reserve: list[FactReserveItem] = Field(default_factory=list)
+    played_reserve_ids: list[str] = Field(default_factory=list)
     # Proactive guided mode ("Проведи меня"): "free" = the reactive guide (unchanged
     # default), "guided" = the guide leads a pre-planned route. `nav` holds that route +
     # progress. Both default so old clients / free walks behave exactly as before.
@@ -484,6 +585,18 @@ class WSPositionUpdate(BaseModel):
     direction_deg: float | None = Field(default=None, ge=0.0, le=360.0)
     gaze_confidence: GazeConfidence = GazeConfidence.LOW
     pace: Pace = Pace.SLOW
+
+
+class WSPrewarm(BaseModel):
+    """Home-screen prewarm: the client sends its position BEFORE any tour so the backend
+    pre-fetches the session's Overpass disc + geocode + area plan/facts. Deliberately NOT
+    a position update: it must never set live_position / wake the producer / greet — the
+    tour (and everything user-visible) starts only with the first real `position`."""
+
+    type: Literal["prewarm"] = "prewarm"
+    lat: float = Field(ge=-90.0, le=90.0)
+    lon: float = Field(ge=-180.0, le=180.0)
+    direction_deg: float | None = Field(default=None, ge=0.0, le=360.0)
 
 
 class WSUserUtterance(BaseModel):
@@ -530,6 +643,14 @@ class WSPlayed(BaseModel):
     tells the server's narration producer to emit the next one."""
 
     type: Literal["played"] = "played"
+
+
+class WSReservePlayed(BaseModel):
+    """Client confirmed it actually played a buffered reserve item. Only this ack may mark
+    the reserve line's facts as told in WalkMemory."""
+
+    type: Literal["reserve_played"] = "reserve_played"
+    reserve_id: str
 
 
 class WSSetTheme(BaseModel):
@@ -601,6 +722,13 @@ class WSTrack(BaseModel):
     final: bool = False
 
 
+class WSReserve(BaseModel):
+    """Buffered fallback utterances the client may store for degraded/offline playback."""
+
+    type: Literal["reserve"] = "reserve"
+    items: list[FactReserveItem] = Field(default_factory=list)
+
+
 # --------------------------------------------------------------------------- #
 # guided mode (proactive route) — WS frames
 # --------------------------------------------------------------------------- #
@@ -656,6 +784,16 @@ class WSRouteProposal(BaseModel):
     polyline: list[list[float]] = Field(default_factory=list)  # [[lat, lon], ...]
     total_distance_m: float = 0.0
     total_duration_s: float = 0.0
+    # Turn-by-turn maneuvers for the client's next-turn chip (None/absent on straight-line
+    # routes and for old servers — the client falls back to the stop chip). Plain dicts of
+    # NavManeuver fields; old clients ignore the unknown key.
+    steps: list[dict] | None = None
+
+
+class WSRouteAccepted(BaseModel):
+    """Server ack: the proposed route was accepted and guided leading is now active."""
+
+    type: Literal["route_accepted"] = "route_accepted"
 
 
 class WSStopReached(BaseModel):
@@ -671,6 +809,7 @@ class WSReroute(BaseModel):
     stops: list[WSRouteStop] = Field(default_factory=list)
     polyline: list[list[float]] = Field(default_factory=list)
     reason: str = "off_route"
+    steps: list[dict] | None = None  # fresh maneuvers for the replanned tail (see WSRouteProposal)
 
 
 class WSRouteDone(BaseModel):

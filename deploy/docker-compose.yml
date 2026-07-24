@@ -15,6 +15,14 @@ services:
     environment:
       HF_HOME: /data/hf          # cache the Whisper model on a volume
       ENRICH_CACHE_PATH: /data/enrich.json
+      # L2 disk cache of raw Overpass responses: discovery discs survive restarts and
+      # are shared across sessions walking the same area (the in-memory disc cache died
+      # with every redeploy/OOM and the next walk re-paid the 5-12 s cold fetch).
+      OVERPASS_DISK_CACHE: /data/overpass
+      # Primary = the self-hosted regional Overpass; the fastest public mirror rides
+      # second in the race (region-empty answers fall through — see providers).
+      OVERPASS_URL: http://overpass/api/interpreter
+      OVERPASS_MIRRORS: https://maps.mail.ru/osm/tools/overpass/api/interpreter
       WALK_LOG_VERBOSE: "1"      # full per-tick walk trace (debugging)
       WALK_LOG_DIR: /data/walks  # persist the trace to /data/walks/walk.log (survives docker-logs rotation)
       # Block 4 self-improvement corpus capture (durable-layer only, best-effort). Turns on
@@ -27,6 +35,13 @@ services:
       # rolls back), and the on-demand optimizer (writes candidates) all see the same state. Canary
       # is DORMANT until CANARY_ENABLED=1 + a version is staged + CANARY_FRACTION>0.
       PROMPT_REGISTRY_DIR: /registry
+      # Durable session store: sessions survive a backend restart/redeploy/OOM-kill.
+      # Field-found (17.07): the in-memory store lost mid-walk sessions on restarts —
+      # the walker got a fresh greeting, a re-told area intro and re-narrated objects
+      # («опять про суд»). Redis keeps the tour resumable across process death.
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
     volumes:
       - guide-data:/data
       - registry-data:/registry
@@ -84,6 +99,52 @@ services:
     expose:
       - "5000"                  # internal only — reached by the backend over the docker network
 
+  # SELF-HOSTED Overpass over the same regional clip OSRM uses (deploy/osrm/region.osm.pbf).
+  # Internal-only and geo-block-proof like OSRM; answers a dense r=800 disc in well under a
+  # second vs ~5 s on the public mirrors. REGION-CLIPPED: outside the clip it answers
+  # empty — the backend's fetch race treats an empty 200 as non-final and falls through
+  # to the public mirrors (see providers.fetch_overpass_elements), so walks outside the
+  # region keep working. First start runs a one-time DB init from the .pbf (tens of
+  # minutes; needs the host swapfile — see osrm/build-osrm.sh header for the swap lesson).
+  # The areas rules loop (needed by is_in geocoding) populates in the background after
+  # init; until then geocode queries fall through to the mirrors the same way.
+  overpass:
+    image: wiktorn/overpass-api
+    container_name: ai-guide-overpass
+    restart: unless-stopped
+    environment:
+      OVERPASS_MODE: init
+      # .osm.bz2, NOT .pbf — the image's init only unpacks bzip2 XML. Convert once:
+      #   docker run --rm -v ./osrm:/data iboates/osmium cat /data/region.osm.pbf \
+      #     -o /data/region.osm.bz2 --overwrite
+      # GOTCHA (paid for): after init the volume's /db ends up 0700 owned by `overpass`,
+      # and nginx (the fcgi user) can't traverse to the dispatcher socket — every query
+      # returns an HTML "Permission denied ... osm3s_osm_base" page. After the FIRST
+      # init (or any volume recreation): docker exec ai-guide-overpass chmod 755 /db
+      OVERPASS_PLANET_URL: file:///data/planet/region.osm.bz2
+      OVERPASS_META: "no"
+      OVERPASS_DIFF_URL: ""            # a static clip — no minutely updates
+      OVERPASS_STOP_AFTER_INIT: "false"  # keep serving after the one-time init
+      OVERPASS_RULES_LOAD: "10"        # areas (is_in geocoding) build in the background
+      OVERPASS_USE_AREAS: "true"
+    volumes:
+      - overpass-db:/db
+      - ./osrm:/data/planet:ro         # reuse the OSRM clip (region.osm.pbf)
+    expose:
+      - "80"                           # internal only — reached by the backend
+
+  # Session store for the backend (see REDIS_URL above). Tiny footprint, internal-only.
+  # No persistence to disk (sessions are ephemeral by design — they only need to outlive
+  # a backend restart, not a host reboot); memory-capped with LRU so it can't grow.
+  redis:
+    image: redis:7-alpine
+    container_name: ai-guide-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--maxmemory", "96mb", "--maxmemory-policy", "allkeys-lru"]
+    expose:
+      - "6379"                   # internal only — reached by the backend over the docker network
+
   caddy:
     image: caddy:2
     container_name: ai-guide-caddy
@@ -99,6 +160,7 @@ services:
       - caddy-config:/config
 
 volumes:
+  overpass-db:      # self-hosted Overpass database (built once from the region clip)
   guide-data:
   quality-data:      # quality-worker's decision log (Block 4); removable with the container
   registry-data:     # shared prompt registry (Phase 6 canary: versions + memory + pointers)

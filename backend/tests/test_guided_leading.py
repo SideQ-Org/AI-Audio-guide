@@ -22,6 +22,7 @@ def _orch(monkeypatch):
     monkeypatch.setattr(settings, "agent_backend", "heuristic")
     monkeypatch.setattr(settings, "geo_source", "fixture")
     monkeypatch.setattr(settings, "enrichment_source", "mock")
+    monkeypatch.setattr(settings, "session_greeting", True)
     monkeypatch.setattr(settings, "nav_between_mode", "teaser")
     # These tests exercise the per-stop reactive leading path; the whole-route script has its
     # own suite (test_guided_script.py).
@@ -37,10 +38,16 @@ def test_guided_reaches_every_stop_then_done(monkeypatch):
     async def run():
         route = await orch.plan_route("g1", ORIGIN, mode="loop", budget_min=40)
         await orch.accept_route("g1")
+        first = await orch.on_position("g1", ORIGIN, Heading(), Pace.SLOW)
+        assert first.kind in ("narration", "silence")
         outs = []
         for s in route.stops:
             pos = GeoPoint(lat=s.place.location.lat, lon=s.place.location.lon)
             outs.append(await orch.on_position("g1", pos, Heading(), Pace.SLOW))
+        # Per-stop fallback still closes with a canned finale (one narration tick),
+        # then the NEXT tick ends the route with route_done.
+        finale = await orch.on_position("g1", ORIGIN, Heading(), Pace.SLOW)
+        assert finale.kind == "narration" and finale.text
         final = await orch.on_position("g1", ORIGIN, Heading(), Pace.SLOW)
         st = await orch.store.load("g1")
         return route, outs, final, st
@@ -63,9 +70,11 @@ def test_between_stops_teases_then_silent(monkeypatch):
     async def run():
         route = await orch.plan_route("g2", ORIGIN, mode="loop", budget_min=40)
         await orch.accept_route("g2")
-        first = route.stops[0].place.location
+        first = await orch.on_position("g2", ORIGIN, Heading(), Pace.SLOW)
+        assert first.kind in ("narration", "silence")
+        first_stop = route.stops[0].place.location
         # A point ~100 m short of the first stop (inside the teaser radius, outside arrival).
-        near = GeoPoint(lat=first.lat + 0.0009, lon=first.lon)
+        near = GeoPoint(lat=first_stop.lat + 0.0009, lon=first_stop.lon)
         out1 = await orch.on_position("g2", near, Heading(), Pace.SLOW)
         out2 = await orch.on_position("g2", near, Heading(), Pace.SLOW)
         return out1, out2

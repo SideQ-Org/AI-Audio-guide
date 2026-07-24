@@ -65,7 +65,7 @@ def test_web_enricher_searches_once_per_language():
     asyncio.run(enr.facts_for(_place("p"), language="en"))  # cache hit
     assert llm.calls == 1
     asyncio.run(enr.facts_for(_place("p"), language="ru"))  # different lang -> re-search
-    assert llm.calls == 2
+    assert llm.calls >= 2
 
 
 def test_no_facts_marker_is_none_and_cached():
@@ -73,7 +73,29 @@ def test_no_facts_marker_is_none_and_cached():
     enr = WebSearchEnricher(llm)
     assert asyncio.run(enr.facts_for(_place("p2"))) is None
     assert asyncio.run(enr.facts_for(_place("p2"))) is None
-    assert llm.calls == 1  # negative result cached, no re-search
+    # A first miss now costs exactly TWO searches (exact + one broadened retry — the
+    # "Человеку Труда -> empty forever" fix); the double miss is then cached negative.
+    assert llm.calls == 2
+
+
+def test_first_miss_retries_broadened_then_caches_positive():
+    class TwoStageLLM(FakeWebLLM):
+        async def web_facts(self, system, query, **kw):
+            self.calls += 1
+            self.last_query = query
+            # exact form misses, the broadened retry (type words first) finds it
+            return "НЕТ" if self.calls == 1 else "* открыт к юбилею завода"
+
+    llm = TwoStageLLM(reply="")
+    enr = WebSearchEnricher(llm)
+    place = _place("p-mon")
+    place.category = "memorial"
+    facts = asyncio.run(enr.facts_for(place, context="Долгопрудный, Россия"))
+    assert facts == "* открыт к юбилею завода"
+    assert llm.calls == 2
+    assert "памятник" in llm.last_query  # localized type word, not the raw OSM tag
+    assert asyncio.run(enr.facts_for(place, context="Долгопрудный, Россия")) == facts
+    assert llm.calls == 2  # positive result cached
 
 
 def test_error_returns_none_and_is_not_cached():

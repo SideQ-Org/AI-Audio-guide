@@ -24,6 +24,12 @@ class WalkApi {
   /// reloads on auth changes; without this a stalled /me would accumulate).
   static const _timeout = Duration(seconds: 12);
 
+  /// ONE shared keep-alive client for every REST call. The default top-level
+  /// http.get/post open a fresh connection (TCP+TLS to the server) PER REQUEST — the
+  /// community tab fires 8 requests on open, paying 8 handshakes. A shared client
+  /// reuses the socket, so only the first request pays it.
+  static final http.Client client = http.Client();
+
   static Map<String, String> _authHeaders() {
     final token = AuthService.instance.accessToken;
     if (token == null) throw ApiException(401, 'not signed in');
@@ -34,7 +40,7 @@ class WalkApi {
 
   /// The signed-in user's profile + entitlements (tier, quota, saved-walk counts).
   static Future<UserProfile> getMe() async {
-    final r = await http.get(_u('/me'), headers: _authHeaders()).timeout(_timeout);
+    final r = await WalkApi.client.get(_u('/me'), headers: _authHeaders()).timeout(_timeout);
     if (r.statusCode != 200) throw ApiException(r.statusCode, r.body);
     return UserProfile.fromJson(
       jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>,
@@ -47,7 +53,7 @@ class WalkApi {
     String purchaseToken,
     String productId,
   ) async {
-    final r = await http
+    final r = await WalkApi.client
         .post(
           _u('/billing/google/verify'),
           headers: {..._authHeaders(), 'Content-Type': 'application/json'},
@@ -61,7 +67,7 @@ class WalkApi {
   }
 
   static Future<List<WalkSummary>> listWalks({int limit = 30}) async {
-    final r = await http.get(
+    final r = await WalkApi.client.get(
       _u('/walks?limit=$limit'),
       headers: _authHeaders(),
     ).timeout(_timeout);
@@ -73,7 +79,7 @@ class WalkApi {
   }
 
   static Future<WalkDetail> getWalk(String id) async {
-    final r = await http.get(_u('/walks/$id'), headers: _authHeaders()).timeout(_timeout);
+    final r = await WalkApi.client.get(_u('/walks/$id'), headers: _authHeaders()).timeout(_timeout);
     if (r.statusCode != 200) throw ApiException(r.statusCode, r.body);
     return WalkDetail.fromJson(
       jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>,
@@ -81,13 +87,13 @@ class WalkApi {
   }
 
   static Future<void> deleteWalk(String id) async {
-    final r = await http.delete(_u('/walks/$id'), headers: _authHeaders()).timeout(_timeout);
+    final r = await WalkApi.client.delete(_u('/walks/$id'), headers: _authHeaders()).timeout(_timeout);
     if (r.statusCode != 204) throw ApiException(r.statusCode, r.body);
   }
 
   /// Delete the account's data (profile + all walks). Right to be forgotten.
   static Future<void> deleteAccount() async {
-    final r = await http.delete(_u('/me'), headers: _authHeaders()).timeout(_timeout);
+    final r = await WalkApi.client.delete(_u('/me'), headers: _authHeaders()).timeout(_timeout);
     if (r.statusCode != 204) throw ApiException(r.statusCode, r.body);
   }
 }
@@ -104,11 +110,19 @@ class CommunityApi {
     return jsonDecode(utf8.decode(r.bodyBytes)) as Map<String, dynamic>;
   }
 
-  static Future<http.Response> _get(String path) =>
-      http.get(WalkApi._u(path), headers: WalkApi._authHeaders()).timeout(_timeout);
+  /// Every /community/* GET carries the device's local-time offset from UTC in minutes
+  /// (`tz_offset_min`, e.g. 180 for MSK) so the backend counts streak/challenge days in
+  /// the walker's local day rather than UTC.
+  static Future<http.Response> _get(String path) {
+    final tz = DateTime.now().timeZoneOffset.inMinutes;
+    final sep = path.contains('?') ? '&' : '?';
+    return WalkApi.client
+        .get(WalkApi._u('$path${sep}tz_offset_min=$tz'), headers: WalkApi._authHeaders())
+        .timeout(_timeout);
+  }
 
   static Future<http.Response> _post(String path, [Map<String, dynamic>? body]) =>
-      http.post(
+      WalkApi.client.post(
         WalkApi._u(path),
         headers: {...WalkApi._authHeaders(), 'Content-Type': 'application/json'},
         body: body == null ? null : jsonEncode(body),
@@ -157,7 +171,7 @@ class CommunityApi {
   }
 
   static Future<void> unfriend(String userId) async {
-    final r = await http
+    final r = await WalkApi.client
         .delete(WalkApi._u('/community/friends/$userId'), headers: WalkApi._authHeaders())
         .timeout(_timeout);
     if (r.statusCode != 204) throw ApiException(r.statusCode, r.body);

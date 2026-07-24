@@ -273,6 +273,8 @@ def test_long_gap_starts_a_new_walk():
     async def run():
         await _init_db()
         settings.database_url = "sqlite+aiosqlite://"
+        prev_min = settings.walk_min_record_s
+        settings.walk_min_record_s = 0  # rotation prune has its own tests below
         try:
             st = _state(str(uuid.uuid4()))
             history.record_object(st, _place("p1"), Significance.HIGH, "a")
@@ -286,6 +288,7 @@ def test_long_gap_starts_a_new_walk():
             n = await _count(Walk)
             return first, second, n
         finally:
+            settings.walk_min_record_s = prev_min
             await db.dispose_engine()
             settings.database_url = ""
 
@@ -294,9 +297,68 @@ def test_long_gap_starts_a_new_walk():
     assert n_walks == 2
 
 
+def test_rotation_prunes_short_previous_walk():
+    """10-min record rule, server backstop: rotating away from a walk that spanned less
+    than walk_min_record_s (an abandoned short walk that never got an `end`) deletes it."""
+
+    async def run():
+        await _init_db()
+        settings.database_url = "sqlite+aiosqlite://"
+        try:
+            st = _state(str(uuid.uuid4()))
+            history.record_object(st, _place("p1"), Significance.HIGH, "a")
+            await _drain()  # walk 1: one object, span ~0 s — too short to keep
+            st.walk_last_event_at = time.time() - (settings.walk_gap_s + 60)
+            history.record_object(st, _place("p2"), Significance.HIGH, "b")
+            await _drain()  # rotation → walk 1 pruned, walk 2 fresh
+            async with db.get_sessionmaker()() as s:
+                walks = list(await s.scalars(select(Walk)))
+                return len(walks), str(walks[0].id) if walks else None, st.walk_id
+        finally:
+            await db.dispose_engine()
+            settings.database_url = ""
+
+    n_walks, remaining_id, current_id = asyncio.run(run())
+    assert n_walks == 1  # the short first walk is gone
+    assert remaining_id == current_id  # only the new (current) walk remains
+
+
+def test_rotation_keeps_long_previous_walk():
+    """The backstop must not touch a rotated walk that spanned long enough."""
+
+    async def run():
+        await _init_db()
+        settings.database_url = "sqlite+aiosqlite://"
+        try:
+            from datetime import timedelta
+
+            st = _state(str(uuid.uuid4()))
+            history.record_object(st, _place("p1"), Significance.HIGH, "a")
+            await _drain()
+            first = st.walk_id
+            # Backdate the first walk's start so its span exceeds walk_min_record_s.
+            async with db.get_sessionmaker()() as s:
+                walk = await s.get(Walk, uuid.UUID(first))
+                walk.started_at = walk.started_at - timedelta(
+                    seconds=settings.walk_min_record_s + 120
+                )
+                await s.commit()
+            st.walk_last_event_at = time.time() - (settings.walk_gap_s + 60)
+            history.record_object(st, _place("p2"), Significance.HIGH, "b")
+            await _drain()  # rotation → walk 1 long enough, kept
+            return await _count(Walk)
+        finally:
+            await db.dispose_engine()
+            settings.database_url = ""
+
+    assert asyncio.run(run()) == 2  # both walks survive
+
+
 async def _make_n_walks(uid: str, tier: str, n: int):
     """Force ``n`` separate walks for one user by rotating past the gap each time,
-    draining after each so the detached writes commit serially (shared SQLite conn)."""
+    draining after each so the detached writes commit serially (shared SQLite conn).
+    Callers disable the rotation prune (walk_min_record_s=0) — these zero-span walks
+    would otherwise be deleted as too short; the prune has its own dedicated tests."""
     st = _state(uid)
     st.tier = tier
     for i in range(n):
@@ -310,12 +372,15 @@ def test_free_tier_ring_buffers_saved_walks():
         await _init_db()
         settings.database_url = "sqlite+aiosqlite://"
         prev = settings.free_tier_walk_limit
+        prev_min = settings.walk_min_record_s
         settings.free_tier_walk_limit = 3
+        settings.walk_min_record_s = 0
         try:
             await _make_n_walks(str(uuid.uuid4()), "free", 5)
             return await _count(Walk)
         finally:
             settings.free_tier_walk_limit = prev
+            settings.walk_min_record_s = prev_min
             await db.dispose_engine()
             settings.database_url = ""
 
@@ -327,12 +392,15 @@ def test_paid_tier_keeps_all_walks():
         await _init_db()
         settings.database_url = "sqlite+aiosqlite://"
         prev = settings.free_tier_walk_limit
+        prev_min = settings.walk_min_record_s
         settings.free_tier_walk_limit = 3
+        settings.walk_min_record_s = 0
         try:
             await _make_n_walks(str(uuid.uuid4()), "paid", 5)
             return await _count(Walk)
         finally:
             settings.free_tier_walk_limit = prev
+            settings.walk_min_record_s = prev_min
             await db.dispose_engine()
             settings.database_url = ""
 

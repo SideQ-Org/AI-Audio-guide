@@ -43,9 +43,14 @@ class HomeModules extends StatefulWidget {
   final bool paused, recording, voice;
   final VoidCallback? onStop, onPause, onAsk, onMic, onToggleVoice, onHistory;
 
+  // Hide the whole inactive column (SwipeToStart included) WITHOUT triggering the
+  // tour choreography — used while a guided route builds under the loading overlay.
+  final bool hidden;
+
   const HomeModules({
     super.key,
     required this.active,
+    this.hidden = false,
     required this.greeting,
     required this.nick,
     required this.prompt,
@@ -121,10 +126,14 @@ class _HomeModulesState extends State<HomeModules> {
     const leaveCurve = Curves.easeInOutCubic;
     const arriveCurve = Curves.easeInOutCubic;
     return Stack(children: [
-      // inactive content
+      // inactive content — `hidden` (route planning) removes it entirely under the
+      // loading overlay without running the активации choreography.
       IgnorePointer(
-        ignoring: active,
-        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        ignoring: active || widget.hidden,
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 250),
+          opacity: widget.hidden ? 0 : 1,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           AnimatedSlide(
             duration: leaveDur, curve: leaveCurve,
             offset: Offset(0, active ? -2.4 : 0),
@@ -177,7 +186,8 @@ class _HomeModulesState extends State<HomeModules> {
               ]),
             ),
           ),
-        ]),
+          ]),
+        ),
       ),
       // active: Dynamic-Island status (slides down after the blocks have left)
       Positioned(
@@ -269,44 +279,19 @@ class TabPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final topPad = MediaQuery.of(context).padding.top;
+    // Sections reveal with a light staggered fade+slide on first show. Inside the
+    // tab stack this plays when the tab is first visited (TickerMode gates it).
     return GradientBackground(
       child: ListView(
         padding: EdgeInsets.fromLTRB(16, topPad + 16, 16, MediaQuery.of(context).padding.bottom + 110),
         children: [
-          Text(title, style: h1(context)),
+          FadeSlideIn(child: Text(title, style: h1(context))),
           const SizedBox(height: Gap.lg),
-          ...children,
+          for (var i = 0; i < children.length; i++)
+            FadeSlideIn.stagger(i + 1, child: children[i]),
         ],
       ),
     );
-  }
-}
-
-// ── Community (coming soon) ───────────────────────────────────────────────────
-class CommunityTab extends StatelessWidget {
-  const CommunityTab({super.key});
-  @override
-  Widget build(BuildContext context) {
-    final l = AppLocalizations.of(context)!;
-    final c = context.colors;
-    return TabPage(title: l.tabCommunity, children: [
-      const SizedBox(height: 40),
-      GlassModule(
-        padding: const EdgeInsets.all(24),
-        child: Column(children: [
-          Container(
-            width: 64, height: 64, alignment: Alignment.center,
-            decoration: BoxDecoration(shape: BoxShape.circle, color: c.glassFill(0.06), border: Border.all(color: c.glassBorder)),
-            child: Icon(AppIcons.usersThree, size: 30, color: c.primary),
-          ),
-          const SizedBox(height: 16),
-          Text(l.communitySoonTitle, textAlign: TextAlign.center, style: h2(context)),
-          const SizedBox(height: 8),
-          Text(l.communitySoonBody, textAlign: TextAlign.center,
-              style: GoogleFonts.manrope(fontSize: 14, fontWeight: FontWeight.w500, height: 1.45, color: c.textSecondary)),
-        ]),
-      ),
-    ]);
   }
 }
 
@@ -704,7 +689,6 @@ class _RoundGlassButton extends StatelessWidget {
       message: tooltip,
       child: Pressable(
         onTap: onTap,
-        scale: 0.9,
         child: Container(
           width: 36, height: 36, alignment: Alignment.center,
           decoration: BoxDecoration(shape: BoxShape.circle, color: c.glassFill(0.06), border: Border.all(color: c.glassBorder)),
@@ -845,6 +829,8 @@ class SettingsTab extends StatelessWidget {
   final ValueChanged<bool>? onSimulate; // null when a tour is active (locked)
   final String? routeLabel;
   final VoidCallback? onRoute;
+  final String? backendInfo;
+  final String? mapInfo;
 
   const SettingsTab({
     super.key,
@@ -861,6 +847,8 @@ class SettingsTab extends StatelessWidget {
     required this.onSimulate,
     required this.routeLabel,
     required this.onRoute,
+    this.backendInfo,
+    this.mapInfo,
   });
 
   @override
@@ -909,6 +897,14 @@ class SettingsTab extends StatelessWidget {
         if (simulate) ...[
           const RowDivider(),
           SettingRow(icon: AppIcons.flag, title: l.route, value: routeLabel, onTap: onRoute),
+        ],
+        if (backendInfo != null) ...[
+          const RowDivider(),
+          SettingRow(icon: AppIcons.globe, title: 'Backend', value: backendInfo),
+        ],
+        if (mapInfo != null) ...[
+          const RowDivider(),
+          SettingRow(icon: AppIcons.map, title: 'Map tiles', value: mapInfo),
         ],
       ])),
     ]);

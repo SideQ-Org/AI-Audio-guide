@@ -11,7 +11,10 @@ from __future__ import annotations
 # its own id, so id-based dedup lets the SAME river be narrated once per segment ("проходишь мимо
 # речки Чуры" twice). These are deduped by NAME instead — see build_candidates. Area water
 # (ponds/lakes = "water") is NOT here: a pond is one object, not a split line.
-LINEAR_CATEGORIES: frozenset[str] = frozenset({"river", "pedestrian"})
+# Linear/by-name-deduped features — narrated ONCE by name, not per OSM segment. A river,
+# a promenade, and a major road (МКАД = hundreds of motorway segments) each collapse to a
+# single Place per name, so "ты у МКАД" can't repeat segment after segment.
+LINEAR_CATEGORIES: frozenset[str] = frozenset({"river", "pedestrian", "motorway"})
 
 
 WEIGHT_BY_CATEGORY: dict[str, float] = {
@@ -105,6 +108,12 @@ WEIGHT_BY_CATEGORY: dict[str, float] = {
     "gasometer": 0.45,
     "telescope": 0.6,
     "fountain": 0.45,
+    # major roads / interchanges (МКАД, шоссе, named развязки) — you can't walk them, but
+    # a famous ring road / highway is worth a word when you come near it. Weight below the
+    # cultural landmarks (0.9) on purpose: it's SECONDARY, narrated once as a fallback, and
+    # must never outrank a real museum/monument you're passing.
+    "motorway": 0.65,
+    "junction": 0.6,
     # everyday / commercial
     "cafe": 0.3,
     "restaurant": 0.3,
@@ -153,6 +162,26 @@ KEEP_TAGS = frozenset(
         "heritage",
         "sport",
         "healthcare",
+        # Instant-fact + card tags (see enrichment): an OSM object often carries ready
+        # verifiable facts (the memorial's inscription, the build year, the architect,
+        # what's open when) and a photo pointer — with ZERO network latency. These were
+        # stripped before the Place was ever built, so `_osm_tag_image` and the
+        # addr:city web-query hint were dead code on live data.
+        "description",
+        "inscription",
+        "start_date",
+        "architect",
+        "opening_hours",
+        "website",
+        "height",
+        "ele",
+        "wikimedia_commons",
+        "image",
+        "addr:city",
+        "ref",  # road/route number (a numbered highway with no name still identifies)
+        # Lifecycle marks (closed/abandoned objects) — kept so is_junk can see them.
+        "disused",
+        "abandoned",
     }
 )
 
@@ -185,8 +214,23 @@ def is_junk(tags: dict[str, str] | None) -> bool:
     dentists/doctors/physio/labs/vet tagged only under healthcare)."""
     if not tags:
         return False
-    if tags.get("tourism") or tags.get("historic") or tags.get("heritage"):
+    if (
+        tags.get("tourism")
+        or tags.get("historic")
+        or tags.get("heritage")
+        # deliberate ruins are sightseeing, not lifecycle junk («Руины усадебной конюшни»)
+        or tags.get("ruins")
+        or tags.get("building") == "ruins"
+    ):
         return False
+    # A closed/abandoned object (lifecycle VALUE tags — prefixed keys like
+    # disused:amenity never match the selectors at all) isn't worth narrating as if it
+    # were alive: «сейчас здесь кинотеатр», а кинотеатр заколочен. Deliberate ruins
+    # (historic/ruins) are caught by the anchor check above and stay.
+    if tags.get("disused") in ("yes", "true", "1") or tags.get("abandoned") in (
+        "yes", "true", "1"
+    ):
+        return True
     if tags.get("amenity") in _JUNK_AMENITIES:
         return True
     healthcare = tags.get("healthcare")
@@ -259,6 +303,14 @@ def _category(t: dict[str, str]) -> str:
         return "square"
     if t.get("highway") == "pedestrian":
         return "pedestrian"
+    # major roads / interchanges — only motorway/trunk (МКАД, шоссе) and named junctions
+    # reach here (the selectors don't fetch ordinary streets), so this never floods with
+    # residential roads. Deduped by name (LINEAR_CATEGORIES) => narrated once per road.
+    highway = t.get("highway")
+    if highway in {"motorway", "trunk"}:
+        return "motorway"
+    if highway == "motorway_junction":
+        return "junction"
 
     leisure = t.get("leisure")
     if leisure in {

@@ -815,11 +815,36 @@ class AppLocalizationsPt extends AppLocalizations {
   String get statsSoon => 'Suas estatísticas aparecerão aqui';
 
   @override
-  String get communitySoonTitle => 'A comunidade chega em breve';
+  String get communityStreakLeave => 'Sair da sequência';
 
   @override
-  String get communitySoonBody =>
-      'Amigos, rotas compartilhadas e desafios viverão aqui.';
+  String get communityUnfriend => 'Remover dos amigos';
+
+  @override
+  String communityUnfriendConfirm(String name) {
+    return 'Remover $name dos amigos?';
+  }
+
+  @override
+  String communityRequestOutgoing(String handle) {
+    return 'Pedido enviado: @$handle';
+  }
+
+  @override
+  String get communityAlreadyFriends => 'Já são amigos';
+
+  @override
+  String feedWalkShared(String name) {
+    return '$name compartilhou um passeio';
+  }
+
+  @override
+  String get communityCoWalkShare => 'Compartilhar código';
+
+  @override
+  String communityCoWalkShareMsg(String code) {
+    return 'Caminhe comigo no AI Guide! Código: $code';
+  }
 
   @override
   String get sectionAccount => 'Conta';

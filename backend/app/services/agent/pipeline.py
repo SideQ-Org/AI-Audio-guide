@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.config import settings
 from app.services.enrichment.enricher import (
@@ -19,6 +19,7 @@ from app.services.enrichment.enricher import (
     attach_facts,
     prefetch,
 )
+from app.services.enrichment.fact_buffer import FactBatchMeta, FactBuffer
 from app.services.llm.client import SESSION_TIER, as_background
 from app.services.metrics import GUIDE
 from app.shared.schemas import (
@@ -39,7 +40,8 @@ from app.shared.schemas import (
 )
 
 from .director import atomize_facts, find_callback
-from .languages import passing_mention
+from .interest_metrics import rank_facts
+from .languages import looks_foreign_facts, normalize, passing_mention
 from .name_localizer import NameLocalizer
 from .narrator import (
     Narrator,
@@ -49,6 +51,7 @@ from .narrator import (
     strip_factless_history,
 )
 from .scorer import Scorer
+from .seam_stitch import stitch as _seam_stitch
 from .significance import at_least, significance_from_weight, tags_have_wiki
 from .walklog import clip, get_logger
 
@@ -77,17 +80,57 @@ class StepResult:
     card: str | None = None  # re-readable structured facts for the object card (not spoken)
     image: str | None = None  # object photo URL (Wikipedia thumbnail) for the card, if any
     facts: str | None = None  # the FACTS handed to the narrator — the grounding source (Block 4)
+    fast_hint: str | None = None  # a short deterministic line the runtime may speak first
+
+
+@dataclass
+class SubjectWarmState:
+    scope: str
+    subject_key: str
+    language: str
+    deepen_round: int = 0
+    last_source_tier: str | None = None
+    last_status: str | None = None
+    coverage_chars: int = 0
+    coverage_facts: int = 0
+    warmed_at: float = field(default_factory=time.time)
 
 
 # Atypical-facts-forward area enrichment: lesser-known facts about the district /
 # street / city, not the obvious encyclopedic blurb.
 _AREA_ENRICH_SYSTEM = (
     "You gather atypical, little-known facts about a district/street/city for an "
-    "audio guide. Give 2-4 short, reliable facts about this exact district or street "
-    "in the named city: unusual history, how the place came to be and changed, "
-    "forgotten episodes, what it's known for in narrow circles. Skip the obvious and "
-    "the commonly-known. Verifiable facts only, no invention or opinions. If there is "
-    "no reliable information about this exact district, reply with exactly: NONE."
+    "audio guide. Give as many short, reliable facts as the sources genuinely support "
+    "— aim for 4-8 about this exact district or street in the named city: unusual "
+    "history, how the place came to be and changed, forgotten episodes, what it's known "
+    "for in narrow circles. Skip the obvious and the commonly-known. Verifiable facts "
+    "only, no invention or opinions. If there is no reliable information about this "
+    "exact district, reply with exactly: NONE."
+)
+
+# Rotating search ANGLES so the area monologue keeps finding GENUINELY NEW real facts
+# instead of drying up after one batch and going silent. Each round targets a DISTINCT
+# slice of the same place (city/district/street) — 14 angles, so even a long stationary
+# stay keeps pulling fresh verifiable material round after round (the guide "постоянно
+# ищет факты, пока рассказывает") rather than the model padding with vague atmosphere.
+# Ordered broadly-interesting first (history/people) → more specialised later, so the
+# strongest material leads; the fact-interest ranking then surfaces the best within each.
+_AREA_ANGLES = (
+    "neighbourhood history, how it came to be and changed, what it's known for, "
+    "unusual little-known facts",
+    "notable people, writers, scientists and artists historically connected to this place",
+    "its streets, buildings, architecture and monuments, and how they changed over time",
+    "what is HERE TODAY — present-day life, character, notable places a walker passes now",
+    "important historical events, turning points and episodes that happened here",
+    "the origin and meaning of local place, street and district names",
+    "industry, trade, crafts and what people here worked at over the years",
+    "wars, occupations, disasters and how the area survived and rebuilt",
+    "churches, temples, monuments and memorials and the stories behind them",
+    "parks, gardens, rivers, ponds and the natural setting and how it was shaped",
+    "everyday life, customs and social history of the people who lived here",
+    "curiosities, legends grounded in fact, records and surprising little details",
+    "science, education, universities, institutes and discoveries linked to this place",
+    "culture — theatres, museums, music, film and famous cultural moments here",
 )
 
 # Area web-search is non-deterministic (see enrich_area): retry a fast empty within a time budget.
@@ -116,6 +159,10 @@ def _context(addr: Address) -> NarrationContext:
     )
 
 
+def _place_subject_key(place_id: str) -> str:
+    return f"place:{place_id}"
+
+
 class TextPipeline:
     def __init__(
         self,
@@ -129,11 +176,13 @@ class TextPipeline:
         area_llm=None,  # an LLM with web_facts() for area enrichment (optional)
         planner=None,  # a Planner that forms the story arc (optional)
         name_localizer=None,  # translates titles to the session language (optional)
+        fact_buffer: FactBuffer | None = None,
     ) -> None:
         self.scorer = scorer
         self.narrator = narrator
         self.enricher = enricher
-        self.cache = cache or EnrichmentCache()
+        self.fact_buffer = fact_buffer
+        self.cache = cache or EnrichmentCache(fact_buffer)
         self.language = language
         self.enrich_top_k = enrich_top_k
         self.enrich_timeout_s = enrich_timeout_s
@@ -150,14 +199,21 @@ class TextPipeline:
         # the greeting (while it's being spoken) so the first area intro is instant, not a cold
         # planner LLM wait after the opener. Read+popped by the orchestrator's _maybe_area_intro.
         self._plan_cache: dict[str, object] = {}
+        # Pre-generated startup area beats: (area_key, lang, topic) -> (text, hook). Warmed next to
+        # the planner opener so the first meaningful beat after the intro can land without a fresh
+        # LLM call on the second startup tick.
+        self._startup_area_cache: dict[tuple[str, str, str], tuple[str, str | None]] = {}
         # Pre-fetched area FACTS: (area_key, lang) -> facts ("" for a warmed-but-dry area). Warmed
         # in the background at area entry so the FIRST area beat doesn't block ~9 s on web search
         # (the "медленно переключался между блоками" gap). Peeked by the orchestrator's _area_line.
         # Keyed by language too: facts are written in the session language (pipeline is shared).
         self._area_facts_cache: dict[tuple[str, str], str] = {}
-        # Objects we've already run the elaborate "deepen" fetch for (one extra web search per
-        # object, keyed (place_id, lang)), so going deeper doesn't re-hit the web every follow-up.
-        self._deepened: set[tuple[str, str]] = set()
+        # Area warms currently in flight (see warm_area_facts) — dedup guard.
+        self._area_warm_inflight: set[tuple[str, str]] = set()
+        # Coverage/deepen state for warmed subjects (place/area now, wider scopes later). This keeps
+        # the hot-object / area-deepen planner additive: WalkMemory still owns told-vs-untold, while
+        # the pipeline remembers how aggressively a subject has already been researched.
+        self._subject_warm_state: dict[tuple[str, str, str], SubjectWarmState] = {}
 
     def warm_ahead(
         self,
@@ -216,7 +272,10 @@ class TextPipeline:
         # inventory fact-collection).
         pending = [c for c in candidates if not self.cache.has(c.place.id, lang)]
         pending.sort(key=lambda c: (not c.in_gaze_cone, c.distance_m))
-        ahead = pending[: settings.enrich_lookahead_k]
+        # Pace-scaled depth: a fast walker eats through the cone quicker than the warm
+        # lands — objects entered the bubble with cold facts and blocked or floored.
+        k = settings.enrich_lookahead_k + (2 if pace == Pace.FAST else 0)
+        ahead = pending[:k]
         if not ahead:
             return None
         addr = address or Address()
@@ -226,7 +285,7 @@ class TextPipeline:
                 ahead,
                 self.enricher,
                 self.cache,
-                top_k=settings.enrich_lookahead_k,
+                top_k=k,
                 timeout_s=self.enrich_timeout_s,
                 context=ctx,
                 language=lang,
@@ -240,13 +299,22 @@ class TextPipeline:
         self, chosen, place, sig, *, addr, heading, pace, switching, theme, told,
         next_hook, history, preferences, passing, in_view, lang, nothing_new,
         passed=False, callback=None, lookahead=None, beat_angle=None,
+        approaching_road=False,
     ) -> tuple[str, str | None, str | None]:
         """The narrator call for one chosen object — shared by step() and warm_narration()
         so a pre-generated blurb matches what step would produce. Returns (spoken, hook, card):
         the CARD block is stripped FIRST (before HOOK, whose matcher runs to end-of-text)."""
+        # Feed the narrator the MOST INTERESTING facts first (dates/names/specifics up
+        # top, cliché filler down) — the source's original sentence order is arbitrary,
+        # and the narrator builds the blurb around the head of the list.
+        facts = chosen.facts_snippet
+        if facts and looks_foreign_facts(facts, lang):
+            facts = None
+        if facts:
+            facts = " ".join(rank_facts(atomize_facts(facts), lang, top_k=8)) or facts
         raw = await self.narrator.narrate(
             NarratorInput(
-                place=place, significance=sig, facts=chosen.facts_snippet,
+                place=place, significance=sig, facts=facts,
                 distance_m=chosen.distance_m, heading=heading or Heading(),
                 side=chosen.side, in_view=in_view, pace=pace, context=_context(addr),
                 theme=theme, told=told or [], next_hook=next_hook, history=history,
@@ -254,6 +322,7 @@ class TextPipeline:
                 flags=NarratorFlags(
                     switching=switching, nothing_new=nothing_new,
                     passing=passing, passed=passed, preferences=preferences,
+                    approaching_road=approaching_road,
                 ),
                 language=lang,
             )
@@ -265,14 +334,20 @@ class TextPipeline:
     async def warm_narration(
         self, chosen, *, seen, history, address, heading, pace, preferences,
         language, theme, told, next_hook, recall=None, lookahead=None, beat_angle=None,
+        force: bool = False,
     ) -> None:
         """Pre-render the PASSING narration for an object you're walking toward, so
         step() speaks it the instant you reach it (no LLM wait on arrival). Facts are
         warmed first; a cold-facts silence just isn't cached (step generates + floors
-        on arrival as usual)."""
+        on arrival as usual).
+
+        `force=True` refreshes an existing cache entry for the same place/lang — used when
+        a generic preview warm should be replaced by a richer script-aware guided warm."""
         lang = language or self.language
         key = (chosen.place.id, lang)
-        if chosen.place.id in set(seen) or key in self._narr_cache:
+        if chosen.place.id in set(seen):
+            return
+        if key in self._narr_cache and not force:
             return
         addr = address or Address()
         ctx = ", ".join(p for p in (addr.city, addr.country) if p) or None
@@ -313,18 +388,145 @@ class TextPipeline:
             log.info("pregenerate place=%r | %s", place.name, clip(text))
             self._presynth_audio(text, lang)
 
-    def _start_fact_warm(self, candidates: list[Candidate], ctx: str | None, lang: str) -> None:
+    def _subject_state(self, scope: str, subject_key: str, lang: str) -> SubjectWarmState:
+        key = (scope, subject_key, normalize(lang))
+        state = self._subject_warm_state.get(key)
+        if state is not None:
+            return state
+        meta = self.fact_buffer.get_subject_meta(scope, subject_key, lang) if self.fact_buffer else None
+        state = SubjectWarmState(
+            scope=scope,
+            subject_key=subject_key,
+            language=normalize(lang),
+            last_source_tier=meta.source_tier if meta else None,
+            last_status=meta.status if meta else None,
+            coverage_chars=meta.char_count if meta and meta.char_count is not None else 0,
+            coverage_facts=meta.fact_count if meta and meta.fact_count is not None else 0,
+            warmed_at=meta.fetched_at if meta and meta.fetched_at is not None else time.time(),
+        )
+        self._subject_warm_state[key] = state
+        return state
+
+    def _update_subject_state(
+        self,
+        scope: str,
+        subject_key: str,
+        lang: str,
+        *,
+        deepen_round: int | None = None,
+        source_tier: str | None = None,
+        status: str | None = None,
+        facts: str | None = None,
+    ) -> SubjectWarmState:
+        state = self._subject_state(scope, subject_key, lang)
+        if deepen_round is not None:
+            state.deepen_round = deepen_round
+        if source_tier is not None:
+            state.last_source_tier = source_tier
+        if status is not None:
+            state.last_status = status
+        if facts is not None:
+            state.coverage_chars = len((facts or "").strip())
+            state.coverage_facts = max(0, len(atomize_facts(facts))) if facts else 0
+        state.warmed_at = time.time()
+        if self.fact_buffer is not None:
+            self.fact_buffer.record_subject_attempt(
+                scope,
+                subject_key,
+                lang,
+                angle=state.deepen_round,
+                status=state.last_status or "ready",
+                source_tier=state.last_source_tier,
+            )
+        return state
+
+    def subject_coverage(self, scope: str, subject_key: str, lang: str, facts: str | None) -> SubjectWarmState:
+        state = self._subject_state(scope, subject_key, lang)
+        if facts is not None:
+            state.coverage_chars = len((facts or "").strip())
+            state.coverage_facts = max(0, len(atomize_facts(facts))) if facts else 0
+        return state
+
+    def needs_subject_coverage(
+        self,
+        scope: str,
+        subject_key: str,
+        lang: str,
+        facts: str | None,
+        *,
+        min_chars: int,
+        min_facts: int,
+        max_rounds: int = 1,
+    ) -> bool:
+        state = self.subject_coverage(scope, subject_key, lang, facts)
+        if state.deepen_round >= max_rounds:
+            return False
+        return state.coverage_chars < min_chars or state.coverage_facts < min_facts
+
+    def _start_fact_warm(
+        self,
+        candidates: list[Candidate],
+        ctx: str | None,
+        lang: str,
+        *,
+        deepen_round: int = 0,
+        source_tier: str = "web",
+    ) -> None:
         """Fire-and-forget: warm a notable factless object's facts in the background (Phase 4
         async recovery), so the enriched narration is delivered later by elaborate() / a re-open
         WITHOUT blocking this tick on a ~9 s web search."""
-        task = asyncio.ensure_future(
-            as_background(prefetch(
-                candidates, self.enricher, self.cache,
-                top_k=1, timeout_s=self.enrich_timeout_s, context=ctx, language=lang,
-            ))
-        )
+
+        async def _prefetch_and_track() -> None:
+            await prefetch(
+                candidates,
+                self.enricher,
+                self.cache,
+                top_k=1,
+                timeout_s=self.enrich_timeout_s,
+                context=ctx,
+                language=lang,
+            )
+            for cand in candidates:
+                facts = self.cache.get(cand.place.id, lang)
+                state = self._update_subject_state(
+                    "place",
+                    _place_subject_key(cand.place.id),
+                    lang,
+                    deepen_round=deepen_round,
+                    source_tier=source_tier,
+                    status="ready" if facts else "dry",
+                    facts=facts,
+                )
+                if facts and self.fact_buffer is not None:
+                    self.fact_buffer.put_place(
+                        cand.place.id,
+                        facts,
+                        lang,
+                        meta=FactBatchMeta(
+                            source_tier=state.last_source_tier,
+                            status=state.last_status or "ready",
+                            fact_count=state.coverage_facts,
+                            char_count=state.coverage_chars,
+                        ),
+                    )
+
+        task = asyncio.ensure_future(as_background(_prefetch_and_track()))
         self._warm_tasks.add(task)
         task.add_done_callback(self._warm_tasks.discard)
+
+    async def stitch_seam(self, text: str, history: list[str] | None, lang: str) -> str:
+        """Late-binding seam stitch for PRE-GENERATED text (see seam_stitch.py): rewrite the
+        first sentence to continue the last spoken line. Shared by the object cache pop (step)
+        and the prefetched area beat (orchestrator._emit_area_beat). Offline/heuristic narrators
+        carry no LLM handle -> returns the text unchanged, so tests and no-key runs never pay."""
+        if not settings.seam_stitch or not text or not history:
+            return text
+        llm = getattr(self.narrator, "_llm", None)
+        if llm is None:
+            return text
+        prev_sents = split_sentences(history[-1])
+        prev = prev_sents[-1] if prev_sents else history[-1]
+        return await _seam_stitch(llm, prev_line=prev, blurb=text, language=lang)
 
     def _presynth_audio(self, text: str, lang: str) -> None:
         """Neural TTS (paid): pre-synthesize the pre-generated blurb's sentences into the shared
@@ -362,6 +564,7 @@ class TextPipeline:
         passing: bool = False,
         passed: bool = False,
         reach: bool = False,
+        approaching_road: bool = False,
         recall=None,
         lookahead=None,
         beat_angle=None,
@@ -376,7 +579,20 @@ class TextPipeline:
         lang = language or self.language
         addr = address or Address()
         ctx = ", ".join(p for p in (addr.city, addr.country) if p) or None
-        await prefetch(
+        # Latency: when the winner's narration is already pre-generated (warm_narration),
+        # its facts went into the pre-gen — don't block the "instant" delivery behind the
+        # candidate-set prefetch (up to ~9 s cold web). Fire the prefetch in the
+        # background for the following ticks instead and speak now.
+        seen_peek = set(seen)
+        skip_peek = set(preferences.skip_categories) if preferences else set()
+        peek = next(
+            (
+                c for c in candidates
+                if c.place.id not in seen_peek and c.place.category not in skip_peek
+            ),
+            None,
+        )
+        pf = prefetch(
             candidates,
             self.enricher,
             self.cache,
@@ -385,6 +601,16 @@ class TextPipeline:
             context=ctx,
             language=lang,
         )
+        if (
+            peek is not None
+            and not passed
+            and (peek.place.id, lang) in self._narr_cache
+        ):
+            t = asyncio.ensure_future(pf)
+            self._warm_tasks.add(t)
+            t.add_done_callback(self._warm_tasks.discard)
+        else:
+            await pf
         enriched = attach_facts(candidates, self.cache, lang)
 
         seen_set = set(seen)
@@ -446,6 +672,7 @@ class TextPipeline:
                 history=history, preferences=preferences, passing=passing,
                 passed=passed, in_view=in_view, lang=lang, nothing_new=not candidates,
                 callback=callback, lookahead=lookahead, beat_angle=beat_angle,
+                approaching_road=approaching_road,
             )
         # Anti-fabrication backstop: with NO verified facts, any history/date/creation claim the
         # model slipped in is invented (the "детсад «Ивушка» появился в те годы…" case). Strip
@@ -454,6 +681,13 @@ class TextPipeline:
         # below still names it deterministically; a plain LOW object correctly falls to silence.
         if text and not chosen.facts_available:
             text = strip_factless_history(text, lang)
+        # Late-binding seam stitch (pre-gen ONLY): the cached blurb was rendered minutes ago
+        # against stale context, so its opener can't continue what was just spoken. Rewrite the
+        # first sentence now, against the real previous line. Strictly AFTER the factless strip
+        # (so the strip judges the original, not the connective) and before the floor gate
+        # (which only fires on empty text). Live renders already saw fresh context — untouched.
+        if cached is not None and text:
+            text = await self.stitch_seam(text, history, lang)
         # Object photo for the card (Wikipedia thumbnail captured during enrichment); None for
         # non-wiki objects. Read fresh per place — not cached with the narration (id-keyed).
         image = self.enricher.image_for(chosen.place.id)
@@ -489,8 +723,49 @@ class TextPipeline:
         # if it stayed silent, by the facts-aware fingerprint re-opening next tick (cache-warm,
         # fast) while it's still nearby. Gated to paid + MEDIUM+; the enricher's per-place
         # negative cache prevents a repeat spend. Mirrors elaborate()'s cache-miss dance.
-        if (floored or not text) and not chosen.facts_available and _fact_warm_gate(sig):
-            self._start_fact_warm([chosen], ctx, lang)
+        if (
+            not text
+            and chosen.facts_available
+            and chosen.facts_snippet
+            and passing
+            and not passed
+            and chosen.side != "behind"
+            and place.name
+        ):
+            snippets = [] if looks_foreign_facts(chosen.facts_snippet, lang) else rank_facts(
+                atomize_facts(chosen.facts_snippet), lang, top_k=2
+            )
+            if snippets:
+                text = f"{place.name} — {snippets[0]}"
+                if len(snippets) > 1:
+                    text = f"{text} {snippets[1]}"
+            else:
+                text = passing_mention(lang, place.name, chosen.side)
+            GUIDE.floor()
+            floored = True
+        place_subject_key = _place_subject_key(chosen.place.id)
+        if (
+            (floored or not text)
+            and not chosen.facts_available
+            and _fact_warm_gate(sig)
+            and self.needs_subject_coverage(
+                "place",
+                place_subject_key,
+                lang,
+                chosen.facts_snippet,
+                min_chars=settings.elaborate_deepen_below_chars,
+                min_facts=max(2, settings.area_deepen_low_facts + 1),
+                max_rounds=2,
+            )
+        ):
+            state = self._subject_state("place", place_subject_key, lang)
+            self._start_fact_warm(
+                [chosen],
+                ctx,
+                lang,
+                deepen_round=state.deepen_round + 1,
+                source_tier="web",
+            )
         log.info(
             "step place=%r cat=%s sig=%s facts=%s side=%s passing=%s reach=%s"
             " cb=%s la=%s -> %s | %s",
@@ -501,9 +776,12 @@ class TextPipeline:
             "floor" if floored else ("text" if text else "silence"),
             clip(text),
         )
+        fast_hint = None
+        if text and place and passing:
+            fast_hint = passing_mention(lang, place.name, chosen.side)
         return StepResult(
             text, ScorerOutput(), place, sig, next_hook=hook, card=card, image=image,
-            facts=chosen.facts_snippet,
+            facts=chosen.facts_snippet, fast_hint=fast_hint,
         )
 
     async def elaborate(
@@ -549,14 +827,29 @@ class TextPipeline:
             return ""
         # Going deeper: if the cached facts are thin, fetch a bit MORE (angle-focused) so the
         # deeper angles have fresh material instead of running dry. Once per object; best-effort.
+        place_subject_key = _place_subject_key(place.id)
         if (
             angle
             and settings.elaborate_deepen_below_chars > 0
-            and len(facts) < settings.elaborate_deepen_below_chars
-            and (place.id, lang) not in self._deepened
+            and self.needs_subject_coverage(
+                "place",
+                place_subject_key,
+                lang,
+                facts,
+                min_chars=settings.elaborate_deepen_below_chars,
+                min_facts=max(2, settings.area_deepen_low_facts + 1),
+                max_rounds=2,
+            )
         ):
-            self._deepened.add((place.id, lang))
-            facts = await self._deepen_facts(place, facts, angle=angle, addr=addr, lang=lang)
+            state = self._subject_state("place", place_subject_key, lang)
+            facts = await self._deepen_facts(
+                place,
+                facts,
+                angle=angle,
+                addr=addr,
+                lang=lang,
+                deepen_round=state.deepen_round + 1,
+            )
         raw = await self.narrator.narrate(
             NarratorInput(
                 place=place,
@@ -576,7 +869,14 @@ class TextPipeline:
         return text
 
     async def _deepen_facts(
-        self, place: Place, existing: str, *, angle: str, addr: Address, lang: str
+        self,
+        place: Place,
+        existing: str,
+        *,
+        angle: str,
+        addr: Address,
+        lang: str,
+        deepen_round: int,
     ) -> str:
         """Fetch a bit MORE about `place`, biased toward `angle`, and MERGE any genuinely-new
         sentences into the cached facts (so a deeper follow-up isn't a reworded repeat). Returns
@@ -592,15 +892,61 @@ class TextPipeline:
                 self.enricher.facts_for(place, ctx, lang), timeout=self.enrich_timeout_s
             )
         except Exception:  # noqa: BLE001 — deepen is best-effort (incl. timeout); keep existing
+            self._update_subject_state(
+                "place",
+                _place_subject_key(place.id),
+                lang,
+                deepen_round=deepen_round,
+                source_tier="web",
+                status="transient_error",
+                facts=existing,
+            )
             return existing
         if not more:
+            self._update_subject_state(
+                "place",
+                _place_subject_key(place.id),
+                lang,
+                deepen_round=deepen_round,
+                source_tier="web",
+                status="dry",
+                facts=existing,
+            )
             return existing
         have = existing.lower()
         fresh = [s for s in atomize_facts(more) if s.lower() not in have]
         if not fresh:
+            self._update_subject_state(
+                "place",
+                _place_subject_key(place.id),
+                lang,
+                deepen_round=deepen_round,
+                source_tier="web",
+                status="ready",
+                facts=existing,
+            )
             return existing
         merged = (existing.rstrip() + " " + " ".join(fresh)).strip()
-        self.cache.put(place.id, merged, lang)  # so later ticks reuse the richer facts
+        self.cache.put(
+            place.id,
+            merged,
+            lang,
+            meta=FactBatchMeta(
+                source_tier="web",
+                status="ready",
+                fact_count=len(atomize_facts(merged)),
+                char_count=len(merged),
+            ),
+        )  # so later ticks reuse the richer facts
+        self._update_subject_state(
+            "place",
+            _place_subject_key(place.id),
+            lang,
+            deepen_round=deepen_round,
+            source_tier="web",
+            status="ready",
+            facts=merged,
+        )
         return merged
 
     async def narrate_area(
@@ -617,6 +963,8 @@ class TextPipeline:
         pace: Pace = Pace.SLOW,
         language: str | None = None,
         beat_mode: str | None = None,
+        visible: list[str] | None = None,
+        on_street: bool = False,
     ) -> tuple[str, str | None]:
         """One beat of the area-level monologue — advance the story arc by one
         topic, staying inside the theme. Returns (spoken_text, next_hook); spoken
@@ -633,6 +981,8 @@ class TextPipeline:
                 history=history,
                 pace=pace,
                 beat_mode=beat_mode,
+                visible=visible or [],
+                on_street=on_street,
                 language=language or self.language,
             )
         )
@@ -676,6 +1026,34 @@ class TextPipeline:
         """Pop a pre-generated arc for `area_key` (or None if not warmed)."""
         return self._plan_cache.pop(area_key, None) if area_key else None
 
+    def warm_startup_area_beat(
+        self,
+        area_key: str,
+        *,
+        language: str,
+        topic: str,
+        text: str,
+        hook: str | None,
+    ) -> None:
+        key = (area_key, normalize(language), topic)
+        self._startup_area_cache[key] = (text, hook)
+        if len(self._startup_area_cache) > 16:
+            self._startup_area_cache.pop(next(iter(self._startup_area_cache)))
+
+    def peek_startup_area_beat(
+        self, area_key: str | None, *, language: str, topic: str | None
+    ) -> tuple[str, str | None] | None:
+        if not area_key or not topic:
+            return None
+        return self._startup_area_cache.get((area_key, normalize(language), topic))
+
+    def take_startup_area_beat(
+        self, area_key: str | None, *, language: str, topic: str | None
+    ) -> tuple[str, str | None] | None:
+        if not area_key or not topic:
+            return None
+        return self._startup_area_cache.pop((area_key, normalize(language), topic), None)
+
     async def enrich_area(
         self,
         address: Address,
@@ -683,18 +1061,22 @@ class TextPipeline:
         *,
         timeout_s: float | None = None,
         language: str | None = None,
+        angle: int = 0,
     ) -> str | None:
         """Fetch verified, atypical facts about the current district/street/city via
-        web search. Slow-changing -> the orchestrator caches it once per area. The
-        facts are written in the session language so the area monologue doesn't leak
-        the sources' (often Russian) language verbatim."""
+        web search. Slow-changing -> the orchestrator caches it once per area. `angle`
+        rotates the search focus (history → people → streets → today) so a long stay in
+        one area keeps finding GENUINELY NEW facts instead of drying up. The facts are
+        written in the session language so the monologue doesn't leak the sources'
+        (often Russian) language verbatim."""
         if self.area_llm is None:
             return None
         where = " ".join(p for p in (address.district, address.street, address.city) if p)
         if not where:
             return None
         coords = f"coordinates {point.lat:.4f}, {point.lon:.4f}" if point else ""
-        query = f"{where} {coords} neighbourhood history what it's known for unusual facts".strip()
+        focus = _AREA_ANGLES[angle % len(_AREA_ANGLES)]
+        query = f"{where} {coords} {focus}".strip()
         system = _AREA_ENRICH_SYSTEM + _lang_directive(language or self.language)
         # The OpenRouter web plugin is NON-DETERMINISTIC: for the SAME area query it either does the
         # search (~14-16 s, rich facts) or returns empty/no-data FAST (~2-3 s) ~40% of the time
@@ -710,7 +1092,11 @@ class TextPipeline:
                 break
             per = min(max(remaining, 1.0), _AREA_ENRICH_ATTEMPT_CAP_S) if timeout_s else None
             try:
-                coro = self.area_llm.web_facts(system, query, max_results=3, max_tokens=400)
+                coro = self.area_llm.web_facts(
+                    system, query,
+                    max_results=settings.web_search_max_results,
+                    max_tokens=settings.web_search_max_tokens,
+                )
                 text = await (asyncio.wait_for(coro, timeout=per) if per else coro)
             except Exception:  # noqa: BLE001 — timeout/transient: a slow attempt won't fit a retry
                 return None
@@ -722,30 +1108,87 @@ class TextPipeline:
 
     async def warm_area_facts(
         self, area_key: str | None, address: Address, point: GeoPoint | None,
-        *, timeout_s: float | None = None, language: str | None = None,
+        *, timeout_s: float | None = None, language: str | None = None, angle: int = 0,
     ) -> None:
-        """Background: fetch the area facts once and cache them by `area_key`, so the FIRST area
-        beat serves them instantly instead of blocking on web search. Best-effort — safe to call
-        repeatedly / concurrently.
+        """Background: fetch the area facts and cache them by (`area_key`, lang, `angle`), so a
+        beat serves them instantly instead of blocking on web search. `angle` is the deepen
+        round (see enrich_area) — round 0 is the first batch, later rounds keep the monologue
+        supplied. Best-effort — safe to call repeatedly / concurrently.
 
         Only NON-EMPTY facts are cached: a transient failure (timeout/429) must NOT poison the area
-        for the whole session. If empty, `take_area_facts` returns None and `_area_line` retries
-        inline; a genuinely dry area is then cached once at the session level (`st.area_facts`)."""
+        for the whole session. A genuinely dry angle caches "" so the caller advances past it."""
         if not area_key:
             return
-        key = (area_key, language or self.language)
-        if key in self._area_facts_cache:
+        key = (area_key, language or self.language, angle)
+        if key in self._area_facts_cache or key in self._area_warm_inflight:
+            # In-flight guard: _area_line now re-kicks the warm every not-yet-warmed tick
+            # (the inline blocking fetch is gone) — without this, each tick would spawn a
+            # duplicate concurrent web search for the same area.
             return
-        # Background + non-blocking, so give it a GENEROUS budget: more retries of the flaky web
-        # plugin fit -> the area reliably lands facts before the beats need them.
-        budget = (timeout_s or 25.0) * 2
-        facts = await self.enrich_area(address, point, timeout_s=budget, language=language)
-        if facts:
-            self._area_facts_cache.setdefault(key, facts)
+        self._area_warm_inflight.add(key)
+        try:
+            # Background + non-blocking, so give it a GENEROUS budget: more retries of the
+            # flaky web plugin fit -> the area reliably lands facts before the beats need them.
+            budget = (timeout_s or 25.0) * 2
+            facts = await self.enrich_area(
+                address, point, timeout_s=budget, language=language, angle=angle
+            )
+            # Cache the result — non-empty facts, OR "" for a dry angle (round > 0 only) so the
+            # deepen loop can advance past a barren angle instead of re-fetching it forever. For
+            # round 0 keep the old contract (only cache non-empty; None => inline retry).
+            if facts:
+                self._area_facts_cache.setdefault(key, facts)
+                self._update_subject_state(
+                    "area",
+                    area_key,
+                    language or self.language,
+                    deepen_round=angle,
+                    source_tier="web",
+                    status="ready",
+                    facts=facts,
+                )
+                if self.fact_buffer is not None:
+                    self.fact_buffer.put_area(
+                        area_key,
+                        facts,
+                        language or self.language,
+                        angle=angle,
+                        meta=FactBatchMeta(
+                            source_tier="web",
+                            status="ready",
+                            fact_count=len(atomize_facts(facts)),
+                            char_count=len(facts),
+                        ),
+                    )
+            elif angle > 0:
+                self._area_facts_cache.setdefault(key, "")
+                self._update_subject_state(
+                    "area",
+                    area_key,
+                    language or self.language,
+                    deepen_round=angle,
+                    source_tier="web",
+                    status="dry",
+                    facts="",
+                )
+        finally:
+            self._area_warm_inflight.discard(key)
 
-    def take_area_facts(self, area_key: str | None, language: str | None = None) -> str | None:
-        """Peek warmed area facts for (`area_key`, language) — a string ("" = warmed-but-dry), or
-        None when not warmed yet (the caller then fetches inline). Peek, not pop: serves beats."""
+    def take_area_facts(
+        self, area_key: str | None, language: str | None = None, *, angle: int = 0
+    ) -> str | None:
+        """Peek warmed area facts for (`area_key`, language, `angle`) — a string ("" = warmed-
+        but-dry), or None when not warmed yet (the caller then fetches inline / kicks a warm).
+        Peek, not pop: serves beats."""
         if not area_key:
             return None
-        return self._area_facts_cache.get((area_key, language or self.language))
+        key = (area_key, language or self.language, angle)
+        if key in self._area_facts_cache:
+            return self._area_facts_cache[key]
+        if self.fact_buffer is not None:
+            facts = self.fact_buffer.get_area(area_key, language or self.language, angle=angle)
+            if facts is not None:
+                self._area_facts_cache[key] = facts
+                self.subject_coverage("area", area_key, language or self.language, facts)
+            return facts
+        return None

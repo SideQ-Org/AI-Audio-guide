@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path
 
 from app.services.agent.companion import HeuristicCompanion
-from app.services.agent.narrator import LLMNarrator, TemplateNarrator
+from app.services.agent.narrator import LLMNarrator, TemplateNarrator, _SENT_END
 from app.services.agent.pipeline import TextPipeline
 from app.services.agent.scorer import HeuristicScorer, LLMScorer
 from app.services.enrichment.enricher import MockEnricher
@@ -77,6 +77,75 @@ def test_step_uses_and_pops_the_pregeneration_cache():
     assert ("p", "ru") not in cache  # ...and popped it (one-shot)
 
 
+def test_warm_narration_force_replaces_existing_cache_entry():
+    """A later guided/script-aware warm may deliberately replace an earlier generic cache entry
+    for the same place/lang."""
+    async def run():
+        pipeline = TextPipeline(
+            HeuristicScorer(), TemplateNarrator(), MockEnricher({"p": "Большой музей девятнадцатого века."})
+        )
+        pipeline._narr_cache[("p", "ru")] = ("Старый прогрев.", None, None)
+        cand = _candidate("p", "Музей", "museum", 0.6, dist=120, facts=None)
+        await pipeline.warm_narration(
+            cand,
+            seen=[],
+            history=[],
+            address=Address(),
+            heading=Heading(),
+            pace=Pace.SLOW,
+            preferences=None,
+            language="ru",
+            theme=None,
+            told=[],
+            next_hook=None,
+            force=True,
+        )
+        return pipeline._narr_cache[("p", "ru")][0]
+
+    text = asyncio.run(run())
+    assert text != "Старый прогрев."
+    assert text
+
+
+def test_step_falls_back_to_localized_passing_mention_when_facts_are_foreign():
+    async def run():
+        pipeline = TextPipeline(HeuristicScorer(), TemplateNarrator(), MockEnricher({}))
+        near = _candidate(
+            "p",
+            "Музей",
+            "museum",
+            0.6,
+            dist=30,
+            facts="The station opened on November 19, 2022.",
+        )
+        out = await pipeline.step([near], seen=[], history=[], language="ru", passing=True)
+        return out
+
+    out = asyncio.run(run())
+    assert out.text
+    assert "The station opened" not in out.text
+    assert "Музей" in out.text
+
+
+def test_step_exposes_fast_hint_for_passing_object():
+    async def run():
+        pipeline = TextPipeline(HeuristicScorer(), TemplateNarrator(), MockEnricher({}))
+        near = _candidate(
+            "p",
+            "Музей",
+            "museum",
+            0.6,
+            dist=30,
+            facts="Крупный музей девятнадцатого века.",
+        )
+        out = await pipeline.step([near], seen=[], history=[], language="ru", passing=True)
+        return out
+
+    out = asyncio.run(run())
+    assert out.fast_hint
+    assert "Музей" in out.fast_hint
+
+
 def test_template_narrator_silence_when_nothing_new():
     n = TemplateNarrator()
     inp = NarratorInput(
@@ -143,6 +212,13 @@ def test_llm_narrator_normalizes_silence_sentinel():
         distance_m=5,
     )
     assert asyncio.run(LLMNarrator(fake).narrate(inp)) == ""
+
+
+def test_fast_area_narration_sentence_clamp_logic():
+    text = "Вот главное. А дальше можно подробнее."
+    m = _SENT_END.search(text)
+    out = text[: m.end()].strip() if m else text
+    assert out == "Вот главное."
 
 
 def test_companion_heuristic_skips_shops():
@@ -421,6 +497,33 @@ def test_pipeline_elaborate_uses_cached_facts():
     assert "факт о месте" in text  # cached facts reach the narrator
 
 
+def test_pipeline_subject_coverage_tracks_place_deepen_state():
+    class FakeEnricher:
+        async def facts_for(self, place, context=None, language="ru"):
+            return "Факт о месте. Ещё одна деталь про фасад."
+
+    pipe = TextPipeline(
+        HeuristicScorer(),
+        LLMNarrator(FakeLLM(text_response=lambda role, system, user: user)),
+        FakeEnricher(),
+    )
+    place = Place(id="p", name="Место", category="historic", location=GeoPoint(lat=1, lon=2))
+    pipe.cache.put("p", "Короткий факт")
+    text = asyncio.run(
+        pipe.elaborate(
+            place,
+            Significance.MEDIUM,
+            history=[],
+            angle="architecture",
+        )
+    )
+    state = pipe.subject_coverage("place", "place:p", "ru", pipe.cache.get("p", "ru"))
+    assert "Ещё одна деталь" in text
+    assert state.deepen_round == 1
+    assert state.last_source_tier == "web"
+    assert state.coverage_chars >= len(pipe.cache.get("p", "ru") or "")
+
+
 # -- deterministic floor mention (a close object is never dead air) ------------
 def test_pipeline_step_floors_silenced_passing_object():
     # DeepSeek sometimes ignores "passing -> never silent"; for a close named object
@@ -520,3 +623,98 @@ def test_pick_name_falls_back_to_localized_tags():
     assert _pick_name({"int_name": "Manor"}) == "Manor"
     assert _pick_name({"name:fr": "Manoir"}) == "Manoir"
     assert _pick_name({"highway": "residential"}) is None
+
+
+# ---------------------------------------------------------------------------
+# Late-binding seam stitch: a cached (pre-generated) blurb gets its FIRST sentence
+# rewritten at delivery time to continue the last spoken line (see seam_stitch.py).
+
+
+def test_step_stitches_cached_blurb_to_previous_line():
+    """Cache pop + history -> the fast model rewrites sentence 1, tail intact."""
+    def fake(role, system, user):
+        assert role == Role.ANSWER_FAST
+        assert "Мы только что прошли старую площадь." in user  # PREV threaded in
+        return "А сразу за площадью — музей истории города."
+
+    async def run():
+        pipeline = TextPipeline(
+            HeuristicScorer(), LLMNarrator(FakeLLM(text_response=fake)), MockEnricher({})
+        )
+        pipeline._narr_cache[("p", "ru")] = (
+            "Здесь стоит музей истории города. Внутри хранится старинная карта.",
+            "хук", None,
+        )
+        near = _candidate("p", "Музей", "museum", 0.6, dist=30, facts="карта")
+        return await pipeline.step(
+            [near], seen=[], history=["Мы только что прошли старую площадь."],
+            language="ru", passing=True,
+        )
+
+    out = asyncio.run(run())
+    assert out.text == (
+        "А сразу за площадью — музей истории города. Внутри хранится старинная карта."
+    )
+
+
+def test_step_stitch_failure_speaks_original_text():
+    """Any stitch failure (LLM raises) -> the cached text is spoken unchanged."""
+    def fake(role, system, user):
+        raise RuntimeError("boom")
+
+    async def run():
+        pipeline = TextPipeline(
+            HeuristicScorer(), LLMNarrator(FakeLLM(text_response=fake)), MockEnricher({})
+        )
+        pipeline._narr_cache[("p", "ru")] = (
+            "Готовый рассказ про музей. Внутри хранится старинная карта.", "хук", None,
+        )
+        near = _candidate("p", "Музей", "museum", 0.6, dist=30, facts="карта")
+        return await pipeline.step(
+            [near], seen=[], history=["Мы только что прошли старую площадь."],
+            language="ru", passing=True,
+        )
+
+    out = asyncio.run(run())
+    assert out.text == "Готовый рассказ про музей. Внутри хранится старинная карта."
+
+
+def test_stitch_seam_skipped_without_llm_or_history():
+    """TemplateNarrator (no _llm) and empty history both leave text untouched."""
+    async def run():
+        template = TextPipeline(HeuristicScorer(), TemplateNarrator(), MockEnricher({}))
+        a = await template.stitch_seam("Текст как был.", ["Прошлая фраза."], "ru")
+        with_llm = TextPipeline(
+            HeuristicScorer(), LLMNarrator(FakeLLM(text_response="Не должно позваться.")),
+            MockEnricher({}),
+        )
+        b = await with_llm.stitch_seam("Текст как был.", [], "ru")
+        return a, b
+
+    a, b = asyncio.run(run())
+    assert a == "Текст как был."
+    assert b == "Текст как был."
+
+
+def test_stitch_rejects_degenerate_replies():
+    """Multi-line / overlong / tiny replies are rejected -> original text."""
+    from app.services.agent.seam_stitch import stitch
+
+    async def run(reply):
+        return await stitch(
+            FakeLLM(text_response=reply),
+            prev_line="Прошлая фраза.",
+            blurb="Первое предложение тут. Второе остаётся.",
+            language="ru",
+        )
+
+    blurb = "Первое предложение тут. Второе остаётся."
+    assert asyncio.run(run("Строка раз.\nСтрока два.")) == blurb  # multiline
+    assert asyncio.run(run("Да.")) == blurb  # degenerate short
+    assert asyncio.run(run("Оч " + "длинно " * 40)) == blurb  # narrated an essay
+    # dropped the original content entirely (no shared words) -> rejected
+    assert asyncio.run(run("Новая связка ведёт дальше.")) == blurb
+    # imperative / attribution markers -> rejected
+    assert asyncio.run(run("Обрати внимание: первое предложение тут.")) == blurb
+    good = asyncio.run(run("Дальше по пути — первое предложение тут."))
+    assert good == "Дальше по пути — первое предложение тут. Второе остаётся."

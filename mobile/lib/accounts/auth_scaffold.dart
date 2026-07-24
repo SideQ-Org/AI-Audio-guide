@@ -5,6 +5,7 @@
 
 import 'package:flutter/material.dart';
 
+import '../ui/components.dart' show FadeSlideIn;
 import '../ui/design.dart';
 
 /// A deeper tail for the hero gradient, derived from the accent so it works in both
@@ -72,7 +73,11 @@ class AuthScaffold extends StatelessWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           mainAxisSize: MainAxisSize.min,
-                          children: children,
+                          // Fields settle in with a soft staggered fade+slide on open.
+                          children: [
+                            for (var i = 0; i < children.length; i++)
+                              FadeSlideIn.stagger(i, dy: 0.12, child: children[i]),
+                          ],
                         ),
                       ),
                     ),

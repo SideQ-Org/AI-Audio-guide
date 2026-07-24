@@ -8,6 +8,7 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show Ticker;
+import 'package:share_plus/share_plus.dart';
 
 import '../accounts/accounts_config.dart';
 import '../accounts/api_client.dart';
@@ -18,6 +19,7 @@ import '../accounts/walk_detail_screen.dart';
 import '../l10n/app_localizations.dart';
 import 'components.dart';
 import 'design.dart';
+import 'track_map.dart';
 import 'wheel_picker.dart';
 
 // Card colour — same as the Profile blocks: clean white frosted glass in light, the
@@ -49,15 +51,32 @@ class _CommunityData {
 
 class _CommunityScreenState extends State<CommunityScreen> {
   Future<_CommunityData>? _future;
+  DateTime? _authBecameReadyAt;
+  int _warmRetryLeft = 2;
+  bool _authExpired = false;
 
   bool get _available =>
       AccountsConfig.enabled && AuthService.instance.isSignedIn;
+
+  /// Last successfully loaded data, kept for the app-run lifetime (static): reopening
+  /// the tab renders INSTANTLY from this while a background refresh catches up —
+  /// without it every open stared at a spinner for the slowest of 8 endpoints.
+  static _CommunityData? _lastData;
 
   @override
   void initState() {
     super.initState();
     if (_available) {
-      _future = _load();
+      _authBecameReadyAt = DateTime.now();
+      if (_lastData != null) {
+        // Stale-while-refresh: show the cached tab immediately, update silently.
+        _future = Future.value(_lastData);
+        _load().then((d) {
+          if (mounted) setState(() => _future = Future.value(d));
+        }).catchError((_) {/* keep showing the cached data */});
+      } else {
+        _future = _load();
+      }
       RealtimeService.instance.startPresence(); // ensure live status is up
       RealtimeService.instance.addListener(_onRealtime); // live "на прогулке" + co-walk
     }
@@ -75,38 +94,81 @@ class _CommunityScreenState extends State<CommunityScreen> {
 
   Future<_CommunityData> _load() async {
     final paid = AuthService.instance.isPaid;
-    // `me` is required (identifies the account); if IT fails, show the error card. Fire it
-    // ALONGSIDE the rest (not in a first, separate await) so all requests open pooled DB
-    // connections in one wave — awaiting me first cost a whole extra cold round-trip to the
-    // (remote) Supabase pooler on the first load. We await its result last, so a failure still
-    // surfaces as the error card exactly as before.
-    final meF = CommunityApi.me();
-    // Every other section loads independently — one flaky/slow endpoint must NOT blank
-    // the whole tab (it just renders that section empty).
-    Future<T> safe<T>(Future<T> f, T fallback) => f.catchError((_) => fallback);
-    final r = await Future.wait([
-      safe(CommunityApi.challenges(), <Challenge>[]),
-      safe(CommunityApi.friends(), <CommunityUser>[]),
-      safe(CommunityApi.friendsWalks(), <FriendWalk>[]),
-      safe(CommunityApi.myWalks(limit: paid ? 12 : 10), <FriendWalk>[]),
-      safe(CommunityApi.groupStreaks(), <GroupStreak>[]),
-      safe(CommunityApi.feed(limit: 20), <FeedItem>[]),
-      safe(CommunityApi.requests(), const FriendRequests()),
-    ]);
-    final me = await meF;  // awaited last: a failure here still shows the error card
-    return _CommunityData(
-      me,
-      r[0] as List<Challenge>,
-      r[1] as List<CommunityUser>,
-      r[2] as List<FriendWalk>,
-      r[3] as List<FriendWalk>,
-      r[4] as List<GroupStreak>,
-      r[5] as List<FeedItem>,
-      r[6] as FriendRequests,
-    );
+    Future<_CommunityData> attempt() async {
+      // `me` is required (identifies the account); if IT fails, show the error card.
+      // Prod pool-fix: the old code fanned out 8 requests at once, which saturated the
+      // Supavisor session pooler and produced EMAXCONNSESSION bursts in the field. Keep a
+      // small bounded concurrency: fast enough for UX, but no longer spikes the DB pool.
+      final meF = CommunityApi.me();
+      // Every other section loads independently — one flaky/slow endpoint must NOT blank
+      // the whole tab (it just renders that section empty).
+      Future<T> safe<T>(Future<T> f, T fallback) => f.catchError((_) => fallback);
+      final jobs = [
+        () => safe(CommunityApi.challenges(), <Challenge>[]),
+        () => safe(CommunityApi.friends(), <CommunityUser>[]),
+        () => safe(CommunityApi.friendsWalks(), <FriendWalk>[]),
+        () => safe(CommunityApi.myWalks(limit: paid ? 12 : 10), <FriendWalk>[]),
+        () => safe(CommunityApi.groupStreaks(), <GroupStreak>[]),
+        () => safe(CommunityApi.feed(limit: 20), <FeedItem>[]),
+        () => safe(CommunityApi.requests(), const FriendRequests()),
+      ];
+      final r = <dynamic>[];
+      const chunk = 2;
+      for (var i = 0; i < jobs.length; i += chunk) {
+        final part = await Future.wait([
+          for (final j in jobs.sublist(i, (i + chunk).clamp(0, jobs.length))) j(),
+        ]);
+        r.addAll(part);
+      }
+      final me = await meF;  // awaited last: a failure here still shows the error card
+      final data = _CommunityData(
+        me,
+        r[0] as List<Challenge>,
+        r[1] as List<CommunityUser>,
+        r[2] as List<FriendWalk>,
+        r[3] as List<FriendWalk>,
+        r[4] as List<GroupStreak>,
+        r[5] as List<FeedItem>,
+        r[6] as FriendRequests,
+      );
+      _lastData = data; // feed the instant-render cache for the next tab open
+      return data;
+    }
+
+    try {
+      final data = await attempt();
+      _warmRetryLeft = 2;
+      _authExpired = false;
+      return data;
+    } on ApiException catch (e) {
+      if (e.statusCode == 401) {
+        _authExpired = true;
+        await AuthService.instance.refreshEntitlement();
+      }
+      final warmWindow = !_authExpired &&
+          _authBecameReadyAt != null &&
+          DateTime.now().difference(_authBecameReadyAt!) < const Duration(seconds: 8);
+      if (warmWindow && _warmRetryLeft > 0) {
+        _warmRetryLeft -= 1;
+        await Future<void>.delayed(const Duration(milliseconds: 450));
+        return attempt();
+      }
+      rethrow;
+    } catch (e) {
+      final warmWindow = _authBecameReadyAt != null &&
+          DateTime.now().difference(_authBecameReadyAt!) < const Duration(seconds: 8);
+      if (warmWindow && _warmRetryLeft > 0) {
+        _warmRetryLeft -= 1;
+        await Future<void>.delayed(const Duration(milliseconds: 450));
+        return attempt();
+      }
+      rethrow;
+    }
   }
 
   Future<void> _refresh() async {
+    _warmRetryLeft = 2;
+    _authBecameReadyAt = DateTime.now();
     setState(() => _future = _load());
     await _future;
   }
@@ -141,13 +203,34 @@ class _CommunityScreenState extends State<CommunityScreen> {
               ]);
             }
             if (snap.hasError || !snap.hasData) {
+              final warmWindow = !_authExpired &&
+                  _authBecameReadyAt != null &&
+                  DateTime.now().difference(_authBecameReadyAt!) < const Duration(seconds: 8);
+              if (warmWindow && _warmRetryLeft > 0) {
+                Future<void>.microtask(() async {
+                  if (!mounted) return;
+                  _warmRetryLeft -= 1;
+                  await Future<void>.delayed(const Duration(milliseconds: 450));
+                  if (!mounted) return;
+                  setState(() => _future = _load());
+                });
+                return ListView(children: [
+                  SizedBox(height: topPad + 120),
+                  Center(child: CircularProgressIndicator(color: c.primary)),
+                ]);
+              }
+              final authError = _authExpired ||
+                  (snap.error is ApiException && (snap.error as ApiException).statusCode == 401);
               return ListView(children: [
                 SizedBox(height: topPad + 100),
                 _CenterCard(
-                  icon: Icons.wifi_off_rounded,
+                  icon: authError ? Icons.lock_outline_rounded : Icons.wifi_off_rounded,
                   title: l.tabCommunity,
-                  body: l.authErrorNetwork,
-                  action: TextButton(onPressed: _refresh, child: Text(l.retry)),
+                  body: authError ? l.authErrorNetwork : l.authErrorNetwork,
+                  action: TextButton(
+                    onPressed: _refresh,
+                    child: Text(l.retry),
+                  ),
                 ),
               ]);
             }
@@ -165,14 +248,14 @@ class _CommunityScreenState extends State<CommunityScreen> {
     final weekly = d.challenges.where((c) => c.isSystem).toList();
     final custom = d.challenges.where((c) => !c.isSystem).toList();
 
-    return ListView(
-      padding: EdgeInsets.fromLTRB(16, topPad + 16, 16, MediaQuery.of(context).padding.bottom + 110),
-      children: [
+    // Section cards below; each is wrapped in a staggered FadeSlideIn at the end of
+    // this method, so the tab content reveals top-down when it first loads.
+    final sections = <Widget>[
         // Title + add-friend (friends are managed here + in the profile).
         Row(children: [
           Expanded(child: Text(l.tabCommunity, style: h1(context))),
           Pressable(
-            onTap: _openAddFriend,
+            onTap: () => _openAddFriend(d),
             child: Container(
               width: 40, height: 40, alignment: Alignment.center,
               decoration: BoxDecoration(shape: BoxShape.circle, color: _blockFill(context), border: Border.all(color: c.glassBorder)),
@@ -188,14 +271,17 @@ class _CommunityScreenState extends State<CommunityScreen> {
         ],
 
         // 1. News marquee (friends' events + what's new).
-        if (d.feed.isNotEmpty || true) ...[
+        if (d.feed.isNotEmpty) ...[
           _NewsMarquee(items: d.feed),
           const SizedBox(height: Gap.lg),
         ],
 
-        // Incoming friend requests (kept accessible; friend LIST lives in the profile).
-        if (d.requests.incoming.isNotEmpty) ...[
-          _RequestsCard(incoming: d.requests.incoming, onChanged: _refresh),
+        // Friend requests: incoming (accept/decline) + outgoing (compact "request sent").
+        if (d.requests.incoming.isNotEmpty || d.requests.outgoing.isNotEmpty) ...[
+          _RequestsCard(
+              incoming: d.requests.incoming,
+              outgoing: d.requests.outgoing,
+              onChanged: _refresh),
           const SizedBox(height: Gap.lg),
         ],
 
@@ -215,7 +301,8 @@ class _CommunityScreenState extends State<CommunityScreen> {
               scrollDirection: Axis.horizontal,
               itemCount: d.myWalks.length,
               separatorBuilder: (_, __) => const SizedBox(width: 12),
-              itemBuilder: (_, i) => _RouteCard(walk: d.myWalks[i], showUser: false),
+              itemBuilder: (_, i) =>
+                  _RouteCard(walk: d.myWalks[i], showUser: false, onDeleted: _refresh),
             ),
           ),
         const SizedBox(height: Gap.lg),
@@ -249,7 +336,22 @@ class _CommunityScreenState extends State<CommunityScreen> {
               itemBuilder: (_, i) => _RouteCard(walk: d.friendWalks[i]),
             ),
           ),
+          const SizedBox(height: Gap.lg),
         ],
+
+        // 6. Friends (streak + live "walking now" + unfriend on ⋮ / long-press).
+        _SectionHeader(title: l.communityFriends),
+        const SizedBox(height: Gap.sm),
+        if (d.friends.isEmpty)
+          _MutedNote(l.communityNoFriends)
+        else
+          _FriendsList(friends: d.friends, onChanged: _refresh),
+    ];
+    return ListView(
+      padding: EdgeInsets.fromLTRB(16, topPad + 16, 16, MediaQuery.of(context).padding.bottom + 110),
+      children: [
+        for (var i = 0; i < sections.length; i++)
+          FadeSlideIn.stagger(i, child: sections[i]),
       ],
     );
   }
@@ -258,13 +360,16 @@ class _CommunityScreenState extends State<CommunityScreen> {
     Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const MyRoutesScreen()));
   }
 
-  Future<void> _openAddFriend() async {
+  Future<void> _openAddFriend(_CommunityData d) async {
     final changed = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => const _AddFriendSheet(),
+      builder: (_) => _AddFriendSheet(
+        friendIds: d.friends.map((f) => f.id).toSet(),
+        pendingIds: d.requests.outgoing.map((f) => f.id).toSet(),
+      ),
     );
     if (changed == true) _refresh();
   }
@@ -397,6 +502,8 @@ class _NewsMarqueeState extends State<_NewsMarquee> with SingleTickerProviderSta
         return l.feedStreak(name, (p['days'] as num?)?.toInt() ?? 0);
       case 'badge':
         return l.feedBadge(name, (p['badge'] as String?) ?? '');
+      case 'walk_shared':
+        return l.feedWalkShared(name);
       default:
         return l.feedChallenge(name);
     }
@@ -404,6 +511,7 @@ class _NewsMarqueeState extends State<_NewsMarquee> with SingleTickerProviderSta
 
   String _emoji(String kind) => switch (kind) {
         'walk' => '🥾',
+        'walk_shared' => '🗺️',
         'streak' || 'group_streak' => '🔥',
         'badge' => '🏅',
         _ => '🏆',
@@ -452,12 +560,14 @@ class _NewsMarqueeState extends State<_NewsMarquee> with SingleTickerProviderSta
 }
 
 class _RequestsCard extends StatelessWidget {
-  const _RequestsCard({required this.incoming, required this.onChanged});
+  const _RequestsCard({required this.incoming, this.outgoing = const [], required this.onChanged});
   final List<CommunityUser> incoming;
+  final List<CommunityUser> outgoing;
   final Future<void> Function() onChanged;
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context)!;
+    final c = context.colors;
     return GlassModule(
       fill: _blockFill(context), sheen: false,
       padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
@@ -481,6 +591,19 @@ class _RequestsCard extends StatelessWidget {
           ]),
           const SizedBox(height: 6),
         ],
+        // Outgoing: compact one-liners — the request is waiting on the other side.
+        for (final u in outgoing)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Row(children: [
+              Icon(Icons.schedule_rounded, size: 15, color: c.textFaint),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(l.communityRequestOutgoing(u.handle ?? u.name),
+                    maxLines: 1, overflow: TextOverflow.ellipsis, style: caption(context)),
+              ),
+            ]),
+          ),
       ]),
     );
   }
@@ -512,7 +635,12 @@ class _ChallengeCard extends StatelessWidget {
       child: GlassModule(
         fill: _blockFill(context), sheen: false,
         padding: const EdgeInsets.all(14),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // AnimatedSize: joining reveals the progress bar with a smooth expand.
+        child: AnimatedSize(
+          duration: Motion.med,
+          curve: Motion.easeOut,
+          alignment: Alignment.topCenter,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
             Container(
               width: 42, height: 42, alignment: Alignment.center,
@@ -540,7 +668,8 @@ class _ChallengeCard extends StatelessWidget {
             const SizedBox(height: 12),
             _ProgressBar(fraction: challenge.progressFraction),
           ],
-        ]),
+          ]),
+        ),
       ),
     );
   }
@@ -584,9 +713,37 @@ class _ProgressBar extends StatelessWidget {
 }
 
 class _RouteCard extends StatelessWidget {
-  const _RouteCard({required this.walk, this.showUser = true});
+  const _RouteCard({required this.walk, this.showUser = true, this.onDeleted});
   final FriendWalk walk;
   final bool showUser; // friends' routes show @user; my routes show distance · places
+  // Owner cards only: inline delete (confirm -> API -> parent refresh) so a walk can
+  // be removed straight from the list without opening the detail screen first.
+  final VoidCallback? onDeleted;
+
+  Future<void> _delete(BuildContext context) async {
+    final l = AppLocalizations.of(context)!;
+    final ok = await showBrandConfirm(
+      context,
+      icon: Icons.delete_outline_rounded,
+      title: l.deleteWalk,
+      message: l.deleteWalkConfirm,
+      confirmLabel: l.delete,
+      cancelLabel: l.cancel,
+      destructive: true,
+    );
+    if (!ok || !context.mounted) return;
+    try {
+      await WalkApi.deleteWalk(walk.id);
+      onDeleted?.call();
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(AppLocalizations.of(context)!.authErrorNetwork)),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
@@ -621,11 +778,49 @@ class _RouteCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(Radii.lg),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Expanded(
-            child: Container(
-              width: double.infinity,
-              color: c.glassFill(0.03),
-              child: CustomPaint(painter: _RoutePainter(walk.path, c.primary)),
-            ),
+            // Real map preview with the ASPECT-TRUE route (the shared TrackMap renderer:
+            // tiles + CameraFit.bounds). The old _RoutePainter stretched lat/lon
+            // independently to fill the card and drew on a blank background — the route
+            // shape had nothing to do with the real walk. Non-interactive, so taps fall
+            // through to the card's Pressable (open detail). The painter stays only as
+            // the no-track placeholder (a gentle decorative wave).
+            child: Stack(fit: StackFit.expand, children: [
+              walk.path.length >= 2
+                  ? TrackMap(
+                      path: walk.path,
+                      height: double.infinity,
+                      width: double.infinity,
+                      borderRadius: 0, // the card's ClipRRect already rounds the corners
+                      strokeWidth: 3,
+                      padding: 16,
+                    )
+                  : Container(
+                      width: double.infinity,
+                      color: c.glassFill(0.03),
+                      child: CustomPaint(painter: _RoutePainter(walk.path, c.primary)),
+                    ),
+              // Inline delete for the OWNER's walks: a small glass chip over the map
+              // corner (solid fill for contrast on tiles — no blur, Impeller-safe).
+              if (onDeleted != null)
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: Pressable(
+                    onTap: () => _delete(context),
+                    child: Container(
+                      width: 32,
+                      height: 32,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: _blockFill(context),
+                        border: Border.all(color: c.glassBorder),
+                      ),
+                      child: Icon(Icons.delete_outline_rounded, size: 17, color: c.err),
+                    ),
+                  ),
+                ),
+            ]),
           ),
           Padding(
             padding: const EdgeInsets.all(12),
@@ -644,6 +839,9 @@ class _RouteCard extends StatelessWidget {
   }
 }
 
+/// Placeholder-only painter for a card whose walk carries NO track (path < 2 points):
+/// a gentle decorative wave. Real tracks are rendered by the shared TrackMap (tiles +
+/// aspect-true CameraFit) — never by this painter (it can't preserve geography).
 class _RoutePainter extends CustomPainter {
   _RoutePainter(this.path, this.color);
   final List<List<double>> path;
@@ -651,40 +849,16 @@ class _RoutePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final stroke = Paint()
-      ..color = color
+      ..color = color.withValues(alpha: 0.4)
       ..strokeWidth = 3
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round;
     const pad = 18.0;
-    if (path.length < 2) {
-      // placeholder gentle wave
-      final p = Path()
-        ..moveTo(pad, size.height * 0.6)
-        ..cubicTo(size.width * 0.35, size.height * 0.2, size.width * 0.6, size.height * 0.85,
-            size.width - pad, size.height * 0.4);
-      canvas.drawPath(p, stroke..color = color.withValues(alpha: 0.4));
-      return;
-    }
-    double minLat = path[0][0], maxLat = path[0][0], minLon = path[0][1], maxLon = path[0][1];
-    for (final pt in path) {
-      minLat = pt[0] < minLat ? pt[0] : minLat;
-      maxLat = pt[0] > maxLat ? pt[0] : maxLat;
-      minLon = pt[1] < minLon ? pt[1] : minLon;
-      maxLon = pt[1] > maxLon ? pt[1] : maxLon;
-    }
-    final dLat = (maxLat - minLat).abs() < 1e-9 ? 1.0 : (maxLat - minLat);
-    final dLon = (maxLon - minLon).abs() < 1e-9 ? 1.0 : (maxLon - minLon);
-    final w = size.width - pad * 2, h = size.height - pad * 2;
-    Offset map(List<double> pt) => Offset(
-          pad + ((pt[1] - minLon) / dLon) * w,
-          pad + (1 - (pt[0] - minLat) / dLat) * h, // lat up
-        );
-    final p = Path()..moveTo(map(path.first).dx, map(path.first).dy);
-    for (final pt in path.skip(1)) {
-      final o = map(pt);
-      p.lineTo(o.dx, o.dy);
-    }
+    final p = Path()
+      ..moveTo(pad, size.height * 0.6)
+      ..cubicTo(size.width * 0.35, size.height * 0.2, size.width * 0.6, size.height * 0.85,
+          size.width - pad, size.height * 0.4);
     canvas.drawPath(p, stroke);
   }
 
@@ -754,9 +928,14 @@ class _HandleSetupCardState extends State<_HandleSetupCard> {
         displayName: AuthService.instance.displayName,
       );
       await widget.onDone();
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l.communityHandleTaken)));
+        // A real conflict/validation error means the handle itself is the problem;
+        // anything else (timeout, socket, 5xx) is a network problem — say so.
+        final conflict = e is ApiException &&
+            (e.statusCode == 409 || e.statusCode == 400 || e.statusCode == 422);
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(conflict ? l.communityHandleTaken : l.authErrorNetwork)));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -815,7 +994,11 @@ class _HandleSetupCardState extends State<_HandleSetupCard> {
 // ── add friend sheet ─────────────────────────────────────────────────────────
 
 class _AddFriendSheet extends StatefulWidget {
-  const _AddFriendSheet();
+  const _AddFriendSheet({this.friendIds = const {}, this.pendingIds = const {}});
+  /// Already-accepted friends — marked in results, no second request.
+  final Set<String> friendIds;
+  /// Users with an outgoing request pending — marked "request sent".
+  final Set<String> pendingIds;
   @override
   State<_AddFriendSheet> createState() => _AddFriendSheetState();
 }
@@ -824,6 +1007,7 @@ class _AddFriendSheetState extends State<_AddFriendSheet> {
   final _ctrl = TextEditingController();
   Timer? _debounce;
   List<CommunityUser> _results = [];
+  final Set<String> _sent = {}; // requests sent from THIS sheet
   bool _busy = false;
   bool _changed = false;
 
@@ -851,14 +1035,17 @@ class _AddFriendSheetState extends State<_AddFriendSheet> {
     });
   }
 
+  bool _isFriend(CommunityUser u) => widget.friendIds.contains(u.id);
+  bool _isPending(CommunityUser u) => widget.pendingIds.contains(u.id) || _sent.contains(u.id);
+
   Future<void> _add(CommunityUser u) async {
     final l = AppLocalizations.of(context)!;
-    if (u.handle == null) return;
+    if (u.handle == null || _isFriend(u) || _isPending(u)) return;
     await CommunityApi.requestByHandle(u.handle!);
     _changed = true;
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l.communityRequestSent)));
-      setState(() => _results = _results.where((x) => x.id != u.id).toList());
+      setState(() => _sent.add(u.id));
     }
   }
 
@@ -899,7 +1086,20 @@ class _AddFriendSheetState extends State<_AddFriendSheet> {
                     Text(u.name, style: titleS(context).copyWith(fontSize: 14.5)),
                     Text('@${u.handle} · ${l.profileLevelN(u.level)}', style: caption(context)),
                   ])),
-                  _MiniButton(label: l.communitySendRequest, filled: true, onTap: () => _add(u)),
+                  if (_isFriend(u))
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      child: Text(l.communityAlreadyFriends,
+                          style: caption(context).copyWith(fontWeight: FontWeight.w700)),
+                    )
+                  else if (_isPending(u))
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      child: Text(l.communityRequestSent,
+                          style: caption(context).copyWith(fontWeight: FontWeight.w700)),
+                    )
+                  else
+                    _MiniButton(label: l.communitySendRequest, filled: true, onTap: () => _add(u)),
                 ]),
               )),
           const SizedBox(height: 8),
@@ -1183,6 +1383,24 @@ class _CoWalkCard extends StatelessWidget {
               Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: caption(context)),
             ]),
           ),
+          // Share the room code so a friend can join (system share sheet).
+          Pressable(
+            onTap: () => Share.share(l.communityCoWalkShareMsg(rt.coWalkCode ?? '')),
+            child: Semantics(
+              label: l.communityCoWalkShare,
+              button: true,
+              child: Container(
+                width: 34, height: 34, alignment: Alignment.center,
+                margin: const EdgeInsets.only(right: 6),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: c.glassFill(0.06),
+                  border: Border.all(color: c.glassBorder),
+                ),
+                child: Icon(Icons.ios_share_rounded, size: 17, color: c.primary),
+              ),
+            ),
+          ),
           _MiniButton(label: l.communityCoWalkLeave, onTap: () => rt.leaveCoWalk()),
         ]),
       );
@@ -1419,7 +1637,7 @@ class _GroupStreakCard extends StatelessWidget {
             ),
           ]),
         ),
-        _MiniButton(label: l.communityCoWalkLeave, onTap: () async {
+        _MiniButton(label: l.communityStreakLeave, onTap: () async {
           await CommunityApi.leaveGroupStreak(streak.id);
           await onChanged();
         }),
@@ -1490,6 +1708,266 @@ class _GroupStreakSheetState extends State<_GroupStreakSheet> {
   }
 }
 
+// ── friends list (shared by the tab section and the profile entry) ───────────
+
+class _FriendsList extends StatelessWidget {
+  const _FriendsList({required this.friends, required this.onChanged});
+  final List<CommunityUser> friends;
+  final Future<void> Function() onChanged;
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return GlassModule(
+      fill: _blockFill(context), sheen: false,
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      // AnimatedSize: removing a friend (refresh with one row fewer) collapses the
+      // card smoothly instead of snapping to the shorter height.
+      child: AnimatedSize(
+        duration: Motion.med,
+        curve: Motion.easeOut,
+        alignment: Alignment.topCenter,
+        child: Column(children: [
+          for (int i = 0; i < friends.length; i++) ...[
+            if (i > 0) Divider(height: 1, color: c.glassBorder),
+            _FriendTile(user: friends[i], onChanged: onChanged),
+          ],
+        ]),
+      ),
+    );
+  }
+}
+
+class _FriendTile extends StatelessWidget {
+  const _FriendTile({required this.user, required this.onChanged});
+  final CommunityUser user;
+  final Future<void> Function() onChanged;
+
+  Future<void> _confirmUnfriend(BuildContext context) async {
+    final l = AppLocalizations.of(context)!;
+    final ok = await showBrandConfirm(
+      context,
+      icon: Icons.person_remove_rounded,
+      title: l.communityUnfriend,
+      message: l.communityUnfriendConfirm(user.name),
+      confirmLabel: l.delete,
+      cancelLabel: l.cancel,
+      destructive: true,
+    );
+    if (!ok) return;
+    await CommunityApi.unfriend(user.id);
+    await onChanged();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    final c = context.colors;
+    final sub = [
+      if (user.handle != null) '@${user.handle}',
+      l.profileLevelN(user.level),
+    ].join(' · ');
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPress: () => _confirmUnfriend(context),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 8, 4, 8),
+        child: Row(children: [
+          Stack(clipBehavior: Clip.none, children: [
+            _Avatar(user: user, size: 42),
+            if (user.walkingNow)
+              Positioned(
+                right: -1, bottom: -1,
+                child: Container(
+                  width: 13, height: 13,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: c.ok,
+                    border: Border.all(color: c.glassBorder, width: 2),
+                  ),
+                ),
+              ),
+          ]),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(user.name, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: titleS(context).copyWith(fontSize: 14.5)),
+              const SizedBox(height: 1),
+              user.walkingNow
+                  ? Text('$sub · ${l.communityWalkingNow}',
+                      maxLines: 1, overflow: TextOverflow.ellipsis,
+                      style: caption(context).copyWith(color: c.ok, fontWeight: FontWeight.w700))
+                  : Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: caption(context)),
+            ]),
+          ),
+          if (user.streak > 0) ...[
+            const SizedBox(width: 8),
+            Text('🔥 ${user.streak}',
+                style: caption(context).copyWith(fontWeight: FontWeight.w800, color: c.primary)),
+          ],
+          Pressable(
+            onTap: () => _confirmUnfriend(context),
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: Icon(Icons.more_vert_rounded, size: 20, color: c.textFaint),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+// ── friends (full page — the profile "Друзья" entry point) ───────────────────
+
+/// Backend-driven friends screen: the same tiles as the Community tab (streak, live
+/// "walking now" presence, unfriend) plus incoming/outgoing requests and add-friend.
+/// Replaces the legacy metadata-backed [FriendsScreen] as the profile entry.
+class CommunityFriendsScreen extends StatefulWidget {
+  const CommunityFriendsScreen({super.key});
+  @override
+  State<CommunityFriendsScreen> createState() => _CommunityFriendsScreenState();
+}
+
+class _FriendsPageData {
+  final List<CommunityUser> friends;
+  final FriendRequests requests;
+  const _FriendsPageData(this.friends, this.requests);
+}
+
+class _CommunityFriendsScreenState extends State<CommunityFriendsScreen> {
+  Future<_FriendsPageData>? _future;
+
+  bool get _available => AccountsConfig.enabled && AuthService.instance.isSignedIn;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_available) _future = _load();
+  }
+
+  Future<_FriendsPageData> _load() async {
+    // Friends are required; requests degrade to empty so a flaky endpoint
+    // doesn't blank the page.
+    final friendsF = CommunityApi.friends();
+    final requests = await CommunityApi.requests()
+        .catchError((_) => const FriendRequests());
+    return _FriendsPageData(await friendsF, requests);
+  }
+
+  Future<void> _refresh() async {
+    setState(() => _future = _load());
+    await _future;
+  }
+
+  Future<void> _openAddFriend(_FriendsPageData? d) async {
+    final changed = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _AddFriendSheet(
+        friendIds: d?.friends.map((f) => f.id).toSet() ?? const {},
+        pendingIds: d?.requests.outgoing.map((f) => f.id).toSet() ?? const {},
+      ),
+    );
+    if (changed == true) _refresh();
+  }
+
+  Widget _header(BuildContext context, _FriendsPageData? d) {
+    final l = AppLocalizations.of(context)!;
+    final c = context.colors;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(6, 6, 8, 8),
+      child: Row(children: [
+        IconButton(
+          icon: Icon(Icons.arrow_back_rounded, color: c.textPrimary),
+          onPressed: () => Navigator.of(context).maybePop(),
+        ),
+        Expanded(
+          child: Text(l.communityFriends,
+              style: h2(context), maxLines: 1, overflow: TextOverflow.ellipsis),
+        ),
+        if (_available)
+          IconButton(
+            icon: Icon(Icons.person_add_alt_1_rounded, color: c.primary),
+            onPressed: () => _openAddFriend(d),
+          ),
+      ]),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l = AppLocalizations.of(context)!;
+    final c = context.colors;
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: GradientBackground(
+        child: SafeArea(
+          child: !_available
+              ? Column(children: [
+                  _header(context, null),
+                  Expanded(
+                    child: _CenterCard(
+                        icon: AppIcons.usersThree,
+                        title: l.communityFriends,
+                        body: l.communityGuest),
+                  ),
+                ])
+              : FutureBuilder<_FriendsPageData>(
+                  future: _future,
+                  builder: (context, snap) {
+                    final d = snap.data;
+                    Widget bodyW;
+                    if (d != null) {
+                      bodyW = RefreshIndicator(
+                        onRefresh: _refresh,
+                        color: c.primary,
+                        child: ListView(
+                          padding: EdgeInsets.fromLTRB(
+                              16, 4, 16, MediaQuery.of(context).padding.bottom + 24),
+                          children: [
+                            if (d.requests.incoming.isNotEmpty ||
+                                d.requests.outgoing.isNotEmpty) ...[
+                              _RequestsCard(
+                                  incoming: d.requests.incoming,
+                                  outgoing: d.requests.outgoing,
+                                  onChanged: _refresh),
+                              const SizedBox(height: Gap.lg),
+                            ],
+                            if (d.friends.isEmpty)
+                              _MutedNote(l.communityNoFriends)
+                            else
+                              _FriendsList(friends: d.friends, onChanged: _refresh),
+                          ],
+                        ),
+                      );
+                    } else if (snap.hasError) {
+                      bodyW = ListView(children: [
+                        const SizedBox(height: 60),
+                        _CenterCard(
+                          icon: Icons.wifi_off_rounded,
+                          title: l.communityFriends,
+                          body: l.authErrorNetwork,
+                          action: TextButton(onPressed: _refresh, child: Text(l.retry)),
+                        ),
+                      ]);
+                    } else {
+                      bodyW = Center(child: CircularProgressIndicator(color: c.primary));
+                    }
+                    return Column(children: [
+                      _header(context, d),
+                      Expanded(child: bodyW),
+                    ]);
+                  },
+                ),
+        ),
+      ),
+    );
+  }
+}
+
 // ── my routes (full page) ────────────────────────────────────────────────────
 
 class MyRoutesScreen extends StatefulWidget {
@@ -1499,8 +1977,14 @@ class MyRoutesScreen extends StatefulWidget {
 }
 
 class _MyRoutesScreenState extends State<MyRoutesScreen> {
-  late final Future<List<FriendWalk>> _future =
+  late Future<List<FriendWalk>> _future =
       CommunityApi.myWalks(limit: AuthService.instance.isPaid ? 50 : 10);
+
+  void _reload() {
+    setState(() {
+      _future = CommunityApi.myWalks(limit: AuthService.instance.isPaid ? 50 : 10);
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1531,7 +2015,10 @@ class _MyRoutesScreenState extends State<MyRoutesScreen> {
                       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                         crossAxisCount: 2, mainAxisSpacing: 12, crossAxisSpacing: 12, childAspectRatio: 0.82),
                       delegate: SliverChildBuilderDelegate(
-                        (context, i) => _RouteCard(walk: snap.data![i], showUser: false),
+                        (context, i) => FadeSlideIn.stagger(
+                            i,
+                            child: _RouteCard(
+                                walk: snap.data![i], showUser: false, onDeleted: _reload)),
                         childCount: snap.data!.length,
                       ),
                     ),

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from app.config import settings
 from app.services.agent.significance import at_least, significance_from_weight, tags_have_wiki
 from app.shared.geo_math import bearing_deg, haversine_m, offset_point
-from app.shared.schemas import GeoPoint, Place, Significance
+from app.shared.schemas import GeoPoint, NavManeuver, Place, Significance
 
 from .categories import weight_for
 from .providers import PlaceProvider
@@ -32,7 +32,9 @@ _EPS = 1e-6
 # Large public buildings kept as map landmarks but NOT used as guided-tour stops (you don't
 # stop for an excursion at a hospital/school). They still show on the map + can be narrated in
 # passing; they just aren't route waypoints.
-_ROUTE_STOP_EXCLUDE: frozenset[str] = frozenset({"hospital", "school"})
+_ROUTE_STOP_EXCLUDE: frozenset[str] = frozenset(
+    {"hospital", "school", "motorway", "junction"}  # can't route a walk TO a motorway
+)
 
 
 @dataclass
@@ -53,6 +55,9 @@ class PlannedRoute:
     polyline: list[list[float]] = field(default_factory=list)  # [[lat, lon], ...]
     total_distance_m: float = 0.0
     total_duration_s: float = 0.0
+    # Turn-by-turn maneuvers from the router (OSRM steps); [] on the straight-line
+    # fallback, where guided leading degrades to the direction chip (no spoken turns).
+    nav_steps: list[NavManeuver] = field(default_factory=list)
 
     @property
     def enough(self) -> bool:
@@ -61,6 +66,18 @@ class PlannedRoute:
 
 def _midpoint(a: GeoPoint, b: GeoPoint) -> GeoPoint:
     return offset_point(a, bearing_deg(a, b), haversine_m(a, b) / 2.0)
+
+
+def _nav_steps_from_leg(leg: RouteLeg) -> list[NavManeuver]:
+    """RouteLeg.steps (routing dataclass) -> NavManeuver (persisted pydantic). [] on the
+    straight-line fallback — guided leading then degrades to the chip, no spoken turns."""
+    return [
+        NavManeuver(
+            kind=s.kind, modifier=s.modifier, lat=s.lat, lon=s.lon,
+            name=s.name, distance_m=s.distance_m,
+        )
+        for s in (leg.steps or [])
+    ]
 
 
 def _interest(weight: float, has_wiki: bool) -> float:
@@ -188,11 +205,20 @@ class RoutePlanner:
                 dup_wiki.add(qid)
             if nm:
                 dup_named.add(nm)
+            anchor_distance = haversine_m(origin, p.location)
+            end_distance = haversine_m(p.location, destination) if destination is not None else 0.0
+            corridor_detour = 0.0
+            if destination is not None:
+                direct = haversine_m(origin, destination)
+                corridor_detour = max(0.0, anchor_distance + end_distance - direct)
             pool.append(
                 _PoolItem(
                     place=p,
                     significance=sig,
                     interest=_interest(weight_for(p.category), has_wiki),
+                    anchor_distance_m=anchor_distance,
+                    end_distance_m=end_distance,
+                    corridor_detour_m=corridor_detour,
                 )
             )
 
@@ -252,6 +278,24 @@ class RoutePlanner:
         route.polyline = leg.polyline
         route.total_distance_m = leg.distance_m
         route.total_duration_s = leg.duration_s
+        route.nav_steps = _nav_steps_from_leg(leg)
+
+        # Pathological tail guard: the greedy chooser can still admit one weak far detour at the
+        # end of the walk. If the routed walk blew far past budget, trim trailing low-value stops
+        # until it fits rather than keeping an obviously awkward tail.
+        while (
+            budget_m != float("inf")
+            and route.total_distance_m > budget_m * 1.18
+            and len(order_idx) > settings.route_min_stops
+        ):
+            order_idx = order_idx[:-1]
+            seq_nodes = [0] + order_idx + ([dest_idx] if has_end else [0])
+            seq_points = [nodes[i] for i in seq_nodes]
+            leg = await self._safe_route(seq_points)
+            route.polyline = leg.polyline
+            route.total_distance_m = leg.distance_m
+            route.total_duration_s = leg.duration_s
+            route.nav_steps = _nav_steps_from_leg(leg)
 
         cum = 0.0
         order = 0
@@ -289,6 +333,75 @@ class _PoolItem:
     place: Place
     significance: Significance
     interest: float
+    anchor_distance_m: float = 0.0
+    end_distance_m: float = 0.0
+    corridor_detour_m: float = 0.0
+
+
+def _route_cost(path: list[int], M: list[list[float]]) -> float:
+    return sum(M[path[i]][path[i + 1]] for i in range(len(path) - 1))
+
+
+def _candidate_ratio(
+    ci: int,
+    route: list[int],
+    *,
+    added_cost: float,
+    pool: list[_PoolItem],
+    M: list[list[float]],
+    dest_idx: int,
+    budget_m: float,
+) -> float:
+    item = pool[ci - 1]
+    progress_bonus = 1.0
+    if dest_idx >= 0:
+        direct = M[0][dest_idx]
+        if direct > _EPS:
+            progress = max(0.0, direct - M[ci][dest_idx]) / direct
+            progress_bonus = 0.85 + 0.45 * progress
+    cluster_penalty = 1.0
+    placed = [node for node in route if 1 <= node <= len(pool)]
+    if placed:
+        nearest = min(M[ci][node] for node in placed)
+        if nearest < 120.0:
+            cluster_penalty = 0.86
+        elif nearest < 220.0:
+            cluster_penalty = 0.93
+    detour_bonus = 1.0
+    if dest_idx >= 0 and item.corridor_detour_m > 0.0:
+        direct = max(M[0][dest_idx], 250.0)
+        detour_bonus = 1.0 / (1.0 + 2.2 * item.corridor_detour_m / direct)
+    long_splice_penalty = 1.0
+    if budget_m != float("inf") and added_cost > budget_m * 0.35:
+        long_splice_penalty = 0.75
+    return (
+        item.interest * progress_bonus * detour_bonus * cluster_penalty * long_splice_penalty
+    ) / max(added_cost, _EPS)
+
+
+def _improve_route_order(path: list[int], M: list[list[float]], budget_m: float) -> list[int]:
+    """Bounded local cleanup after greedy insertion: keep the chosen stop set but reduce
+    awkward orderings and backtracking with adjacent swaps and short 2-opt reversals."""
+    best = path[:]
+    best_cost = _route_cost(best, M)
+    changed = True
+    passes = 0
+    while changed and passes < 6:
+        changed = False
+        passes += 1
+        for i in range(1, len(best) - 2):
+            cand = best[:]
+            cand[i], cand[i + 1] = cand[i + 1], cand[i]
+            cost = _route_cost(cand, M)
+            if cost + _EPS < best_cost and cost <= budget_m + _EPS:
+                best, best_cost, changed = cand, cost, True
+        for i in range(1, len(best) - 2):
+            for j in range(i + 1, len(best) - 1):
+                cand = best[:i] + list(reversed(best[i : j + 1])) + best[j + 1 :]
+                cost = _route_cost(cand, M)
+                if cost + _EPS < best_cost and cost <= budget_m + _EPS:
+                    best, best_cost, changed = cand, cost, True
+    return best
 
 
 def _order_with_matrix(
@@ -298,9 +411,9 @@ def _order_with_matrix(
     pool: list[_PoolItem],
     budget_m: float,
 ) -> list[int]:
-    """Greedy insertion on the distance matrix. Node indices: 0=origin, 1..k=pool,
-    dest_idx=destination (or -1 for a loop, which returns to 0). Returns the chosen
-    pool node indices (1..k) in visit order."""
+    """Greedy insertion on the distance matrix, then a bounded local improvement pass.
+    Node indices: 0=origin, 1..k=pool, dest_idx=destination (or -1 for a loop, which
+    returns to 0). Returns the chosen pool node indices (1..k) in visit order."""
     end = dest_idx if dest_idx >= 0 else 0  # loop closes back on origin
     route: list[int] = [0, end]
     total = M[0][end]
@@ -312,7 +425,6 @@ def _order_with_matrix(
         for ci in range(1, k + 1):
             if ci in placed:
                 continue
-            # cheapest edge to splice this candidate into
             best_cost = float("inf")
             best_pos = 1
             for pos in range(len(route) - 1):
@@ -322,7 +434,15 @@ def _order_with_matrix(
                     best_cost, best_pos = cost, pos + 1
             if total + best_cost > budget_m:
                 continue
-            ratio = pool[ci - 1].interest / max(best_cost, _EPS)
+            ratio = _candidate_ratio(
+                ci,
+                route,
+                added_cost=best_cost,
+                pool=pool,
+                M=M,
+                dest_idx=dest_idx,
+                budget_m=budget_m,
+            )
             if best is None or ratio > best[0]:
                 best = (ratio, ci, best_pos, best_cost)
         if best is None:
@@ -332,4 +452,5 @@ def _order_with_matrix(
         total += cost
         placed.add(ci)
 
+    route = _improve_route_order(route, M, budget_m)
     return [i for i in route if 1 <= i <= k]

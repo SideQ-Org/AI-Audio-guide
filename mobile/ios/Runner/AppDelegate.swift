@@ -9,11 +9,13 @@ import flutter_foreground_task
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    // flutter_foreground_task: let the background service isolate register plugins,
-    // and route notifications through the app so the tour card + Pause button work.
-    SwiftFlutterForegroundTaskPlugin.setPluginRegistrantCallback { registry in
-      GeneratedPluginRegistrant.register(with: registry)
-    }
+    #if !targetEnvironment(simulator)
+      // flutter_foreground_task: let the background service isolate register plugins,
+      // and route notifications through the app so the tour card + Pause button work.
+      SwiftFlutterForegroundTaskPlugin.setPluginRegistrantCallback { registry in
+        GeneratedPluginRegistrant.register(with: registry)
+      }
+    #endif
     if #available(iOS 10.0, *) {
       UNUserNotificationCenter.current().delegate = self as? UNUserNotificationCenterDelegate
     }

@@ -3,7 +3,6 @@
 import asyncio
 
 from app.services.agent.companion import HeuristicCompanion
-from app.services.agent.narrator import Narrator
 from app.services.agent.orchestrator import Orchestrator
 from app.services.agent.pipeline import TextPipeline
 from app.services.agent.scorer import HeuristicScorer
@@ -63,7 +62,8 @@ def test_parse_ordinary_city_prefers_level6():
 
 
 def test_parse_prefers_localized_name_and_empty():
-    els = [{"type": "relation", "tags": {"admin_level": "4", "name": "Moscow", "name:ru": "Москва"}}]
+    tags = {"admin_level": "4", "name": "Moscow", "name:ru": "Москва"}
+    els = [{"type": "relation", "tags": tags}]
     assert parse_address(els, "ru").city == "Москва"
     assert parse_address([], "ru") == Address()
 
@@ -178,12 +178,23 @@ def test_arc_opener_then_woven_object_then_outline_beats_no_repeats():
 
     async def run():
         orch = _orch([place])
+
+        # Area beats are facts-gated now (area_beat_requires_new_facts): a beat with zero
+        # not-yet-told verified facts is skipped instead of letting the model freewheel.
+        # Ground the arc with canned area facts so the outline flows in this test.
+        async def _area_facts(*_a, **_k):
+            return (
+                "В слободе жили ремесленники. Улицы назывались по цехам. "
+                "Люди работали прямо в домах."
+            )
+
+        orch.pipeline.enrich_area = _area_facts
         st = await orch.store.load("s1")  # skip the one-time opener greeting for this arc test
         st.greeted = True
         await orch.store.save(st)
         here = GeoPoint(lat=55.7415, lon=37.6539)
         outs = []
-        for _ in range(5):
+        for _ in range(7):
             out = await orch.on_position("s1", here, Heading(), Pace.SLOW)
             outs.append(out.text)
         return outs

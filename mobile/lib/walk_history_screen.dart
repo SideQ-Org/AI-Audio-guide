@@ -12,6 +12,7 @@ import 'accounts/login_screen.dart';
 import 'accounts/models.dart';
 import 'accounts/walk_detail_screen.dart';
 import 'l10n/app_localizations.dart';
+import 'ui/components.dart' show FadeSlideIn, fadeThroughRoute;
 import 'ui/design.dart';
 import 'ui/track_map.dart';
 
@@ -148,23 +149,32 @@ class _WalkHistoryScreenState extends State<WalkHistoryScreen> {
             itemCount: walks.length + (showUpgrade ? 1 : 0),
             itemBuilder: (_, i) {
               if (showUpgrade && i == 0) {
-                return _UpgradeBanner(
-                  count: profile!.walkLimit ?? walks.length,
-                  onUpgrade: widget.onUpgrade!,
+                return FadeSlideIn.stagger(
+                  i,
+                  child: _UpgradeBanner(
+                    count: profile!.walkLimit ?? walks.length,
+                    onUpgrade: widget.onUpgrade!,
+                  ),
                 );
               }
               final w = walks[i - (showUpgrade ? 1 : 0)];
-              return _WalkTile(
-                walk: w,
-                onTap: () async {
-                  final deleted = await Navigator.of(context).push<bool>(
-                    MaterialPageRoute<bool>(
-                      builder: (_) => WalkDetailScreen(walkId: w.id, title: _walkTitle(l, w)),
-                    ),
-                  );
-                  if (deleted == true) _reload(refreshProfile: true);
-                },
-                onDelete: () => _delete(w),
+              // Tiles reveal with a light stagger on the first build; the detail opens
+              // with a fade-through (a Hero over the mini-map would clone a second live
+              // TrackMap mid-flight — not cheap, so a soft fade it is).
+              return FadeSlideIn.stagger(
+                i,
+                child: _WalkTile(
+                  walk: w,
+                  onTap: () async {
+                    final deleted = await Navigator.of(context).push<bool>(
+                      fadeThroughRoute<bool>(
+                        (_) => WalkDetailScreen(walkId: w.id, title: _walkTitle(l, w)),
+                      ),
+                    );
+                    if (deleted == true) _reload(refreshProfile: true);
+                  },
+                  onDelete: () => _delete(w),
+                ),
               );
             },
           ),
@@ -235,41 +245,45 @@ class _WalkTile extends StatelessWidget {
             borderRadius: BorderRadius.circular(Radii.lg),
             onTap: onTap,
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
-              child: Row(children: [
-                // Track thumbnail (real mini-map) when the walk has a route; else the route icon.
-                if (walk.path.length >= 2)
-                  Container(
-                    width: 62, height: 62,
-                    decoration: BoxDecoration(
-                      color: c.glassFill(0.05),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: c.glassBorder),
-                    ),
-                    // A crisp tile-free route thumbnail — no map/glow to smear at this size.
-                    child: TrackThumb(path: walk.path, size: 62),
-                  )
-                else
-                  Container(
-                    width: 42, height: 42, alignment: Alignment.center,
-                    decoration: BoxDecoration(shape: BoxShape.circle, color: c.glassFill(0.06), border: Border.all(color: c.glassBorder)),
-                    child: Icon(Icons.route_rounded, size: 20, color: c.primary),
+              padding: const EdgeInsets.fromLTRB(12, 12, 8, 12),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                // Real map preview with the walk's route (same TrackMap renderer as the
+                // summary sheet / walk detail, aspect-true track). Taps fall through to
+                // the card's InkWell (TrackMap is non-interactive), opening the detail.
+                if (walk.path.length >= 2) ...[
+                  TrackMap(
+                    path: walk.path,
+                    height: 112,
+                    borderRadius: 12,
+                    strokeWidth: 3,
+                    padding: 20,
                   ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: titleS(context)),
-                    const SizedBox(height: 2),
-                    Text('$when  ·  ${l.placesCount(walk.objectCount)}',
-                        maxLines: 1, overflow: TextOverflow.ellipsis, style: caption(context)),
-                  ]),
-                ),
-                IconButton(
-                  icon: Icon(Icons.delete_outline_rounded, color: c.textFaint),
-                  tooltip: l.deleteWalk,
-                  onPressed: onDelete,
-                ),
-                Icon(Icons.chevron_right_rounded, color: c.textFaint),
+                  const SizedBox(height: 10),
+                ],
+                Row(children: [
+                  if (walk.path.length < 2) ...[
+                    Container(
+                      width: 42, height: 42, alignment: Alignment.center,
+                      decoration: BoxDecoration(shape: BoxShape.circle, color: c.glassFill(0.06), border: Border.all(color: c.glassBorder)),
+                      child: Icon(Icons.route_rounded, size: 20, color: c.primary),
+                    ),
+                    const SizedBox(width: 12),
+                  ],
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: titleS(context)),
+                      const SizedBox(height: 2),
+                      Text('$when  ·  ${l.placesCount(walk.objectCount)}',
+                          maxLines: 1, overflow: TextOverflow.ellipsis, style: caption(context)),
+                    ]),
+                  ),
+                  IconButton(
+                    icon: Icon(Icons.delete_outline_rounded, color: c.textFaint),
+                    tooltip: l.deleteWalk,
+                    onPressed: onDelete,
+                  ),
+                  Icon(Icons.chevron_right_rounded, color: c.textFaint),
+                ]),
               ]),
             ),
           ),

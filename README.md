@@ -14,7 +14,8 @@ stops, callbacks, a finale), not a string of disconnected blurbs.
 
 > Status: working MVP. Python/FastAPI backend + Flutter client, talking over a single WebSocket.
 > Runs end-to-end on cloud LLMs (OpenRouter/Anthropic/Gemini) or a local model (LM Studio), and
-> ships as an Android APK, an iOS build, and a browser web app.
+> ships as an Android APK, an iOS build, plus local web/desktop Flutter dev targets. The current
+> production deploy serves the API/WS surface only; it does not host the Flutter web app.
 
 ---
 
@@ -39,6 +40,12 @@ The guide is one continuous loop driven by where you walk:
   mentioned an hour ago.
 - **Never dead air.** When nothing's right beside you, it carries the story of the area, or reaches
   for a landmark you can see ahead — and expands its search so you're not left in silence.
+- **Prewarms before start.** Before the user presses start, the client can do a short-lived,
+  hidden `prewarm` WebSocket pass that warms nearby inventory, area context, and the startup
+  contract without turning that socket into the live tour session.
+- **Fast first phrase.** Startup now prefers an area-led startup contract that is prewarmed ahead
+  of the live walk; on the paid path the first guided phrase runs on a fast tier while the richer
+  continuation stays on the stronger narrator model.
 
 A single **stateful orchestrator** ("the brain") owns the loop and all session state; around it are
 stateless LLM roles (scorer, narrator, planner, companion), a deterministic **narrative director**
@@ -88,7 +95,7 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design.
 |------|----------------|
 | [`backend/`](backend/) | FastAPI + asyncio + WebSocket server — the orchestrator and all agent logic. |
 | [`mobile/`](mobile/) | Flutter client (Android / iOS / web): full-screen map, on-device TTS/STT, 8 languages, walking with the screen locked. |
-| [`deploy/`](deploy/) | Caddy + docker-compose for a production host (TLS termination, serves the web build, proxies the backend). |
+| [`deploy/`](deploy/) | Caddy + docker-compose for a production host (TLS termination, proxies API/WS to the backend, returns a simple non-API response on `/`). |
 
 Component-level setup lives in [`backend/README.md`](backend/README.md) and
 [`mobile/README.md`](mobile/README.md).
@@ -154,8 +161,9 @@ Point the client at your backend with `--dart-define=WS_URL=ws://<host>:8000/ws`
 - 🔒 **Background walking** — keeps narrating with the screen off or an earbud in; a shade-card
   **Pause** button really halts the tour (no generation, no spend).
 - 🧭 **Gaze-aware** — knows "in front of you" from a steady walking course or a held-up compass.
-- 👤 **Accounts & tiers (optional)** — sign-in, saved walk history, and a paid tier are a dormant,
-  opt-in layer; with no keys the app is guest-only and behaves exactly like the base MVP.
+- 👤 **Accounts & tiers (optional)** — sign-in, saved walk history, billing, and the paid tier are
+  implemented but configuration-gated; with no keys the app is guest-only and behaves like the base
+  MVP. Community and dashboard surfaces are in the codebase behind the same optional/durable layer.
   See [`ACCOUNTS_DESIGN.md`](ACCOUNTS_DESIGN.md).
 
 ---

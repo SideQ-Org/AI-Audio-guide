@@ -13,7 +13,7 @@ and the xAI-TTS fallback: the guide never goes dark).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 import httpx
@@ -41,6 +41,24 @@ def _downsample(pts: list[list[float]]) -> list[list[float]]:
 
 
 @dataclass
+class RouteStep:
+    """One turn-by-turn maneuver along a route (OSRM legs[].steps[].maneuver): where it
+    happens, what to do, and the way's name. The base of the spoken navigator cues."""
+
+    kind: str  # OSRM maneuver type: turn / fork / end of road / roundabout / arrive / ...
+    modifier: str  # left / right / slight left / straight / uturn / "" when absent
+    lat: float
+    lon: float
+    name: str  # the way turned ONTO ("" for unnamed paths)
+    distance_m: float  # length of the step's own way segment (to the NEXT maneuver)
+
+
+# Maneuvers that carry no spoken value: "continue straight" and silent name changes.
+_STEP_SKIP_KINDS = {"depart", "new name", "continue"}
+_STEPS_CAP = 150  # runaway guard: a walking route never legitimately needs more
+
+
+@dataclass
 class RouteLeg:
     """A walked path between an ordered list of points: the real (or approximate)
     geometry plus its length. For a multi-point request the geometry spans the whole
@@ -52,6 +70,9 @@ class RouteLeg:
     # OSRM map-matching confidence (0..1); 1.0 for a route/straight-line (not a match). Low
     # confidence means the trace didn't fit the road graph (e.g. an unmapped alley/shortcut).
     confidence: float = 1.0
+    # Turn-by-turn maneuvers (OSRM steps=true); [] for straight-line/match legs, where
+    # the guided leading falls back to the direction chip alone.
+    steps: list[RouteStep] = field(default_factory=list)
 
 
 @dataclass
@@ -80,6 +101,35 @@ def _coords(points: list[GeoPoint]) -> str:
     return ";".join(f"{p.lon},{p.lat}" for p in points)
 
 
+def _parse_steps(route: dict) -> list[RouteStep]:
+    """Flatten OSRM ``legs[].steps[]`` into spoken-cue-worthy maneuvers. Drops depart /
+    continue / silent name changes and intermediate arrives (per-waypoint), keeping only
+    the FINAL arrive so the navigator can announce the destination."""
+    steps: list[RouteStep] = []
+    legs = route.get("legs") or []
+    for li, leg in enumerate(legs):
+        last_leg = li == len(legs) - 1
+        for s in leg.get("steps") or []:
+            man = s.get("maneuver") or {}
+            kind = str(man.get("type") or "")
+            if kind in _STEP_SKIP_KINDS:
+                continue
+            if kind == "arrive" and not last_leg:
+                continue  # intermediate waypoint arrives are stop-logic, not turns
+            loc = man.get("location") or [0.0, 0.0]  # [lon, lat]
+            steps.append(RouteStep(
+                kind=kind,
+                modifier=str(man.get("modifier") or ""),
+                lat=float(loc[1]),
+                lon=float(loc[0]),
+                name=str(s.get("name") or ""),
+                distance_m=float(s.get("distance", 0.0)),
+            ))
+            if len(steps) >= _STEPS_CAP:
+                return steps
+    return steps
+
+
 class OSRMRouting:
     """Talks to a self-hosted ``osrm-routed`` with the foot profile over the internal
     docker network. Any transport/HTTP/JSON error raises — the caller (route planner)
@@ -94,7 +144,7 @@ class OSRMRouting:
             pts = [[p.lat, p.lon] for p in points]
             return RouteLeg(polyline=pts, distance_m=0.0, duration_s=0.0)
         url = f"{self.base_url}/route/v1/foot/{_coords(points)}"
-        params = {"overview": "full", "geometries": "geojson", "steps": "false"}
+        params = {"overview": "full", "geometries": "geojson", "steps": "true"}
         async with httpx.AsyncClient(timeout=self.timeout_s, follow_redirects=False) as client:
             resp = await client.get(url, params=params)
             resp.raise_for_status()
@@ -110,6 +160,7 @@ class OSRMRouting:
             polyline=polyline,
             distance_m=float(r.get("distance", 0.0)),
             duration_s=float(r.get("duration", 0.0)),
+            steps=_parse_steps(r),
         )
 
     async def match(self, points: list[GeoPoint]) -> RouteLeg:

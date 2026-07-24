@@ -31,6 +31,7 @@ ROUTE_SCRIPT_SCHEMA: dict = {
     "properties": {
         "theme": {"type": "string"},
         "intro": {"type": "string"},
+        "lead_in": {"type": "string"},
         "beats": {
             "type": "array",
             "items": {
@@ -39,15 +40,16 @@ ROUTE_SCRIPT_SCHEMA: dict = {
                     "order": {"type": "integer"},
                     "angle": {"type": "string"},
                     "bridge": {"type": "string"},
+                    "leg": {"type": "string"},
                     "callback": {"type": "string"},
                 },
-                "required": ["order", "angle", "bridge", "callback"],
+                "required": ["order", "angle", "bridge", "leg", "callback"],
                 "additionalProperties": False,
             },
         },
         "finale": {"type": "string"},
     },
-    "required": ["theme", "intro", "beats", "finale"],
+    "required": ["theme", "intro", "lead_in", "beats", "finale"],
     "additionalProperties": False,
 }
 
@@ -74,6 +76,13 @@ class HeuristicTourScripter:
         head = "Пройдём небольшой маршрут" + (f" по {area}" if area else "") + "."
         tail = (" Нас ждут: " + ", ".join(names[:4]) + ".") if names else ""
         intro = (head + tail).strip()
+        lead_in = (
+            (
+                f"Пока идём к первой точке, держим в голове, как {area or 'это место'} "
+                f"меняло себя от эпохи к эпохе."
+            )
+            if names else ""
+        )
         beats: list[StopBeat] = []
         for i, s in enumerate(inp.stops):
             nxt = inp.stops[i + 1].name if i + 1 < len(inp.stops) else ""
@@ -85,11 +94,18 @@ class HeuristicTourScripter:
                     order=i,
                     angle=angle,
                     bridge=(f"Дальше идём к: {nxt}." if nxt else "Это последняя точка маршрута."),
+                    leg=(
+                        (
+                            f"По дороге к {nxt} продолжаем тему прогулки через саму "
+                            f"улицу и то, как здесь менялась жизнь."
+                        )
+                        if nxt else ""
+                    ),
                     callback="",
                 )
             )
         finale = "На этом наша прогулка завершается. Спасибо, что были рядом!"
-        return RouteScript(theme=theme, intro=intro, beats=beats, finale=finale)
+        return RouteScript(theme=theme, intro=intro, lead_in=lead_in, beats=beats, finale=finale)
 
 
 class LLMTourScripter:

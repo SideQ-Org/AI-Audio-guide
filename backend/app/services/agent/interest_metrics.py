@@ -428,3 +428,52 @@ def score_corpus(
         adjacent_cohesion=adjacent_cohesion(texts),
         callback_rate=callback_rate(texts, categories) if categories else 0.0,
     )
+
+
+# --------------------------------------------------------------------------- #
+# fact ranking (feed the narrator the MOST interesting facts first)
+# --------------------------------------------------------------------------- #
+def fact_interest(fact: str, language: str = "ru") -> float:
+    """A cheap, deterministic interestingness score for ONE atomic fact. Reuses the
+    panel's signals: concreteness (numbers/dates incl. spoken-as-words), proper names,
+    specific vocabulary — minus cliché filler and unspeakable length. Used to ORDER
+    facts so the narrator builds a blurb around the best material instead of whatever
+    sentence the source happened to put first."""
+    f = (fact or "").strip()
+    if not f:
+        return -1.0
+    toks = _tokens(f)
+    if not toks:
+        return -1.0
+    score = 0.0
+    # Concreteness: dates/numbers (spoken forms included) are the strongest signal.
+    score += 3.0 * min(number_density(f, language), 0.34)
+    # Proper names mid-sentence (people/places) — capitalized tokens beyond the first.
+    words = f.split()
+    proper = sum(
+        1 for w in words[1:] if w[:1].isupper() and not w.isupper() and len(w) > 2
+    )
+    score += 0.35 * min(proper, 3)
+    # Specific vocabulary: longer average token ≈ terms, names, materials (cheap NIDF
+    # stand-in that needs no corpus).
+    avg_len = sum(len(t) for t in toks) / len(toks)
+    score += max(0.0, min(0.5, (avg_len - 5.0) * 0.15))
+    # Penalties: cliché filler and hard-to-speak length.
+    score -= 0.8 * cliche_hits(f, language)
+    if len(toks) > 30:
+        score -= 0.4
+    if len(f) < 25:
+        score -= 0.5  # too thin to build a story around
+    return score
+
+
+def rank_facts(
+    facts: list[str], language: str = "ru", *, top_k: int | None = None
+) -> list[str]:
+    """Order atomic facts by interestingness, best first (stable for equal scores).
+    ``top_k`` caps the list — the narrator works best with a few strong facts, not a
+    wall of mediocre ones."""
+    ranked = sorted(
+        facts, key=lambda f: fact_interest(f, language), reverse=True
+    )
+    return ranked[:top_k] if top_k else ranked

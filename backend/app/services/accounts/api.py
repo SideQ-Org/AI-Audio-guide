@@ -12,6 +12,7 @@ the ``accounts`` extra can still start the app — the endpoints just answer 503
 from __future__ import annotations
 
 import asyncio
+import uuid as _uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -144,8 +145,15 @@ async def build_me(repo, session, user_id: str) -> MeOut:
     user = await repo.get_user(session, user_id=user_id)
     tier = repo.effective_tier(user)
     since = datetime.now(UTC) - timedelta(hours=24)
-    tours_today = await repo.count_walks_since(session, user_id=user_id, since=since)
-    walk_count = await repo.count_walks(session, user_id=user_id)
+    # ONE walks sweep instead of two COUNT round-trips: the pooler is ~200 ms away, so
+    # every saved statement is real wall-clock off the profile's first paint.
+    from .community import walks_ts_by_user
+
+    ts = (await walks_ts_by_user(session, [user_id])).get(_uuid.UUID(user_id), [])
+    tours_today = sum(
+        1 for t in ts if (t.replace(tzinfo=UTC) if t.tzinfo is None else t) >= since
+    )
+    walk_count = len(ts)
     paid = tier == "paid"
     return MeOut(
         id=str(user.id) if user is not None else user_id,

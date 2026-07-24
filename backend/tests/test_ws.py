@@ -23,13 +23,16 @@ def _heuristic_app(stt_text: str = "А когда его построили?"):
     return TestClient(main_module.app)
 
 
-def _recv(ws):
-    """Next frame, skipping the async 'places' map-pin pushes that interleave with
-    the narration stream (one fires when the inventory disc is first built)."""
+def _recv(ws, *, skip_reserve: bool = True):
+    """Next frame, skipping async auxiliary pushes that may interleave with the main
+    narration flow (`places`, and usually `reserve`)."""
     while True:
         msg = ws.receive_json()
-        if msg["type"] != "places":
-            return msg
+        if msg["type"] == "places":
+            continue
+        if skip_reserve and msg["type"] == "reserve":
+            continue
+        return msg
 
 
 def test_ws_narrates_then_replies():
@@ -183,6 +186,34 @@ def test_ws_pause_halts_narration_then_resume_continues():
     assert state.seen_place_ids, "seen-list survives the pause (same tour)"
 
 
+def test_ws_route_accept_ack_round_trip():
+    client = _heuristic_app()
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json(
+            {"type": "position", "lat": 55.7539, "lon": 37.6208, "gaze_confidence": "low"}
+        )
+        ws.send_json({"type": "start_guided", "mode": "loop", "budget_min": 40})
+        route = None
+        for _ in range(12):
+            msg = _recv(ws, skip_reserve=False)
+            if msg["type"] == "route":
+                route = msg
+                break
+        assert route is not None and route["stops"]
+        ws.send_json({"type": "route_accept"})
+        ack = None
+        startup = None
+        for _ in range(10):
+            msg = _recv(ws, skip_reserve=False)
+            if msg["type"] == "route_accepted":
+                ack = msg
+            elif ack is not None and msg["type"] == "narration" and msg["text"]:
+                startup = msg
+                break
+        assert ack == {"type": "route_accepted"}
+        assert startup is not None
+
+
 def test_ws_unknown_type_errors():
     client = _heuristic_app()
     with client.websocket_connect("/ws") as ws:
@@ -201,6 +232,72 @@ def test_ws_ping_is_ignored():
         )
         assert _recv(ws)["type"] == "state"
         assert _recv(ws)["type"] == "narration"
+
+
+def test_ws_emits_reserve_and_accepts_reserve_played_ack():
+    client = _heuristic_app()
+    sid = "reservews12345678"
+    with client.websocket_connect(f"/ws?sid={sid}") as ws:
+        ws.send_json(
+            {"type": "position", "lat": 55.7525, "lon": 37.6231, "gaze_confidence": "low"}
+        )
+        reserve = None
+        narration = None
+        seen_state = False
+        for _ in range(12):
+            msg = _recv(ws, skip_reserve=False)
+            if msg["type"] == "state":
+                seen_state = True
+            elif msg["type"] == "reserve":
+                reserve = msg
+            elif msg["type"] == "narration":
+                narration = msg
+            if seen_state and reserve and narration:
+                break
+        assert seen_state is True
+        assert narration is not None
+        assert reserve is not None and reserve["items"]
+        rid = reserve["items"][0]["id"]
+        ws.send_json({"type": "reserve_played", "reserve_id": rid})
+    state = asyncio.run(main_module._orchestrator.store.load(sid))
+    assert rid in state.played_reserve_ids
+    assert all(it.id != rid for it in state.fact_reserve)
+
+
+def test_ws_reserve_round_trips_even_when_aux_frames_interleave():
+    client = _heuristic_app()
+    sid = "reservews22345678"
+    with client.websocket_connect(f"/ws?sid={sid}") as ws:
+        ws.send_json(
+            {"type": "position", "lat": 55.7525, "lon": 37.6231, "gaze_confidence": "low"}
+        )
+        seen = []
+        reserve = None
+        while len(seen) < 4:
+            msg = _recv(ws, skip_reserve=False)
+            seen.append(msg['type'])
+            if msg['type'] == 'reserve':
+                reserve = msg
+        assert 'state' in seen
+        assert 'narration' in seen
+        assert reserve is not None and reserve['items']
+
+
+def test_ws_reserve_includes_paid_audio_when_tts_enabled(monkeypatch):
+    client = _heuristic_app()
+    monkeypatch.setattr(main_module, '_synth_audio', lambda text, tier, language: asyncio.sleep(0, result=('ZmFrZQ==', 'audio/mpeg')))
+    sid = 'reserveaudio1234567'
+    with client.websocket_connect(f'/ws?sid={sid}') as ws:
+        ws.send_json({'type': 'auth', 'token': ''})
+        ws.send_json({'type': 'position', 'lat': 55.7525, 'lon': 37.6231, 'gaze_confidence': 'low'})
+        reserve = None
+        for _ in range(12):
+            msg = _recv(ws, skip_reserve=False)
+            if msg['type'] == 'reserve':
+                reserve = msg
+                break
+        assert reserve is not None and reserve['items']
+        assert any(it.get('audio_b64') == 'ZmFrZQ==' for it in reserve['items'])
 
 
 def test_ws_resume_keeps_session_after_disconnect():

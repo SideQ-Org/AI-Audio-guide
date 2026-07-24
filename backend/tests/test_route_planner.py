@@ -110,3 +110,18 @@ def test_pick_landmark_ends_at_top_interest():
     assert route.stops, "landmark destination should itself be a stop"
     # The last stop is the chosen landmark (highest-weight: museum 0.9 / monument).
     assert route.stops[-1].place.category in {"museum", "monument"}
+
+
+def test_destination_prefers_forward_progress_over_big_detour():
+    destination = GeoPoint(lat=55.7539, lon=37.6408)
+    provider = StaticPlaceProvider([
+        _place("fwd", "Впереди", "museum", 55.7539, 37.6308),
+        _place("detour", "В стороне", "museum", 55.7839, 37.6158),
+    ])
+    planner = RoutePlanner(StraightLineRouting(), provider)
+    route = asyncio.run(
+        planner.build(ORIGIN, mode="destination", destination=destination, budget_min=45)
+    )
+    ids = [s.place.id for s in route.stops]
+    assert "fwd" in ids
+    assert not (ids and ids[0] == "detour"), "destination route should not start with a big side detour"

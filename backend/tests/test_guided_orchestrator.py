@@ -17,6 +17,11 @@ _FIX = Path(__file__).resolve().parent / "fixtures" / "places_red_square.json"
 
 
 def _orch():
+    from app.config import settings
+
+    settings.agent_backend = "heuristic"
+    settings.geo_source = "fixture"
+    settings.enrichment_source = "mock"
     orch = build_orchestrator(store=InMemoryStateStore())
     # Force straight-line routing + the offline fixture POIs so this test never hits the
     # network (the .env may set GEO_SOURCE=overpass, which would make discovery.provider live).
@@ -57,6 +62,31 @@ def test_accept_route_sets_accepted():
 
     st = asyncio.run(run())
     assert st.nav.accepted is True
+
+
+def test_plan_route_warms_guided_preview_artifacts():
+    orch = _orch()
+
+    async def run():
+        route = await orch.plan_route("sp", ORIGIN, mode="loop", budget_min=40)
+        for _ in range(5):
+            tasks = list(orch._bg)
+            if not tasks:
+                break
+            await asyncio.gather(*tasks, return_exceptions=True)
+        st = await orch.store.load("sp")
+        cache = dict(orch.pipeline._narr_cache)
+        return route, st, cache, orch.discovery.inventory.peek("sp")
+
+    route, st, cache, inv = asyncio.run(run())
+    assert route.stops
+    assert st.nav.accepted is False
+    assert inv is not None
+    first_stop_id = route.stops[0].place.id
+    assert (first_stop_id, st.language) in cache
+    assert st.startup_block is not None
+    assert st.startup_block.scope == "guided_start"
+    assert st.startup_block.text
 
 
 def test_reject_route_returns_to_free():

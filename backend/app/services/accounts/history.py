@@ -85,6 +85,9 @@ def record_object(
     # A gap-rotation (an EXISTING walk timed out) starts a fresh route; the very first
     # walk of a session keeps the whole accumulated trail (it's all one walk).
     rotated = new_walk and state.walk_id is not None
+    # The walk being rotated away may be one that never got its `end`/discard (killed
+    # app, dead socket at Stop) — prune it now if it was too short to record.
+    prev_wid = state.walk_id if rotated else None
     if new_walk:
         wid = uuid.uuid4()
         state.walk_id = str(wid)
@@ -129,6 +132,9 @@ def record_object(
         "district": state.address.district or None,
         # snapshot the downsampled route so far (persisted to the walk row below)
         "path": list(getattr(state, "path", []) or []),
+        # the walk this rotation is leaving behind (None unless rotating) — pruned in
+        # _write when it spanned less than walk_min_record_s
+        "prev_walk_id": str(prev_wid) if prev_wid else None,
     }
     task = asyncio.create_task(_write(new_walk, wid, meta, event, sample))
     _tasks.add(task)
@@ -141,6 +147,19 @@ async def _write(
     try:
         async with session_scope() as session:
             if new_walk:
+                # Rotation backstop (10-min record rule): the walk we're rotating away
+                # never got an explicit `end` — delete it if it was too short to keep.
+                if meta.get("prev_walk_id"):
+                    if await repo.prune_short_walk(
+                        session,
+                        walk_id=meta["prev_walk_id"],
+                        user_id=meta["user_id"],
+                        min_s=settings.walk_min_record_s,
+                    ):
+                        _log.info(
+                            "pruned short walk %s (rotation backstop)",
+                            meta["prev_walk_id"],
+                        )
                 # Lazily materialize the user row (id seeded from the JWT sub == auth.uid()
                 # so RLS matches) before the walk's FK needs it.
                 await repo.get_or_create_user(

@@ -38,11 +38,11 @@ an **OpenStreetMap** map, lets you **ask by voice or text**, and runs in **8 lan
   **never cuts a line mid-sentence** — a newer line waits, and only the freshest is queued.
 - **Ask the guide** — tap-to-talk mic (`record`, 16 kHz WAV → backend STT) or the keyboard
   button for a typed question; the reply is shown and spoken back.
-- **Settings & history** — dev controls (WebSocket URL, simulated-walk toggle) live in a
-  Settings sheet; the full message feed is a swipe-up **History** sheet. Auto-reconnect with
-  backoff is built in, plus a **keepalive ping** (so an idle socket isn't reaped mid-walk) and a
-  stable per-launch **session id** sent as `?sid=` so a dropped link **resumes the same tour**
-  (no repeated narration) instead of starting over.
+- **Settings & history** — dev controls (simulated-walk toggle, theme/language, account-related
+  settings when configured) live in a Settings/Profile surface; the full message feed is a swipe-up
+  **History** sheet. Auto-reconnect with backoff is built in, plus a **keepalive ping** (so an idle
+  socket isn't reaped mid-walk) and a stable per-launch **session id** sent as `?sid=` so a dropped
+  link **resumes the same tour** (no repeated narration) instead of starting over.
 - **Background operation (screen locked)** — keep walking with the phone in a pocket and an
   earbud in. A foreground **LOCATION** service (`flutter_foreground_task`, type `location`) holds
   the process alive so GPS, the WebSocket and TTS keep running with the screen off; a shade card
@@ -62,7 +62,7 @@ an **OpenStreetMap** map, lets you **ask by voice or text**, and runs in **8 lan
 1. Start the backend on `:8000` (see `../backend`, host `0.0.0.0` for devices/emulator).
 2. Android emulator:
    ```bash
-   flutter build apk --debug
+   flutter build apk --debug --dart-define=WS_URL=ws://localhost:8000/ws
    adb -s emulator-5554 install -r build/app/outputs/flutter-apk/app-debug.apk
    adb -s emulator-5554 reverse tcp:8000 tcp:8000          # localhost:8000 -> host
    adb -s emulator-5554 shell pm grant com.example.ai_audio_guide android.permission.RECORD_AUDIO
@@ -73,8 +73,9 @@ an **OpenStreetMap** map, lets you **ask by voice or text**, and runs in **8 lan
    language and the map follows you; tap the mic or ⌨ to ask. The *Simulated walk* toggle in
    ⚙ Settings replays the demo route on the emulator / without GPS.
 
-WS URL defaults to `ws://localhost:8000/ws` (works on the emulator via `adb reverse`).
-On a real phone, set it in ⚙ Settings → `ws://<reachable-backend>:8000/ws`.
+Backend URL is now **baked at build time**. On emulator/dev builds you may point it at
+`ws://localhost:8000/ws`; on real phones you must build with a publicly reachable
+`wss://…/ws` host. There is no longer an in-app WebSocket URL field to repair a bad APK.
 
 ## iOS build (macOS + Xcode only)
 iOS binaries **cannot** be built on Windows/Linux. The iOS project is fully configured
@@ -125,5 +126,5 @@ via `gen-l10n`).
 Run on a physical phone for real GPS, the system TTS voices, and the microphone (the
 emulator has no real GPS/voice/mic input). A walking phone needs the backend reachable
 **along the route**, not just on home Wi-Fi — over mobile data a private LAN IP won't work,
-so use a tunnel (cloudflared/ngrok), a private VPN (Tailscale), or a cloud host, and put that
-`wss://…/ws` URL in ⚙ Settings.
+so use a tunnel (cloudflared/ngrok), a private VPN (Tailscale), or a cloud host, and bake that
+`wss://…/ws` URL into the build via `--dart-define=WS_URL=…`.

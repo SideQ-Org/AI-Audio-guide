@@ -18,10 +18,12 @@ from app.services.agent.tour_scripter import HeuristicTourScripter, LLMTourScrip
 from app.services.enrichment.enricher import (
     CompositeEnricher,
     Enricher,
+    EnrichmentCache,
     MockEnricher,
     WebSearchEnricher,
     WikiEnricher,
 )
+from app.services.enrichment.fact_buffer import FactBuffer
 from app.services.geo.discovery import Discovery
 from app.services.geo.geocoder import Geocoder, OverpassGeocoder
 from app.services.geo.providers import OverpassProvider, StaticPlaceProvider
@@ -154,6 +156,7 @@ def _tour_scripter():
 def build_orchestrator(store: StateStore | None = None) -> Orchestrator:
     scorer, narrator, companion = _roles()
     web = settings.enrichment_source == "websearch"
+    fact_buffer = FactBuffer(settings.fact_buffer_path)
     pipeline = TextPipeline(
         scorer,
         narrator,
@@ -166,6 +169,7 @@ def build_orchestrator(store: StateStore | None = None) -> Orchestrator:
         area_llm=_area_llm(),
         planner=_planner(),
         name_localizer=_name_localizer(),
+        fact_buffer=fact_buffer,
     )
     discovery = _discovery()
     # Proactive guided mode: the route planner reuses the discovery provider as its POI

@@ -13,7 +13,8 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' show ImageFilter;
 
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform;
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:audioplayers/audioplayers.dart';
@@ -61,9 +62,12 @@ ThemeMode _parseThemeMode(String? v) => switch (v) {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Set up the channel the foreground-service isolate uses to talk back to the UI
-  // isolate (notification button presses). Android/iOS only; a no-op-guard on web.
-  if (!kIsWeb) FlutterForegroundTask.initCommunicationPort();
+  // The foreground-task plugin chatters on a dead method channel on the iOS simulator
+  // ("Communicating on a dead channel" spam, then broken walk startup). Keep the real
+  // integration on devices, but skip it on simulator/web where it is either unnecessary
+  // or actively harmful.
+  if (!kIsWeb && !_isIosSimulator())
+    FlutterForegroundTask.initCommunicationPort();
   // Initialize accounts (Supabase) if this build was configured with keys; a no-op
   // otherwise, so the guest-only app runs unchanged. Never fatal — degrade to guest.
   try {
@@ -106,7 +110,8 @@ class _GuideServiceHandler extends TaskHandler {
   Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {}
   // Pause/Resume button -> ask the UI isolate to toggle the tour.
   @override
-  void onNotificationButtonPressed(String id) => FlutterForegroundTask.sendDataToMain(id);
+  void onNotificationButtonPressed(String id) =>
+      FlutterForegroundTask.sendDataToMain(id);
   // Tapping the notification body reopens the map.
   @override
   void onNotificationPressed() => FlutterForegroundTask.launchApp();
@@ -139,10 +144,25 @@ String _genSessionId() {
   return List.generate(32, (_) => chars[r.nextInt(chars.length)]).join();
 }
 
+bool _isIosSimulator() =>
+    !kIsWeb &&
+    defaultTargetPlatform == TargetPlatform.iOS &&
+    Platform.environment.containsKey('SIMULATOR_DEVICE_NAME');
+
+bool get _simulatorSafeVisuals => _isIosSimulator();
+
+bool _isWidgetTestBinding() {
+  final name = WidgetsBinding.instance.runtimeType.toString();
+  return name.contains('TestWidgetsFlutterBinding') ||
+      name.contains('AutomatedTestWidgetsFlutterBinding') ||
+      name.contains('LiveTestWidgetsFlutterBinding');
+}
+
 // Default backend URL — baked at build time so a test build points at the host
 // with no manual setup:  flutter build ... --dart-define=WS_URL=wss://host/ws
 // The in-app Settings field overrides it. Falls back to localhost for dev/emulator.
-const kDefaultWsUrl = String.fromEnvironment('WS_URL', defaultValue: 'ws://localhost:8000/ws');
+const kDefaultWsUrl =
+    String.fromEnvironment('WS_URL', defaultValue: 'ws://localhost:8000/ws');
 
 // Debug-only: inject a fully-populated demo profile (nick + rich walk stats) so the
 // Profile tab can be exercised without a live backend. Off by default; enable with
@@ -164,7 +184,8 @@ const kStartRegister = bool.fromEnvironment('START_REGISTER');
 const kWsToken = String.fromEnvironment('WS_TOKEN', defaultValue: '');
 // Test-only: when set to a kRoutes key, the app auto-enables the simulated walk on
 // that route and starts it on launch (for emulator acceptance runs). Empty = off.
-const kAutoWalkRoute = String.fromEnvironment('AUTO_WALK_ROUTE', defaultValue: '');
+const kAutoWalkRoute =
+    String.fromEnvironment('AUTO_WALK_ROUTE', defaultValue: '');
 
 // True under `flutter test` — lets us skip live map-tile network there.
 bool _underTest() {
@@ -186,14 +207,17 @@ bool _underTest() {
 const _accent = Color(0xFF4E9E77); // sage green — the brand accent
 const _accentDeep = Color(0xFF35674E); // forest — CTA gradient tail
 const _onAccent = Color(0xFFFFFFFF); // white ink that reads on the green accent
-const _accentAlt = Color(0xFFC4E26B); // lime highlight — secondary accent (premium chip)
+const _accentAlt =
+    Color(0xFFC4E26B); // lime highlight — secondary accent (premium chip)
 const _pinCurrent = Color(0xFFF3B34A); // warm amber — the place being narrated
 const _pinPast = Color(0xFF97A0B0); // soft slate — already seen
 const _userArrow = Color(0xFF3AB6F0); // soft sky — the user's bearing
 
 // Shared animation vocabulary so map + UI transitions feel like one system (no jerk).
-const _animFast = Duration(milliseconds: 200); // micro state swaps (icons/labels/colors)
-const _animMed = Duration(milliseconds: 320); // card/panel resizes, heading rotation
+const _animFast =
+    Duration(milliseconds: 200); // micro state swaps (icons/labels/colors)
+const _animMed =
+    Duration(milliseconds: 320); // card/panel resizes, heading rotation
 const _animCurve = Curves.easeInOutCubic;
 
 // App-specific surface/text colours that Material's ColorScheme doesn't model well
@@ -268,7 +292,8 @@ class AppColors extends ThemeExtension<AppColors> {
       );
 
   @override
-  AppColors lerp(AppColors? other, double t) => t < 0.5 ? this : (other ?? this);
+  AppColors lerp(AppColors? other, double t) =>
+      t < 0.5 ? this : (other ?? this);
 }
 
 // Convenience accessor used throughout the widget tree.
@@ -301,13 +326,23 @@ class _Frosted extends StatelessWidget {
         shape: shape,
         borderRadius: br,
         boxShadow: [
-          BoxShadow(color: c.shadow, blurRadius: 28, spreadRadius: -6, offset: const Offset(0, 12)),
-          BoxShadow(color: c.shadow, blurRadius: 8, spreadRadius: -4, offset: const Offset(0, 2)),
+          BoxShadow(
+              color: c.shadow,
+              blurRadius: 28,
+              spreadRadius: -6,
+              offset: const Offset(0, 12)),
+          BoxShadow(
+              color: c.shadow,
+              blurRadius: 8,
+              spreadRadius: -4,
+              offset: const Offset(0, 2)),
         ],
       ),
       child: ClipPath(
         clipper: ShapeBorderClipper(
-          shape: circle ? const CircleBorder() : RoundedRectangleBorder(borderRadius: br!),
+          shape: circle
+              ? const CircleBorder()
+              : RoundedRectangleBorder(borderRadius: br!),
         ),
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 22, sigmaY: 22),
@@ -389,7 +424,9 @@ class _GuideAppState extends State<GuideApp> {
     final uiC = dark ? ui.AppColors.dark : ui.AppColors.light;
     final primary = uiC.primary;
     final onPrimary = uiC.onPrimary;
-    final scheme = ColorScheme.fromSeed(seedColor: primary, brightness: brightness).copyWith(
+    final scheme =
+        ColorScheme.fromSeed(seedColor: primary, brightness: brightness)
+            .copyWith(
       primary: primary,
       onPrimary: onPrimary,
       surface: uiC.header,
@@ -399,8 +436,9 @@ class _GuideAppState extends State<GuideApp> {
     );
     final scaffold = uiC.bgBottom;
     // Manrope everywhere (approved single UI font), tightened on the larger sizes.
-    final baseText = GoogleFonts.manropeTextTheme(
-            dark ? Typography.material2021().white : Typography.material2021().black)
+    final baseText = GoogleFonts.manropeTextTheme(dark
+            ? Typography.material2021().white
+            : Typography.material2021().black)
         .apply(bodyColor: ext.textPrimary, displayColor: ext.textPrimary);
     return ThemeData(
       colorScheme: scheme,
@@ -408,9 +446,12 @@ class _GuideAppState extends State<GuideApp> {
       scaffoldBackgroundColor: scaffold,
       extensions: [ext, uiC],
       textTheme: baseText.copyWith(
-        titleLarge: baseText.titleLarge?.copyWith(fontWeight: FontWeight.w800, letterSpacing: -0.4),
-        titleMedium: baseText.titleMedium?.copyWith(fontWeight: FontWeight.w700, letterSpacing: -0.2),
-        headlineSmall: baseText.headlineSmall?.copyWith(fontWeight: FontWeight.w800, letterSpacing: -0.5),
+        titleLarge: baseText.titleLarge
+            ?.copyWith(fontWeight: FontWeight.w800, letterSpacing: -0.4),
+        titleMedium: baseText.titleMedium
+            ?.copyWith(fontWeight: FontWeight.w700, letterSpacing: -0.2),
+        headlineSmall: baseText.headlineSmall
+            ?.copyWith(fontWeight: FontWeight.w800, letterSpacing: -0.5),
       ),
       splashFactory: InkSparkle.splashFactory,
       appBarTheme: AppBarThemeData(
@@ -420,14 +461,19 @@ class _GuideAppState extends State<GuideApp> {
         scrolledUnderElevation: 0,
         centerTitle: false,
         titleTextStyle: TextStyle(
-            fontSize: 20, fontWeight: FontWeight.w700, letterSpacing: -0.4, color: ext.textPrimary),
+            fontSize: 20,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.4,
+            color: ext.textPrimary),
         iconTheme: IconThemeData(color: ext.textPrimary),
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
           minimumSize: const Size.fromHeight(52),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          textStyle: const TextStyle(fontWeight: FontWeight.w600, letterSpacing: -0.2, fontSize: 15),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          textStyle: const TextStyle(
+              fontWeight: FontWeight.w600, letterSpacing: -0.2, fontSize: 15),
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
@@ -435,8 +481,10 @@ class _GuideAppState extends State<GuideApp> {
           minimumSize: const Size.fromHeight(52),
           foregroundColor: ext.textPrimary,
           side: BorderSide(color: ext.hairline, width: 1.2),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          textStyle: const TextStyle(fontWeight: FontWeight.w600, letterSpacing: -0.2),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          textStyle:
+              const TextStyle(fontWeight: FontWeight.w600, letterSpacing: -0.2),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
@@ -448,11 +496,14 @@ class _GuideAppState extends State<GuideApp> {
       inputDecorationTheme: InputDecorationThemeData(
         filled: true,
         fillColor: dark ? const Color(0x14FFFFFF) : const Color(0x0A111827),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+            borderRadius: BorderRadius.circular(14),
+            borderSide: BorderSide.none),
         enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: ext.hairline)),
+            borderRadius: BorderRadius.circular(14),
+            borderSide: BorderSide(color: ext.hairline)),
         focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(14),
             borderSide: BorderSide(color: primary, width: 1.6)),
@@ -460,14 +511,16 @@ class _GuideAppState extends State<GuideApp> {
       segmentedButtonTheme: SegmentedButtonThemeData(
         style: ButtonStyle(
           backgroundColor: WidgetStateProperty.resolveWith((s) =>
-              s.contains(WidgetState.selected) ? primary.withValues(alpha: 0.16) : Colors.transparent),
+              s.contains(WidgetState.selected)
+                  ? primary.withValues(alpha: 0.16)
+                  : Colors.transparent),
           foregroundColor: WidgetStateProperty.resolveWith((s) =>
               s.contains(WidgetState.selected) ? primary : ext.textSecondary),
           side: WidgetStatePropertyAll(BorderSide(color: ext.hairline)),
           shape: WidgetStatePropertyAll(
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-          textStyle: const WidgetStatePropertyAll(
-              TextStyle(fontWeight: FontWeight.w600, fontSize: 13, letterSpacing: -0.1)),
+          textStyle: const WidgetStatePropertyAll(TextStyle(
+              fontWeight: FontWeight.w600, fontSize: 13, letterSpacing: -0.1)),
         ),
       ),
       switchTheme: SwitchThemeData(
@@ -475,12 +528,15 @@ class _GuideAppState extends State<GuideApp> {
             (s) => s.contains(WidgetState.selected) ? Colors.white : null),
         trackColor: WidgetStateProperty.resolveWith(
             (s) => s.contains(WidgetState.selected) ? primary : null),
-        trackOutlineColor: WidgetStateProperty.resolveWith(
-            (s) => s.contains(WidgetState.selected) ? Colors.transparent : null),
+        trackOutlineColor: WidgetStateProperty.resolveWith((s) =>
+            s.contains(WidgetState.selected) ? Colors.transparent : null),
       ),
       listTileTheme: ListTileThemeData(
         iconColor: ext.textSecondary,
-        titleTextStyle: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600, color: ext.textPrimary),
+        titleTextStyle: TextStyle(
+            fontSize: 15.5,
+            fontWeight: FontWeight.w600,
+            color: ext.textPrimary),
         subtitleTextStyle: TextStyle(fontSize: 13, color: ext.textSecondary),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       ),
@@ -516,9 +572,10 @@ class _GuideAppState extends State<GuideApp> {
       home: AnimatedBuilder(
         animation: AuthService.instance,
         builder: (context, _) {
-          if (kStartRegister && !AuthService.instance.isSignedIn) return const RegisterScreen();
-          final showLogin =
-              (kStartLogin || AccountsConfig.enabled) && !AuthService.instance.isSignedIn;
+          if (kStartRegister && !AuthService.instance.isSignedIn)
+            return const RegisterScreen();
+          final showLogin = (kStartLogin || AccountsConfig.enabled) &&
+              !AuthService.instance.isSignedIn;
           return AuthGate(
             showLogin: showLogin,
             home: HomePage(
@@ -545,9 +602,11 @@ class PlaceMark {
   final String id;
   final LatLng point;
   final String name;
-  String text; // accumulated narration(s) about this place (the spoken excursion)
+  String
+      text; // accumulated narration(s) about this place (the spoken excursion)
   String category; // OSM-derived category (for the card icon + label)
-  String? card; // structured, re-readable facts (narrator CARD block) — shown in the card
+  String?
+      card; // structured, re-readable facts (narrator CARD block) — shown in the card
   String? image; // object photo URL (Wikipedia lead image), or null
   PlaceMark(this.id, this.point, this.name, this.text,
       {this.category = '', this.card, this.image});
@@ -574,7 +633,10 @@ class _MapPin extends StatelessWidget {
 // coloured by status (next = accent, reached = muted green, skipped/pending = grey).
 class _RouteStopPin extends StatelessWidget {
   const _RouteStopPin(
-      {required this.number, required this.status, required this.isNext, required this.accent});
+      {required this.number,
+      required this.status,
+      required this.isNext,
+      required this.accent});
   final int number;
   final String status;
   final bool isNext;
@@ -598,7 +660,9 @@ class _RouteStopPin extends StatelessWidget {
           ? const Icon(Icons.check, size: 16, color: Colors.white)
           : Text('$number',
               style: const TextStyle(
-                  color: Colors.white, fontSize: 13, fontWeight: FontWeight.w700)),
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700)),
     );
   }
 }
@@ -606,7 +670,8 @@ class _RouteStopPin extends StatelessWidget {
 // A segmented two-mode selector styled like the app's bottom nav bar (ui.FloatingTabBar):
 // a glass pill with a primary "puck" that slides under the active segment.
 class _ModeToggle extends StatelessWidget {
-  const _ModeToggle({required this.index, required this.labels, required this.onChanged});
+  const _ModeToggle(
+      {required this.index, required this.labels, required this.onChanged});
   final int index;
   final List<String> labels;
   final ValueChanged<int> onChanged;
@@ -629,7 +694,10 @@ class _ModeToggle extends StatelessWidget {
             AnimatedPositioned(
               duration: ui.Motion.med,
               curve: ui.Motion.emphasized,
-              left: index * segW, top: 0, bottom: 0, width: segW,
+              left: index * segW,
+              top: 0,
+              bottom: 0,
+              width: segW,
               child: Container(
                 decoration: BoxDecoration(
                   color: c.primary,
@@ -637,7 +705,9 @@ class _ModeToggle extends StatelessWidget {
                   boxShadow: [
                     BoxShadow(
                         color: c.primary.withValues(alpha: .4),
-                        blurRadius: 16, spreadRadius: -6, offset: const Offset(0, 6)),
+                        blurRadius: 16,
+                        spreadRadius: -6,
+                        offset: const Offset(0, 6)),
                   ],
                 ),
               ),
@@ -653,7 +723,8 @@ class _ModeToggle extends StatelessWidget {
                           style: GoogleFonts.manrope(
                               fontSize: 14.5,
                               fontWeight: FontWeight.w700,
-                              color: i == index ? c.onPrimary : c.textSecondary)),
+                              color:
+                                  i == index ? c.onPrimary : c.textSecondary)),
                     ),
                   ),
                 ),
@@ -792,7 +863,9 @@ String _categoryLabel(String category, {required bool ru}) {
   if (e != null) return ru ? e.ru : e.en;
   if (category.isEmpty) return ru ? 'Место' : 'Place';
   final words = category.replaceAll('_', ' ').trim();
-  return words.isEmpty ? category : '${words[0].toUpperCase()}${words.substring(1)}';
+  return words.isEmpty
+      ? category
+      : '${words[0].toUpperCase()}${words.substring(1)}';
 }
 
 // Rounded hero photo for the activated-object card (Wikipedia lead image). Soft placeholder
@@ -808,7 +881,9 @@ class _CardHero extends StatelessWidget {
       width: double.infinity,
       child: Stack(fit: StackFit.expand, children: [
         Container(color: c.glassFill(0.06)),
-        Image.network(url, fit: BoxFit.cover,
+        Image.network(
+          url,
+          fit: BoxFit.cover,
           errorBuilder: (_, __, ___) => const SizedBox.shrink(),
           loadingBuilder: (ctx, child, prog) => prog == null
               ? child
@@ -816,7 +891,8 @@ class _CardHero extends StatelessWidget {
                   child: SizedBox(
                       width: 22,
                       height: 22,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: c.textFaint))),
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: c.textFaint))),
         ),
         // grabber pill sits over the image top
         Positioned(
@@ -872,11 +948,14 @@ class _FactRow extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.only(top: 7, right: 10),
           child: Container(
-              width: 6, height: 6, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
         ),
         Expanded(
           child: Text(text,
-              style: GoogleFonts.manrope(fontSize: 14.5, height: 1.45, color: c.textSecondary)),
+              style: GoogleFonts.manrope(
+                  fontSize: 14.5, height: 1.45, color: c.textSecondary)),
         ),
       ]),
     );
@@ -1052,8 +1131,9 @@ class _CoWalkPin extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final uc = Theme.of(context).extension<ui.AppColors>()!;
-    final initial =
-        (name != null && name!.trim().isNotEmpty) ? name!.trim()[0].toUpperCase() : '·';
+    final initial = (name != null && name!.trim().isNotEmpty)
+        ? name!.trim()[0].toUpperCase()
+        : '·';
     return Column(mainAxisSize: MainAxisSize.min, children: [
       Container(
         width: 34,
@@ -1066,17 +1146,24 @@ class _CoWalkPin extends StatelessWidget {
           border: Border.all(color: Colors.white, width: 2),
         ),
         child: Text(initial,
-            style: TextStyle(color: uc.onPrimary, fontWeight: FontWeight.w800, fontSize: 15)),
+            style: TextStyle(
+                color: uc.onPrimary,
+                fontWeight: FontWeight.w800,
+                fontSize: 15)),
       ),
       if (name != null && name!.trim().isNotEmpty) ...[
         const SizedBox(height: 2),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-          decoration: BoxDecoration(color: uc.primary, borderRadius: BorderRadius.circular(6)),
+          decoration: BoxDecoration(
+              color: uc.primary, borderRadius: BorderRadius.circular(6)),
           child: Text(name!,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: uc.onPrimary, fontSize: 10, fontWeight: FontWeight.w700)),
+              style: TextStyle(
+                  color: uc.onPrimary,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700)),
         ),
       ],
     ]);
@@ -1192,7 +1279,8 @@ const Map<String, String> kRouteLabels = {
 };
 
 const double kWalkSpeedMps = 1.95; // ~7 km/h (brisk human pace)
-const double kStepM = 8; // metres between simulated GPS fixes (matches the real distanceFilter)
+const double kStepM =
+    8; // metres between simulated GPS fixes (matches the real distanceFilter)
 
 class HomePage extends StatefulWidget {
   const HomePage({
@@ -1206,7 +1294,8 @@ class HomePage extends StatefulWidget {
   final Locale locale; // current UI/guide language
   final void Function(String code) onLocaleChanged; // swap MaterialApp.locale
   final ThemeMode themeMode; // current appearance (system/light/dark)
-  final void Function(ThemeMode mode) onThemeModeChanged; // swap appearance + persist
+  final void Function(ThemeMode mode)
+      onThemeModeChanged; // swap appearance + persist
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -1235,7 +1324,8 @@ class _HomePageState extends State<HomePage>
   final CompassService _compass = CompassService();
   StreamSubscription<CompassReading>? _compassSub;
   CompassReading? _compassReading;
-  final List<double> _recentCourses = []; // recent GPS courses, for a steady-walk check
+  final List<double> _recentCourses =
+      []; // recent GPS courses, for a steady-walk check
 
   // On-device TTS — the free tier speaks the narration aloud.
   final FlutterTts _tts = FlutterTts();
@@ -1258,14 +1348,16 @@ class _HomePageState extends State<HomePage>
   // so _speakNext's await never hangs when playback is cut short.
   Completer<void>? _audioDone;
   bool _voice = true; // speaker on/off
-  final List<_Speech> _speakQueue = []; // paragraphs/replies awaiting TTS (in order)
+  final List<_Speech> _speakQueue =
+      []; // paragraphs/replies awaiting TTS (in order)
   String _theme = ''; // current tour theme code ("" = auto)
   late String _lang; // current guide language code (en|ru|es|…)
 
   // Microphone — ask the guide by voice (barge-in).
   final AudioRecorder _rec = AudioRecorder();
   bool _recording = false;
-  StreamSubscription<Uint8List>? _audioSub; // mic capture stream (cross-platform)
+  StreamSubscription<Uint8List>?
+      _audioSub; // mic capture stream (cross-platform)
   final List<int> _audioBuf = []; // accumulated PCM16 while recording
 
   // Map (CARTO dark tiles via flutter_map).
@@ -1277,32 +1369,42 @@ class _HomePageState extends State<HomePage>
   double _mapRotation = 0; // current map bearing (deg); 0 = north up
   LatLng _here = const LatLng(55.7525, 37.6231); // Red Square until first fix
   double _heading = 0; // degrees, for the bearing arrow
-  double _screenH = 800; // logical screen height (for keeping the cursor above the card)
+  double _screenH =
+      800; // logical screen height (for keeping the cursor above the card)
   final List<PlaceMark> _places = []; // narrated places pinned on the map
-  List<NearbyObject> _nearby = []; // all found objects (lite pins from "places" frame)
+  List<NearbyObject> _nearby =
+      []; // all found objects (lite pins from "places" frame)
   String? _currentPlaceId; // the place being narrated now (highlighted)
 
   // Proactive guided mode ("Проведи меня"): the pre-planned route + progress along it.
-  List<List<double>> _routeLine = []; // [[lat, lon], ...] proposed/active route polyline
+  List<List<double>> _routeLine =
+      []; // [[lat, lon], ...] proposed/active route polyline
   List<GuideStop> _stops = [];
   int _curStop = 0; // index of the next pending stop
   bool _guidedActive = false; // a route was accepted, leading in progress
-  bool _guidedBuilding = false; // planning a route (chooser confirmed, awaiting the proposal)
-  Map<String, dynamic>? _pendingGuided; // start_guided frame to send once we have a position
+  bool _guidedBuilding =
+      false; // planning a route (chooser confirmed, awaiting the proposal)
+  Map<String, dynamic>?
+      _pendingGuided; // start_guided frame to send once we have a position
 
   // What the player shows now.
   String? _curTitle; // current place name
   String? _curText; // current narration / reply text
   bool _curIsReply = false;
 
-  int _tab = (kDemoProfile || kStartProfile) ? 2 : 0; // 0 Home · 1 Community · 2 Profile · 3 Settings
+  int _tab = (kDemoProfile || kStartProfile)
+      ? 2
+      : 0; // 0 Home · 1 Community · 2 Profile · 3 Settings
 
-  ui.ProfileStats? _aggregatedStats; // real profile stats, aggregated from /walks
+  ui.ProfileStats?
+      _aggregatedStats; // real profile stats, aggregated from /walks
   bool _statsFetched = false;
 
   // Session tracking for the end-of-walk summary + the "record only if ≥10 min" rule.
-  DateTime? _sessionStart; // when the current tour started (null when not touring)
-  double _sessionMeters = 0; // distance walked this session (haversine accumulator)
+  DateTime?
+      _sessionStart; // when the current tour started (null when not touring)
+  double _sessionMeters =
+      0; // distance walked this session (haversine accumulator)
   // Live GPS breadcrumb of the current walk ([[lat, lon(, 1.0 if paused)], ...]) — drawn as a
   // growing track on the map and shown in the end-of-walk summary. Reset when a session starts.
   final List<List<double>> _track = [];
@@ -1313,14 +1415,19 @@ class _HomePageState extends State<HomePage>
   // accept_fix): reject spoof/glitch teleports, EMA-smooth the rest, so the line isn't ragged.
   List<double>? _lastTrackPt; // last ACCEPTED raw fix (for the speed check)
   DateTime? _lastTrackAt;
-  double? _emaLat, _emaLon; // exponential moving average of the accepted position
-  static const double _kMaxTrackSpeedMps = 15; // ~54 km/h — above this a jump is a spoof/glitch
-  static const double _kTrackJumpFloorM = 40; // don't reject small jumps (normal GPS wander)
+  double? _emaLat,
+      _emaLon; // exponential moving average of the accepted position
+  static const double _kMaxTrackSpeedMps =
+      15; // ~54 km/h — above this a jump is a spoof/glitch
+  static const double _kTrackJumpFloorM =
+      40; // don't reject small jumps (normal GPS wander)
   // The structured end-of-walk recap (arrives async over the WS after Stop); the summary sheet
   // shows a spinner until it lands. null = not ready.
   final ValueNotifier<String?> _walkSummary = ValueNotifier<String?>(null);
-  Timer? _summaryTimer; // keeps the socket open briefly after Stop so the recap can arrive
-  static const _kMinRecord = Duration(minutes: 10); // shorter walks are discarded, not saved
+  Timer?
+      _summaryTimer; // keeps the socket open briefly after Stop so the recap can arrive
+  static const _kMinRecord =
+      Duration(minutes: 10); // shorter walks are discarded, not saved
   // An `end` frame Stop couldn't deliver because the socket was down at that moment —
   // parked here and flushed by the next (re)connect so the keep/discard verdict always
   // reaches the server. Cleared when a new tour starts (the old verdict is then stale;
@@ -1328,25 +1435,34 @@ class _HomePageState extends State<HomePage>
   Map<String, dynamic>? _pendingEnd;
 
   bool _speaking = false; // TTS currently talking
-  int _narrationsSinceAd = 0; // free-tier mid-tour ad cadence (every kMidTourAdEvery)
+  int _narrationsSinceAd =
+      0; // free-tier mid-tour ad cadence (every kMidTourAdEvery)
   bool _paused = false; // tour paused from the notification's Pause button
   // Pause-and-ask (A6): a reply may speak THROUGH a pause only when the question came
   // after the pause. Pressing Pause flips this off, so pausing DURING an answer actually
   // silences the rest of it (the server streams replies sentence-by-sentence — without
   // this gate the next queued reply sentence started right back up ~a second later).
   bool _replyOkWhilePaused = false;
-  bool _askedBatteryOpt = false; // only nudge battery-optimization once per launch
-  bool _wantConnected = false; // user intends a live connection (drives auto-reconnect)
+  bool _askedBatteryOpt =
+      false; // only nudge battery-optimization once per launch
+  bool _wantConnected =
+      false; // user intends a live connection (drives auto-reconnect)
   Timer? _reconnectTimer;
   int _retries = 0;
-  Timer? _heartbeat; // app-level WS keepalive: ping the server so a NAT/proxy can't
+  Timer?
+      _heartbeat; // app-level WS keepalive: ping the server so a NAT/proxy can't
   // reap the idle socket during a narration lull (the reconnect-storm fix).
-  Timer? _watchdog; // liveness watchdog: force-reconnect if the socket goes silent
-  DateTime _lastRxAt = DateTime.now(); // last inbound frame (any type) — resets the watchdog
-  Map<String, dynamic>? _lastPositionMsg; // last position sent — replayed on reconnect
+  Timer?
+      _watchdog; // liveness watchdog: force-reconnect if the socket goes silent
+  DateTime _lastRxAt =
+      DateTime.now(); // last inbound frame (any type) — resets the watchdog
+  Map<String, dynamic>?
+      _lastPositionMsg; // last position sent — replayed on reconnect
   // Stable id for resume-on-reconnect DURING a walk; regenerated when a NEW tour starts
   // (_startWithGate) so Stop→start never resumes the finished session on the backend.
   String _sid = _genSessionId();
+  bool _needsPrewarm =
+      true; // arm a one-shot prewarm whenever we return to idle between walks
 
   // `_touring` flips synchronously the instant a tour starts (before the async GPS
   // setup assigns `_gpsSub`), so the activation choreography renders immediately —
@@ -1370,11 +1486,14 @@ class _HomePageState extends State<HomePage>
       RealtimeService.instance.startPresence();
     }
     // Notification button presses (Pause/Resume/Finish) arrive here from the service isolate.
-    if (!kIsWeb) FlutterForegroundTask.addTaskDataCallback(_onFgServiceData);
+    if (!kIsWeb && !_isIosSimulator()) {
+      FlutterForegroundTask.addTaskDataCallback(_onFgServiceData);
+    }
     _initTts();
     // Ask for mic + location up front and centre the map on the real position,
     // rather than sitting on the Moscow default until a walk starts.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _initLocationAndPermissions());
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _initLocationAndPermissions());
     // Test-only headless acceptance run: auto-select the route and start walking.
     if (kAutoWalkRoute.isNotEmpty && kRoutes.containsKey(kAutoWalkRoute)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1402,18 +1521,70 @@ class _HomePageState extends State<HomePage>
       if (perm == LocationPermission.denied) {
         perm = await Geolocator.requestPermission();
       }
-      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+      if (perm == LocationPermission.denied ||
+          perm == LocationPermission.deniedForever) {
         return;
       }
-      final pos =
-          await Geolocator.getCurrentPosition().timeout(const Duration(seconds: 12));
+      final pos = await Geolocator.getCurrentPosition()
+          .timeout(const Duration(seconds: 12));
       if (!mounted) return;
       setState(() {
         _here = LatLng(pos.latitude, pos.longitude);
         if (pos.heading >= 0) _heading = pos.heading;
       });
       if (_mapReady) _animateTo(_here);
+      _maybeTriggerIdlePrewarm();
     } catch (_) {/* keep the default centre if location is unavailable */}
+  }
+
+  void _maybeTriggerIdlePrewarm() {
+    if (_active ||
+        _connected ||
+        _pendingEnd != null ||
+        _disposed ||
+        _isWidgetTestBinding()) {
+      return;
+    }
+    if (!_needsPrewarm) return;
+    _needsPrewarm = false;
+    unawaited(() async {
+      final ok =
+          await _oneShotPrewarm(_here.latitude, _here.longitude, _heading);
+      if (!ok) _needsPrewarm = true;
+    }());
+  }
+
+  Future<bool> _oneShotPrewarm(double lat, double lon, double dir) async {
+    if (_active || _pendingEnd != null || _disposed || _isWidgetTestBinding()) {
+      return false;
+    }
+    try {
+      var url = kDefaultWsUrl;
+      final params = <String>['sid=${_genSessionId()}'];
+      if (kWsToken.isNotEmpty) {
+        params.add('token=${Uri.encodeComponent(kWsToken)}');
+      }
+      final sep = url.contains('?') ? '&' : '?';
+      url += sep + params.join('&');
+      final ws =
+          await WebSocket.connect(url).timeout(const Duration(seconds: 8));
+      try {
+        ws.add(jsonEncode({'type': 'language', 'language': _lang}));
+        ws.add(jsonEncode({
+          'type': 'prewarm',
+          'lat': lat,
+          'lon': lon,
+          'direction_deg': dir,
+        }));
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      } finally {
+        await ws.close();
+      }
+      return true;
+    } catch (_) {
+      // Best-effort only: prewarm is a hidden latency hint, never a user-visible failure.
+      return false;
+    }
   }
 
   Future<void> _initTts() async {
@@ -1474,8 +1645,11 @@ class _HomePageState extends State<HomePage>
         ),
       );
       await _audio.setAudioContext(ctx);
-      await _cue.setAudioContext(ctx); // same session so a cue never re-negotiates iOS audio
-    } catch (_) {/* best-effort — playback still works with the default session */}
+      await _cue.setAudioContext(
+          ctx); // same session so a cue never re-negotiates iOS audio
+    } catch (_) {
+      /* best-effort — playback still works with the default session */
+    }
   }
 
   // Decode the optional neural-audio payload on a narration/reply frame (paid tier).
@@ -1500,7 +1674,8 @@ class _HomePageState extends State<HomePage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
     if (kIsWeb) return;
-    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
       // Backgrounded mid-question: close the mic and release the server hold so the tour
       // isn't stuck "listening" forever (the stream can be torn down without _stopRecAndSend).
       if (_recording) {
@@ -1556,12 +1731,13 @@ class _HomePageState extends State<HomePage>
       if (isNarration) _send({'type': 'played'});
       return;
     }
-    _speakQueue.add(
-        _Speech(text, isNarration, title: title, isReply: isReply, audio: audio, mime: mime));
+    _speakQueue.add(_Speech(text, isNarration,
+        title: title, isReply: isReply, audio: audio, mime: mime));
     // Paused: narration paragraphs stay queued and un-acked so the server's paced
     // producer waits — BUT a reply (barge-in answer) may speak IF the question came
     // after the pause (pause-and-ask, A6; `_replyOkWhilePaused`). Tour stays paused.
-    if (!_speaking && (!_paused || (!isNarration && _replyOkWhilePaused))) _speakNext();
+    if (!_speaking && (!_paused || (!isNarration && _replyOkWhilePaused)))
+      _speakNext();
   }
 
   // A narration about an object you're passing RIGHT NOW (server `interrupt` flag): cut
@@ -1569,8 +1745,9 @@ class _HomePageState extends State<HomePage>
   // "прямо перед тобой" lands while you're still there, not after you've walked on.
   Future<void> _speakInterrupting(String text,
       {String? title, Uint8List? audio, String? mime}) async {
-    if (_voice && !_recording) await _hush();  // cut current + clear queue
-    _enqueueSpeech(text, isNarration: true, title: title, audio: audio, mime: mime);
+    if (_voice && !_recording) await _hush(); // cut current + clear queue
+    _enqueueSpeech(text,
+        isNarration: true, title: title, audio: audio, mime: mime);
   }
 
   Future<void> _speakNext() async {
@@ -1580,7 +1757,8 @@ class _HomePageState extends State<HomePage>
     // the first reply, skipping any queued narration ahead of it (it waits its turn).
     var idx = 0;
     if (_paused) {
-      if (!_replyOkWhilePaused) return; // user paused — nothing speaks until resume/ask
+      if (!_replyOkWhilePaused)
+        return; // user paused — nothing speaks until resume/ask
       idx = _speakQueue.indexWhere((s) => !s.isNarration);
       if (idx < 0) return; // only narration queued -> stay silent while paused
     }
@@ -1613,14 +1791,19 @@ class _HomePageState extends State<HomePage>
             .timeout(const Duration(seconds: 4), onTimeout: () {});
       }
       if (!mounted) return;
-      if (!_voice) { setState(() => _speaking = false); return; }
+      if (!_voice) {
+        setState(() => _speaking = false);
+        return;
+      }
       // Chrome's SpeechSynthesis clips an utterance at ~15s, cutting long lines off
       // mid-phrase. Speak in sentence-sized chunks so each stays well under that.
       final chunks = kIsWeb ? _chunkForTts(s.text) : [s.text];
       for (final c in chunks) {
         // Stop mid-line when unmounted, muted, or paused (a pause-and-ask reply is the
         // one thing allowed to keep speaking through a pause).
-        if (!mounted || !_voice || (_paused && (s.isNarration || !_replyOkWhilePaused))) break;
+        if (!mounted ||
+            !_voice ||
+            (_paused && (s.isNarration || !_replyOkWhilePaused))) break;
         try {
           if (kIsWeb) {
             // Per-chunk watchdog: release if the browser drops the 'end' event so the
@@ -1697,6 +1880,7 @@ class _HomePageState extends State<HomePage>
       if (buf.trim().isNotEmpty) out.add(buf.trim());
       buf = '';
     }
+
     for (var sent in text.split(RegExp(r'(?<=[.!?…])\s+'))) {
       sent = sent.trim();
       if (sent.isEmpty) continue;
@@ -1729,13 +1913,16 @@ class _HomePageState extends State<HomePage>
       // to the best installed voice for this language (iOS enhanced/premium, Android's
       // higher-fidelity network voices). Paid tier gets server neural audio and ignores this.
       if (!kIsWeb) await _selectBestVoice(tag);
-    } catch (_) {/* some platforms lack the voice — the card still shows the text */}
+    } catch (_) {
+      /* some platforms lack the voice — the card still shows the text */
+    }
   }
 
   // Pick the highest-quality installed voice matching `tag` (e.g. "ru-RU"). Best-effort:
   // leaves the default untouched if nothing better is found or the API isn't supported.
   Future<void> _selectBestVoice(String tag) async {
-    final base = tag.split(RegExp('[-_]')).first.toLowerCase(); // "ru-RU" -> "ru"
+    final base =
+        tag.split(RegExp('[-_]')).first.toLowerCase(); // "ru-RU" -> "ru"
     List<dynamic> voices;
     try {
       voices = (await _tts.getVoices) as List<dynamic>;
@@ -1749,7 +1936,8 @@ class _HomePageState extends State<HomePage>
       return; // platform doesn't expose voices (e.g. some web engines)
     }
     Map<dynamic, dynamic>? best;
-    var bestScore = 0; // only switch when we find something better than the default
+    var bestScore =
+        0; // only switch when we find something better than the default
     for (final v in voices) {
       if (v is! Map) continue;
       final locale = (v['locale'] ?? '').toString().toLowerCase();
@@ -1763,7 +1951,8 @@ class _HomePageState extends State<HomePage>
       } else if (quality.contains('enhanced')) {
         score += 30;
       }
-      if (lname.contains('network')) score += 20; // Android network voices (higher fidelity)
+      if (lname.contains('network'))
+        score += 20; // Android network voices (higher fidelity)
       if (locale == tag.toLowerCase()) score += 3; // exact region match
       if (score > bestScore) {
         bestScore = score;
@@ -1773,9 +1962,14 @@ class _HomePageState extends State<HomePage>
     if (best != null) {
       try {
         await _tts.setVoice(
-          {'name': best['name'].toString(), 'locale': best['locale'].toString()},
+          {
+            'name': best['name'].toString(),
+            'locale': best['locale'].toString()
+          },
         );
-      } catch (_) {/* voice vanished between listing and setting — keep the default */}
+      } catch (_) {
+        /* voice vanished between listing and setting — keep the default */
+      }
     }
   }
 
@@ -1822,7 +2016,8 @@ class _HomePageState extends State<HomePage>
     if (!mounted) return;
     final m = ScaffoldMessenger.maybeOf(context);
     m?.hideCurrentSnackBar();
-    m?.showSnackBar(SnackBar(content: Text(text), duration: const Duration(seconds: 3)));
+    m?.showSnackBar(
+        SnackBar(content: Text(text), duration: const Duration(seconds: 3)));
   }
 
   // Pin a narrated place on the map (dedup by id; the latest is "current").
@@ -1845,7 +2040,8 @@ class _HomePageState extends State<HomePage>
         if (p.id == id) existing = p;
       }
       if (existing == null) {
-        _places.add(PlaceMark(id, LatLng(lat, lon), (m['place_name'] as String?) ?? '', txt,
+        _places.add(PlaceMark(
+            id, LatLng(lat, lon), (m['place_name'] as String?) ?? '', txt,
             category: cat, card: card, image: image));
       } else {
         if (txt.isNotEmpty && !existing.text.contains(txt)) {
@@ -1886,15 +2082,19 @@ class _HomePageState extends State<HomePage>
     _lastRxAt = DateTime.now();
     // Backend URL is baked in at build time (--dart-define WS_URL); not user-facing.
     var url = kDefaultWsUrl;
-    final params = <String>['sid=$_sid']; // resume the same session on reconnect
-    if (kWsToken.isNotEmpty) params.add('token=${Uri.encodeComponent(kWsToken)}');
+    final params = <String>[
+      'sid=$_sid'
+    ]; // resume the same session on reconnect
+    if (kWsToken.isNotEmpty)
+      params.add('token=${Uri.encodeComponent(kWsToken)}');
     final sep = url.contains('?') ? '&' : '?';
     url += sep + params.join('&');
     final ch = WebSocketChannel.connect(Uri.parse(url));
     ch.stream.listen(
       (data) {
         _retries = 0; // a live message proves the link is healthy
-        _lastRxAt = DateTime.now(); // any inbound frame (incl. server ping) = alive
+        _lastRxAt =
+            DateTime.now(); // any inbound frame (incl. server ping) = alive
         final m = jsonDecode(data as String) as Map<String, dynamic>;
         switch (m['type']) {
           case 'state':
@@ -1915,12 +2115,15 @@ class _HomePageState extends State<HomePage>
             // not now — because with ack-on-start pacing the next sentence arrives while the
             // current one is still playing. Carry the title so the card matches what's read.
             final title = m['place_name'] as String?;
-            final audio = _decodeAudio(m); // paid tier: neural voice bytes (else null)
+            final audio =
+                _decodeAudio(m); // paid tier: neural voice bytes (else null)
             final mime = m['audio_mime'] as String?;
             if (m['interrupt'] == true) {
-              _speakInterrupting(t, title: title, audio: audio, mime: mime); // passing now — cut
+              _speakInterrupting(t,
+                  title: title, audio: audio, mime: mime); // passing now — cut
             } else {
-              _enqueueSpeech(t, isNarration: true, title: title, audio: audio, mime: mime);
+              _enqueueSpeech(t,
+                  isNarration: true, title: title, audio: audio, mime: mime);
             }
             _maybeShowMidAd(); // free tier: an ad break every few narrations
             break;
@@ -1939,10 +2142,14 @@ class _HomePageState extends State<HomePage>
             _setNearby(m); // pin everything the search disc found (lite)
             break;
           case 'route':
-            _onRouteProposal(m); // guided mode: a planned route to accept/reject
+            _onRouteProposal(
+                m); // guided mode: a planned route to accept/reject
+            break;
+          case 'route_accepted':
             break;
           case 'stop_reached':
-            _onStopReached(m); // guided mode: arrived at a stop (narration follows)
+            _onStopReached(
+                m); // guided mode: arrived at a stop (narration follows)
             break;
           case 'reroute':
             _onReroute(m); // guided mode: the route tail was replanned
@@ -1950,8 +2157,11 @@ class _HomePageState extends State<HomePage>
           case 'route_done':
             _onRouteDone(); // guided mode: the whole route is finished
             break;
+          case 'ping':
+            break;
           case 'nav':
-            final ci = m['current_index']; // optional server progress correction
+            final ci =
+                m['current_index']; // optional server progress correction
             if (ci is int) setState(() => _curStop = ci);
             break;
           case 'track':
@@ -2038,8 +2248,12 @@ class _HomePageState extends State<HomePage>
     // guard on _disposed too — otherwise setState/_toast hit a defunct element.
     if (_disposed || !mounted) return;
     setState(() => _connected = false);
-    if (!_wantConnected) return;
-    final base = (1 << _retries).clamp(1, 16); // 1,2,4,8,16s exponential backoff
+    if (!_wantConnected) {
+      _maybeTriggerIdlePrewarm();
+      return;
+    }
+    final base =
+        (1 << _retries).clamp(1, 16); // 1,2,4,8,16s exponential backoff
     // Jitter (0–1000 ms) so a server restart doesn't trigger a synchronized reconnect
     // storm from every client at once (thundering herd).
     final delay = Duration(milliseconds: base * 1000 + Random().nextInt(1000));
@@ -2120,13 +2334,16 @@ class _HomePageState extends State<HomePage>
       _showUpgrade(); // out of free tours for today
       return;
     }
-    await AdsService.instance.showPreroll(); // no-op for paid / web / no ad loaded
+    await AdsService.instance
+        .showPreroll(); // no-op for paid / web / no ad loaded
     if (!mounted) return;
     _narrationsSinceAd = 0;
     // A brand-new tour: mint a FRESH session id so the backend starts clean instead of
     // resuming the just-finished walk, and wipe the previous walk's residue off the map.
-    _summaryTimer?.cancel(); // a prior Stop's recap window must not disconnect THIS new tour
-    _pendingEnd = null; // stale verdict for the OLD sid — must never fire on this session
+    _summaryTimer
+        ?.cancel(); // a prior Stop's recap window must not disconnect THIS new tour
+    _pendingEnd =
+        null; // stale verdict for the OLD sid — must never fire on this session
     _sid = _genSessionId();
     _clearWalkArtifacts();
     // Flip active + rebuild NOW so the activation choreography plays right after the
@@ -2209,8 +2426,10 @@ class _HomePageState extends State<HomePage>
     _fitRoute();
     if (_stops.isEmpty) {
       setState(() => _guidedBuilding = false);
-      if (!_touring) _disconnect(); // nothing to lead — drop the planning socket
-      _toast('Рядом мало интересных мест — попробуйте другой режим или дольше.');
+      if (!_touring)
+        _disconnect(); // nothing to lead — drop the planning socket
+      _toast(
+          'Рядом мало интересных мест — попробуйте другой режим или дольше.');
       return;
     }
     _showRouteSheet(m);
@@ -2247,7 +2466,8 @@ class _HomePageState extends State<HomePage>
   // home screen (just a "building route" overlay) — the session activates only on accept.
   void _startGuided(String mode, double budgetMin) {
     _summaryTimer?.cancel();
-    _pendingEnd = null; // stale verdict for a prior sid must never fire on this session
+    _pendingEnd =
+        null; // stale verdict for a prior sid must never fire on this session
     _sid = _genSessionId(); // fresh planning session
     _clearWalkArtifacts();
     _pendingGuided = {
@@ -2291,7 +2511,10 @@ class _HomePageState extends State<HomePage>
       _stops = [];
       _routeLine = [];
     });
-    if (!_touring) _disconnect(); // planning socket no longer needed — back to home
+    if (!_touring) {
+      _needsPrewarm = true;
+      _disconnect(); // planning socket no longer needed — back to home
+    }
   }
 
   void _fitRoute() {
@@ -2312,7 +2535,8 @@ class _HomePageState extends State<HomePage>
   // A small pill drag-handle in the app's glass idiom (CardSheet has no built-in one).
   Widget _sheetGrip(BuildContext ctx) => Center(
         child: Container(
-          width: 40, height: 4,
+          width: 40,
+          height: 4,
           decoration: BoxDecoration(
             color: ctx.colors.textFaint.withValues(alpha: .4),
             borderRadius: BorderRadius.circular(2),
@@ -2345,7 +2569,8 @@ class _HomePageState extends State<HomePage>
                   const SizedBox(height: ui.Gap.lg),
                   Text('Прогулка с гидом', style: ui.h2(ctx)),
                   const SizedBox(height: ui.Gap.xs),
-                  Text('Гид сам составит маршрут по интересным местам и проведёт по нему.',
+                  Text(
+                      'Гид сам составит маршрут по интересным местам и проведёт по нему.',
                       style: ui.body(ctx).copyWith(color: c.textSecondary)),
                   const SizedBox(height: ui.Gap.lg),
                   _ModeToggle(
@@ -2361,11 +2586,13 @@ class _HomePageState extends State<HomePage>
                     style: ui.body(ctx).copyWith(color: c.textSecondary),
                   ),
                   const SizedBox(height: ui.Gap.lg),
-                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                    Text('Сколько гуляем', style: ui.body(ctx)),
-                    Text('≈ ${minutes.round()} мин',
-                        style: ui.titleS(ctx).copyWith(color: c.primary)),
-                  ]),
+                  Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Сколько гуляем', style: ui.body(ctx)),
+                        Text('≈ ${minutes.round()} мин',
+                            style: ui.titleS(ctx).copyWith(color: c.primary)),
+                      ]),
                   SliderTheme(
                     data: SliderTheme.of(ctx).copyWith(
                       activeTrackColor: c.primary,
@@ -2374,18 +2601,20 @@ class _HomePageState extends State<HomePage>
                       overlayColor: c.primary.withValues(alpha: .12),
                     ),
                     child: Slider(
-                      value: minutes, min: 15, max: 120, divisions: 21,
+                      value: minutes,
+                      min: 15,
+                      max: 120,
+                      divisions: 21,
                       label: '${minutes.round()} мин',
                       onChanged: (v) => setSheet(() => minutes = v),
                     ),
                   ),
                   const SizedBox(height: ui.Gap.md),
-                  ui.AppButton('Построить маршрут',
-                      icon: Icons.route_rounded,
+                  ui.AppButton('Построить маршрут', icon: Icons.route_rounded,
                       onTap: () {
-                        Navigator.of(ctx).pop();
-                        _startGuided(mode == 0 ? 'loop' : 'destination', minutes);
-                      }),
+                    Navigator.of(ctx).pop();
+                    _startGuided(mode == 0 ? 'loop' : 'destination', minutes);
+                  }),
                 ],
               ),
             ),
@@ -2417,7 +2646,8 @@ class _HomePageState extends State<HomePage>
                 const SizedBox(height: ui.Gap.lg),
                 Text('Маршрут готов', style: ui.h2(ctx)),
                 const SizedBox(height: ui.Gap.xs),
-                Text('${_stops.length} точек · ≈ ${dur.round()} мин · ${dist.toStringAsFixed(1)} км',
+                Text(
+                    '${_stops.length} точек · ≈ ${dur.round()} мин · ${dist.toStringAsFixed(1)} км',
                     style: ui.body(ctx).copyWith(color: c.textSecondary)),
                 const SizedBox(height: ui.Gap.lg),
                 for (final s in _stops.take(6))
@@ -2425,28 +2655,41 @@ class _HomePageState extends State<HomePage>
                     padding: const EdgeInsets.symmetric(vertical: 4),
                     child: Row(children: [
                       Container(
-                        width: 26, height: 26, alignment: Alignment.center,
-                        decoration: BoxDecoration(color: c.primary, shape: BoxShape.circle),
+                        width: 26,
+                        height: 26,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                            color: c.primary, shape: BoxShape.circle),
                         child: Text('${s.index + 1}',
                             style: GoogleFonts.manrope(
-                                color: c.onPrimary, fontSize: 12, fontWeight: FontWeight.w700)),
+                                color: c.onPrimary,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700)),
                       ),
                       const SizedBox(width: ui.Gap.md),
-                      Expanded(child: Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ui.body(ctx))),
+                      Expanded(
+                          child: Text(s.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: ui.body(ctx))),
                     ]),
                   ),
                 const SizedBox(height: ui.Gap.lg),
                 Row(children: [
                   Expanded(
                     child: ui.AppButton('Отклонить',
-                        kind: ui.AppBtnKind.secondary,
-                        onTap: () { Navigator.of(ctx).pop(); _rejectRoute(); }),
+                        kind: ui.AppBtnKind.secondary, onTap: () {
+                      Navigator.of(ctx).pop();
+                      _rejectRoute();
+                    }),
                   ),
                   const SizedBox(width: ui.Gap.md),
                   Expanded(
                     child: ui.AppButton('Поехали',
-                        icon: Icons.navigation_rounded,
-                        onTap: () { Navigator.of(ctx).pop(); _acceptRoute(); }),
+                        icon: Icons.navigation_rounded, onTap: () {
+                      Navigator.of(ctx).pop();
+                      _acceptRoute();
+                    }),
                   ),
                 ]),
               ],
@@ -2461,9 +2704,12 @@ class _HomePageState extends State<HomePage>
   // (bearing minus the map rotation, like the user puck) — no server round-trip.
   Widget _guidedChip() {
     final s = _stops[_curStop.clamp(0, _stops.length - 1)];
-    final d = _dist([_here.latitude, _here.longitude], [s.point.latitude, s.point.longitude]);
-    final brg = _bearing([_here.latitude, _here.longitude], [s.point.latitude, s.point.longitude]);
-    final dm = d >= 1000 ? '${(d / 1000).toStringAsFixed(1)} км' : '${d.round()} м';
+    final d = _dist([_here.latitude, _here.longitude],
+        [s.point.latitude, s.point.longitude]);
+    final brg = _bearing([_here.latitude, _here.longitude],
+        [s.point.latitude, s.point.longitude]);
+    final dm =
+        d >= 1000 ? '${(d / 1000).toStringAsFixed(1)} км' : '${d.round()} м';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
       decoration: BoxDecoration(
@@ -2480,7 +2726,8 @@ class _HomePageState extends State<HomePage>
           child: Text('${s.name} · $dm',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+              style: const TextStyle(
+                  color: Colors.white, fontWeight: FontWeight.w600)),
         ),
       ]),
     );
@@ -2513,7 +2760,11 @@ class _HomePageState extends State<HomePage>
       final len = _dist(a, b), brg = _bearing(a, b);
       for (var t = 0.0; t < len; t += stepM) {
         final f = t / len;
-        pts.add({'lat': a[0] + (b[0] - a[0]) * f, 'lon': a[1] + (b[1] - a[1]) * f, 'dir': brg});
+        pts.add({
+          'lat': a[0] + (b[0] - a[0]) * f,
+          'lon': a[1] + (b[1] - a[1]) * f,
+          'dir': brg
+        });
       }
     }
     final last = route.last;
@@ -2553,7 +2804,10 @@ class _HomePageState extends State<HomePage>
     if (last != null && _lastTrackAt != null) {
       final dt = now.difference(_lastTrackAt!).inMilliseconds / 1000.0;
       final d = _dist([last[0], last[1]], [lat, lon]);
-      if (dt > 0 && dt < 10 && d > _kTrackJumpFloorM && d / dt > _kMaxTrackSpeedMps) {
+      if (dt > 0 &&
+          dt < 10 &&
+          d > _kTrackJumpFloorM &&
+          d / dt > _kMaxTrackSpeedMps) {
         return false; // implausible teleport -> don't draw it
       }
     }
@@ -2603,7 +2857,8 @@ class _HomePageState extends State<HomePage>
       _heading = dir;
     });
     if (_mapReady && _follow) {
-      _animateTo(_followCenter(), duration: const Duration(milliseconds: 400)); // smooth follow
+      _animateTo(_followCenter(),
+          duration: const Duration(milliseconds: 400)); // smooth follow
     }
   }
 
@@ -2623,7 +2878,8 @@ class _HomePageState extends State<HomePage>
       if (perm == LocationPermission.denied) {
         perm = await Geolocator.requestPermission();
       }
-      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+      if (perm == LocationPermission.denied ||
+          perm == LocationPermission.deniedForever) {
         _toast(l.metaGeoNoPermission);
         return;
       }
@@ -2646,7 +2902,8 @@ class _HomePageState extends State<HomePage>
     // On iOS we still need AppleSettings to allow background location updates.
     final LocationSettings settings;
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
-      settings = AndroidSettings(accuracy: LocationAccuracy.high, distanceFilter: 5);
+      settings =
+          AndroidSettings(accuracy: LocationAccuracy.high, distanceFilter: 5);
     } else if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
       settings = AppleSettings(
         accuracy: LocationAccuracy.high,
@@ -2657,7 +2914,8 @@ class _HomePageState extends State<HomePage>
         activityType: ActivityType.fitness,
       );
     } else {
-      settings = const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 5);
+      settings = const LocationSettings(
+          accuracy: LocationAccuracy.high, distanceFilter: 5);
     }
     _gpsSub = Geolocator.getPositionStream(locationSettings: settings).listen(
       (pos) {
@@ -2672,15 +2930,14 @@ class _HomePageState extends State<HomePage>
         } else {
           _recentCourses.clear();
         }
-        final steadyCourse =
-            walking && _recentCourses.length >= 4 && _bearingSpread(_recentCourses) < 25.0;
+        final steadyCourse = walking &&
+            _recentCourses.length >= 4 &&
+            _bearingSpread(_recentCourses) < 25.0;
 
         // Facing priority: held-up compass > steady walking course > raw course.
         final cr = _compassReading;
         final useCompass = cr != null && cr.confident;
-        final dir = useCompass
-            ? cr.headingDeg
-            : (course >= 0 ? course : 0.0);
+        final dir = useCompass ? cr.headingDeg : (course >= 0 ? course : 0.0);
         _sendPosition(
           pos.latitude,
           pos.longitude,
@@ -2708,7 +2965,8 @@ class _HomePageState extends State<HomePage>
     _paused = false;
     _replyOkWhilePaused = false;
     _stopForegroundService(); // drops the shade card + frees the foreground service
-    RealtimeService.instance.updateSelf(walking: false); // clear live "на прогулке"
+    RealtimeService.instance
+        .updateSelf(walking: false); // clear live "на прогулке"
     setState(() {});
   }
 
@@ -2732,7 +2990,9 @@ class _HomePageState extends State<HomePage>
       ));
       // The clip is pure silence, so volume 1.0 is inaudible; it just keeps the session live.
       await _keepAlive.play(AssetSource('sfx/silence.wav'), volume: 1.0);
-    } catch (_) {/* best-effort — narration still works, may just pause screen-locked */}
+    } catch (_) {
+      /* best-effort — narration still works, may just pause screen-locked */
+    }
   }
 
   Future<void> _stopKeepAlive() async {
@@ -2743,7 +3003,7 @@ class _HomePageState extends State<HomePage>
   }
 
   Future<void> _startForegroundService() async {
-    if (kIsWeb) return;
+    if (kIsWeb || _isIosSimulator()) return;
     final l = AppLocalizations.of(context)!;
     await _startKeepAlive(); // iOS: keep the audio session alive across inter-sentence pauses
     // Android 13+ needs the notification permission for the card to show; the
@@ -2804,7 +3064,7 @@ class _HomePageState extends State<HomePage>
       ];
 
   Future<void> _stopForegroundService() async {
-    if (kIsWeb) return;
+    if (kIsWeb || _isIosSimulator()) return;
     await _stopKeepAlive();
     try {
       if (await FlutterForegroundTask.isRunningService) {
@@ -2815,7 +3075,7 @@ class _HomePageState extends State<HomePage>
 
   // Re-render the shade card to reflect play/paused state (button label + text).
   Future<void> _updateFgNotification() async {
-    if (kIsWeb || !mounted) return;
+    if (kIsWeb || _isIosSimulator() || !mounted) return;
     final l = AppLocalizations.of(context)!;
     try {
       if (!await FlutterForegroundTask.isRunningService) return;
@@ -2872,7 +3132,8 @@ class _HomePageState extends State<HomePage>
     if (t.isEmpty || _ch == null) return;
     _hush(); // barge-in: hush the narration while we ask
     _add('you', t);
-    _replyOkWhilePaused = true; // asked (possibly while paused) — the answer may speak
+    _replyOkWhilePaused =
+        true; // asked (possibly while paused) — the answer may speak
     _send({'type': 'utterance', 'text': t});
     _askCtrl.clear();
   }
@@ -2881,7 +3142,9 @@ class _HomePageState extends State<HomePage>
     setState(() => _voice = !_voice);
     if (!_voice) {
       _hush();
-    } else if (!_speaking && _speakQueue.isEmpty && (_curText?.isNotEmpty ?? false)) {
+    } else if (!_speaking &&
+        _speakQueue.isEmpty &&
+        (_curText?.isNotEmpty ?? false)) {
       // Unmute: don't make the user wait for the next line — replay the current one
       // now. isNarration:false so it doesn't re-trigger server pacing (`played`).
       _enqueueSpeech(_curText!, isNarration: false);
@@ -2903,7 +3166,6 @@ class _HomePageState extends State<HomePage>
     }
   }
 
-
   Future<void> _startRec() async {
     if (_ch == null) return;
     final l = AppLocalizations.of(context)!; // capture before awaits
@@ -2917,7 +3179,10 @@ class _HomePageState extends State<HomePage>
     // touch the audio session, so the mic keeps capturing.
     HapticFeedback.mediumImpact();
     _hush(); // barge-in: stop the guide locally...
-    _send({'type': 'listen', 'on': true}); // ...and tell the server to hold the tour
+    _send({
+      'type': 'listen',
+      'on': true
+    }); // ...and tell the server to hold the tour
     _audioBuf.clear();
     // CRITICAL (iOS): release the silent keep-alive loop's `.playback` session before opening
     // the mic — an active playback session starves the recording input, so the mic captures
@@ -2928,7 +3193,7 @@ class _HomePageState extends State<HomePage>
       // dart:io File, which throw on web and made the mic button do nothing there).
       final stream = await _rec.startStream(
         const RecordConfig(
-          encoder: AudioEncoder.pcm16bits, sampleRate: 16000, numChannels: 1),
+            encoder: AudioEncoder.pcm16bits, sampleRate: 16000, numChannels: 1),
       );
       // Keep capturing through a transient stream error — do NOT cancelOnError and do NOT
       // auto-stop here. A single transient error (an audio-focus blip) with cancelOnError:true
@@ -2937,11 +3202,14 @@ class _HomePageState extends State<HomePage>
       // the app-lifecycle observer, which closes the mic there.
       _audioSub = stream.listen(
         _audioBuf.addAll,
-        onError: (_) {/* swallow — a transient error must not stop the recording */},
+        onError: (_) {
+          /* swallow — a transient error must not stop the recording */
+        },
       );
       setState(() => _recording = true);
     } catch (e) {
-      _send({'type': 'listen', 'on': false}); // mic failed — let the tour resume
+      _send(
+          {'type': 'listen', 'on': false}); // mic failed — let the tour resume
       await _applyIosAudioSession();
       _startKeepAlive(); // mic didn't open — restore the background keep-alive
       _toast(l.metaMicNoPermission);
@@ -2959,24 +3227,31 @@ class _HomePageState extends State<HomePage>
     await _applyIosAudioSession();
     _startKeepAlive();
     if (_audioBuf.isEmpty) {
-      _send({'type': 'listen', 'on': false}); // nothing captured — resume the tour
+      _send({
+        'type': 'listen',
+        'on': false
+      }); // nothing captured — resume the tour
       return;
     }
     final wav = _wavFromPcm16(_audioBuf, sampleRate: 16000, channels: 1);
     _audioBuf.clear();
-    HapticFeedback.lightImpact(); // "sent" — haptic, not audio (keep the audio session clean)
+    HapticFeedback
+        .lightImpact(); // "sent" — haptic, not audio (keep the audio session clean)
     // The audio frame is itself the barge-in; the server answers then resumes.
-    _replyOkWhilePaused = true; // asked (possibly while paused) — the answer may speak
+    _replyOkWhilePaused =
+        true; // asked (possibly while paused) — the answer may speak
     _send({'type': 'audio', 'data_b64': base64Encode(wav), 'format': 'wav'});
   }
 
   // Wrap raw PCM16 (mono, 16 kHz) in a minimal WAV container so the backend's
   // Whisper STT can decode it. Built in memory — no filesystem, web-safe.
-  List<int> _wavFromPcm16(List<int> pcm, {required int sampleRate, required int channels}) {
+  List<int> _wavFromPcm16(List<int> pcm,
+      {required int sampleRate, required int channels}) {
     final byteRate = sampleRate * channels * 2;
     final out = <int>[];
     void s(String x) => out.addAll(x.codeUnits);
-    void u32(int v) => out.addAll([v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff]);
+    void u32(int v) => out.addAll(
+        [v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff]);
     void u16(int v) => out.addAll([v & 0xff, (v >> 8) & 0xff]);
     s('RIFF');
     u32(36 + pcm.length);
@@ -3014,7 +3289,7 @@ class _HomePageState extends State<HomePage>
     _heartbeat?.cancel();
     _watchdog?.cancel();
     _audioSub?.cancel();
-    if (!kIsWeb) {
+    if (!kIsWeb && !_isIosSimulator()) {
       FlutterForegroundTask.removeTaskDataCallback(_onFgServiceData);
       _stopForegroundService();
     }
@@ -3035,7 +3310,8 @@ class _HomePageState extends State<HomePage>
 
   // -- status -------------------------------------------------------------
   // Curated pastel status palette (matches the calm chrome — no neon Material defaults).
-  static const _stBlue = Color(0xFF8E9BF0); // thinking / expanding (periwinkle — distinct from the blue accent)
+  static const _stBlue = Color(
+      0xFF8E9BF0); // thinking / expanding (periwinkle — distinct from the blue accent)
   static const _stMint = Color(0xFF5FD0C0); // listening / answering
   static const _stAmber = Color(0xFFEFB55E); // reconnecting
   static const _stCoral = Color(0xFFF08A8A); // upstream trouble
@@ -3044,8 +3320,10 @@ class _HomePageState extends State<HomePage>
 
   ({String label, Color color, bool active}) _status(AppLocalizations l) {
     if (_paused) return (label: l.chipPaused, color: _stAmber, active: false);
-    if (!_connected && _wantConnected) return (label: l.chipReconnecting, color: _stAmber, active: true);
-    if (!_connected) return (label: l.chipNotConnected, color: _pinPast, active: false);
+    if (!_connected && _wantConnected)
+      return (label: l.chipReconnecting, color: _stAmber, active: true);
+    if (!_connected)
+      return (label: l.chipNotConnected, color: _pinPast, active: false);
     if (_speaking) return (label: l.chipSpeaking, color: _accent, active: true);
     return switch (_state) {
       'scoring' => (label: l.chipScoring, color: _stBlue, active: true),
@@ -3057,7 +3335,11 @@ class _HomePageState extends State<HomePage>
       // Upstream trouble: the guide can't reach its data/LLM source. Surface it
       // (was silently swallowed into "ready"/silence) so the user knows it's a
       // problem, not just "nothing nearby".
-      'error' || 'recovery' => (label: l.chipError, color: _stCoral, active: true),
+      'error' || 'recovery' => (
+          label: l.chipError,
+          color: _stCoral,
+          active: true
+        ),
       'offline' => (label: l.chipOffline, color: _stRed, active: false),
       _ => (label: l.chipReady, color: _stGreen, active: false),
     };
@@ -3067,8 +3349,11 @@ class _HomePageState extends State<HomePage>
   // bottom card: shift the centre south so the user sits ~1/3 from the top.
   LatLng _followCenter() {
     if (!_mapReady) return _here;
-    final shiftPx = _screenH * 0.18; // move the user from 50% up to ~32% of the screen
-    final mpp = 156543.03392 * cos(_here.latitude * pi / 180) / pow(2, _map.camera.zoom);
+    final shiftPx =
+        _screenH * 0.18; // move the user from 50% up to ~32% of the screen
+    final mpp = 156543.03392 *
+        cos(_here.latitude * pi / 180) /
+        pow(2, _map.camera.zoom);
     final shiftLat = (shiftPx * mpp) / 111320.0;
     return LatLng(_here.latitude - shiftLat, _here.longitude);
   }
@@ -3103,7 +3388,8 @@ class _HomePageState extends State<HomePage>
   // Tap a narrated pin -> a card with the place's name and its accumulated story.
   // A phone number anywhere in the line, or a URL/e-mail.
   static final _phoneRe = RegExp(r'\+?\d[\d\-\s()]{6,}\d');
-  static final _urlRe = RegExp(r'https?://|www\.|\b[\w.]+@[\w.]+\.\w', caseSensitive: false);
+  static final _urlRe =
+      RegExp(r'https?://|www\.|\b[\w.]+@[\w.]+\.\w', caseSensitive: false);
   // A directory-field LABEL at the very start of the line ("Адрес: …", "Телефон: …", "Часы …").
   // Anchored to line-start so a legit fact that merely mentions a street ("улица названа …") stays.
   static final _dirLabelRe = RegExp(
@@ -3129,7 +3415,8 @@ class _HomePageState extends State<HomePage>
         .split('\n')
         .map((s) => s.trim().replaceFirst(RegExp(r'^[-•*·—]\s*'), '').trim())
         .where((s) => s.isNotEmpty)
-        .where(_looksInformational) // drop leaked address/phone/hours lines (backstop over the prompt)
+        .where(
+            _looksInformational) // drop leaked address/phone/hours lines (backstop over the prompt)
         .toList();
     showModalBottomSheet<void>(
       context: context,
@@ -3140,7 +3427,9 @@ class _HomePageState extends State<HomePage>
         // hero photo when present; otherwise NO reserved space — just the grabber.
         top: p.image != null
             ? _CardHero(url: p.image!)
-            : const Padding(padding: EdgeInsets.only(top: 10), child: Center(child: _SheetGrabber())),
+            : const Padding(
+                padding: EdgeInsets.only(top: 10),
+                child: Center(child: _SheetGrabber())),
         topGap: p.image != null ? ui.Gap.lg : ui.Gap.md,
         children: [
           Row(children: [
@@ -3156,7 +3445,9 @@ class _HomePageState extends State<HomePage>
                     const SizedBox(height: 2),
                     Text(label,
                         style: GoogleFonts.manrope(
-                            fontSize: 13, fontWeight: FontWeight.w600, color: style.color)),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: style.color)),
                   ],
                 ],
               ),
@@ -3167,7 +3458,8 @@ class _HomePageState extends State<HomePage>
             ...factLines.map((f) => _FactRow(text: f, color: style.color))
           else if (p.text.trim().isNotEmpty)
             Text(p.text.trim(),
-                style: GoogleFonts.manrope(fontSize: 15, height: 1.55, color: c.textSecondary)),
+                style: GoogleFonts.manrope(
+                    fontSize: 15, height: 1.55, color: c.textSecondary)),
         ],
       ),
     );
@@ -3179,7 +3471,10 @@ class _HomePageState extends State<HomePage>
   // The object-card sheet, now built on the shared ui.CardSheet (same content-sizing +
   // cream gradient every modal sheet uses). `top` is the hero photo or grabber; `children`
   // are the body rows under a comfortable padding.
-  Widget _cardShell(BuildContext ctx, {required Widget top, double topGap = 0, required List<Widget> children}) {
+  Widget _cardShell(BuildContext ctx,
+      {required Widget top,
+      double topGap = 0,
+      required List<Widget> children}) {
     return ui.CardSheet(
       maxHeightFactor: 0.82,
       child: Column(
@@ -3188,8 +3483,8 @@ class _HomePageState extends State<HomePage>
         children: [
           top,
           Padding(
-            padding: EdgeInsets.fromLTRB(
-                ui.Gap.xl, topGap, ui.Gap.xl, ui.Gap.xl + MediaQuery.of(ctx).padding.bottom),
+            padding: EdgeInsets.fromLTRB(ui.Gap.xl, topGap, ui.Gap.xl,
+                ui.Gap.xl + MediaQuery.of(ctx).padding.bottom),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -3217,7 +3512,9 @@ class _HomePageState extends State<HomePage>
         final l = AppLocalizations.of(ctx)!;
         return _cardShell(
           ctx,
-          top: const Padding(padding: EdgeInsets.only(top: 10), child: Center(child: _SheetGrabber())),
+          top: const Padding(
+              padding: EdgeInsets.only(top: 10),
+              child: Center(child: _SheetGrabber())),
           topGap: ui.Gap.md,
           children: [
             Row(children: [
@@ -3228,18 +3525,22 @@ class _HomePageState extends State<HomePage>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(o.name.isEmpty ? label : o.name, style: ui.titleS(ctx)),
+                    Text(o.name.isEmpty ? label : o.name,
+                        style: ui.titleS(ctx)),
                     const SizedBox(height: 2),
                     Text(label,
                         style: GoogleFonts.manrope(
-                            fontSize: 13, fontWeight: FontWeight.w600, color: style.color)),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: style.color)),
                   ],
                 ),
               ),
             ]),
             const SizedBox(height: ui.Gap.md),
             Text(l.nearbyHint,
-                style: GoogleFonts.manrope(fontSize: 14, height: 1.5, color: c.textFaint)),
+                style: GoogleFonts.manrope(
+                    fontSize: 14, height: 1.5, color: c.textFaint)),
           ],
         );
       },
@@ -3270,7 +3571,8 @@ class _HomePageState extends State<HomePage>
         initialZoom: 16,
         onMapReady: () {
           _mapReady = true;
-          _animateTo(_here); // snap to the real position if it resolved before the map
+          _animateTo(
+              _here); // snap to the real position if it resolved before the map
         },
         onPositionChanged: (camera, hasGesture) {
           if (hasGesture && _follow) setState(() => _follow = false);
@@ -3294,7 +3596,10 @@ class _HomePageState extends State<HomePage>
             Polyline(
               points: [for (final p in _routeLine) LatLng(p[0], p[1])],
               strokeWidth: 5,
-              color: Theme.of(context).colorScheme.secondary.withValues(alpha: 0.85),
+              color: Theme.of(context)
+                  .colorScheme
+                  .secondary
+                  .withValues(alpha: 0.85),
               pattern: StrokePattern.dashed(segments: const [12, 8]),
             ),
           ]),
@@ -3392,7 +3697,8 @@ class _HomePageState extends State<HomePage>
     _rotCtrl?.dispose();
     final start = _map.camera.rotation;
     final delta = (-start + 540) % 360 - 180; // normalise to [-180, 180]
-    final ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 400));
+    final ctrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 400));
     _rotCtrl = ctrl;
     final curve = CurvedAnimation(parent: ctrl, curve: Curves.easeInOut);
     curve.addListener(() => _map.rotate(start + delta * curve.value));
@@ -3426,7 +3732,8 @@ class _HomePageState extends State<HomePage>
         onPressed: _resetNorth,
         icon: Transform.rotate(
           angle: -_mapRotation * pi / 180,
-          child: const Icon(Icons.navigation_rounded, color: Color(0xFFEC6A6A), size: 20),
+          child: const Icon(Icons.navigation_rounded,
+              color: Color(0xFFEC6A6A), size: 20),
         ),
       ),
     );
@@ -3437,17 +3744,24 @@ class _HomePageState extends State<HomePage>
     final c = _c(context);
     void onTap() {
       setState(() => _follow = true);
-      _animateTo(_followCenter()); // smooth glide; keep the cursor above the card
+      _animateTo(
+          _followCenter()); // smooth glide; keep the cursor above the card
     }
+
     if (_follow) {
       // Active: the accent gradient with a soft glow — mirrors the primary CTA.
       return Container(
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           gradient: const LinearGradient(
-              colors: [_accent, _accentDeep], begin: Alignment.topLeft, end: Alignment.bottomRight),
+              colors: [_accent, _accentDeep],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight),
           boxShadow: [
-            BoxShadow(color: _accent.withValues(alpha: 0.4), blurRadius: 14, offset: const Offset(0, 4)),
+            BoxShadow(
+                color: _accent.withValues(alpha: 0.4),
+                blurRadius: 14,
+                offset: const Offset(0, 4)),
           ],
         ),
         child: IconButton(
@@ -3476,7 +3790,8 @@ class _HomePageState extends State<HomePage>
       backgroundColor: _c(context).sheetBg,
       shape: _sheetShape,
       builder: (ctx) => Padding(
-        padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(ctx).viewInsets.bottom + 16),
+        padding: EdgeInsets.fromLTRB(
+            16, 12, 16, MediaQuery.of(ctx).viewInsets.bottom + 16),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           const _SheetGrabber(),
           Row(children: [
@@ -3500,7 +3815,8 @@ class _HomePageState extends State<HomePage>
               style: FilledButton.styleFrom(
                 minimumSize: const Size(56, 56),
                 padding: EdgeInsets.zero,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14)),
               ),
               child: const Icon(Icons.arrow_upward_rounded),
             ),
@@ -3519,9 +3835,12 @@ class _HomePageState extends State<HomePage>
         title: Text(l.deleteAccount),
         content: Text(l.deleteAccountConfirm),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.cancel)),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(l.cancel)),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
+            style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(ctx).colorScheme.error),
             onPressed: () => Navigator.pop(ctx, true),
             child: Text(l.delete),
           ),
@@ -3566,100 +3885,168 @@ class _HomePageState extends State<HomePage>
                 padding: const EdgeInsets.symmetric(vertical: 7),
                 child: Row(children: [
                   Container(
-                    width: 34, height: 34, alignment: Alignment.center,
-                    decoration: BoxDecoration(shape: BoxShape.circle, color: uc.primary.withValues(alpha: 0.14)),
+                    width: 34,
+                    height: 34,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: uc.primary.withValues(alpha: 0.14)),
                     child: Icon(icon, color: uc.primary, size: 18),
                   ),
                   const SizedBox(width: 12),
-                  Expanded(child: Text(text, style: t(14.5, FontWeight.w600, uc.textPrimary))),
+                  Expanded(
+                      child: Text(text,
+                          style: t(14.5, FontWeight.w600, uc.textPrimary))),
                 ]),
               );
-          Widget plan(String title, String price, VoidCallback onTap, {bool highlight = false}) =>
+          Widget plan(String title, String price, VoidCallback onTap,
+                  {bool highlight = false}) =>
               ui.Pressable(
                 onTap: onTap,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
                   decoration: BoxDecoration(
-                    gradient: highlight ? LinearGradient(colors: [uc.primary, Color.lerp(uc.primary, Colors.black, .3)!]) : null,
+                    gradient: highlight
+                        ? LinearGradient(colors: [
+                            uc.primary,
+                            Color.lerp(uc.primary, Colors.black, .3)!
+                          ])
+                        : null,
                     color: highlight ? null : uc.glassFill(0.06),
                     borderRadius: BorderRadius.circular(ui.Radii.md),
-                    border: highlight ? null : Border.all(color: uc.glassBorder),
-                    boxShadow: highlight ? [BoxShadow(color: uc.primary.withValues(alpha: .4), blurRadius: 20, spreadRadius: -8, offset: const Offset(0, 10))] : null,
+                    border:
+                        highlight ? null : Border.all(color: uc.glassBorder),
+                    boxShadow: highlight
+                        ? [
+                            BoxShadow(
+                                color: uc.primary.withValues(alpha: .4),
+                                blurRadius: 20,
+                                spreadRadius: -8,
+                                offset: const Offset(0, 10))
+                          ]
+                        : null,
                   ),
                   child: Column(children: [
-                    Text(title, style: t(15, FontWeight.w800, highlight ? uc.onPrimary : uc.textPrimary)),
+                    Text(title,
+                        style: t(15, FontWeight.w800,
+                            highlight ? uc.onPrimary : uc.textPrimary)),
                     const SizedBox(height: 3),
-                    Text(price, style: t(13, FontWeight.w600, highlight ? uc.onPrimary.withValues(alpha: .85) : uc.textSecondary)),
+                    Text(price,
+                        style: t(
+                            13,
+                            FontWeight.w600,
+                            highlight
+                                ? uc.onPrimary.withValues(alpha: .85)
+                                : uc.textSecondary)),
                   ]),
                 ),
               );
           return ui.CardSheet(
-            scrollable: false,  // child owns its SingleChildScrollView; CardSheet just bounds it
+            scrollable:
+                false, // child owns its SingleChildScrollView; CardSheet just bounds it
             child: SingleChildScrollView(
-              padding: EdgeInsets.fromLTRB(22, 12, 22, MediaQuery.of(ctx).viewInsets.bottom + 28),
-              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                // Explicit down-arrow to dismiss — a bare grabber wasn't obvious enough.
-                Center(
-                  child: ui.Pressable(
-                    onTap: () => Navigator.pop(ctx),
-                    child: Container(
-                      margin: const EdgeInsets.only(bottom: 14),
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: uc.glassFill(0.06),
-                        border: Border.all(color: uc.glassBorder),
+              padding: EdgeInsets.fromLTRB(
+                  22, 12, 22, MediaQuery.of(ctx).viewInsets.bottom + 28),
+              child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Explicit down-arrow to dismiss — a bare grabber wasn't obvious enough.
+                    Center(
+                      child: ui.Pressable(
+                        onTap: () => Navigator.pop(ctx),
+                        child: Container(
+                          margin: const EdgeInsets.only(bottom: 14),
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: uc.glassFill(0.06),
+                            border: Border.all(color: uc.glassBorder),
+                          ),
+                          child: Icon(Icons.keyboard_arrow_down_rounded,
+                              color: uc.textSecondary, size: 26),
+                        ),
                       ),
-                      child: Icon(Icons.keyboard_arrow_down_rounded, color: uc.textSecondary, size: 26),
                     ),
-                  ),
-                ),
-                const Center(child: ui.PremiumBadge(size: 56)),
-                const SizedBox(height: 12),
-                Text(l.premiumTitle, textAlign: TextAlign.center, style: t(24, FontWeight.w800, uc.textPrimary)),
-                const SizedBox(height: 4),
-                Text(l.premiumTagline, textAlign: TextAlign.center, style: t(14, FontWeight.w500, uc.textSecondary)),
-                const SizedBox(height: 18),
-                ui.GlassModule(
-                  fill: uc.glassFill(0.05), sheen: false,
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  child: Column(children: [
-                    benefit(Icons.auto_awesome_rounded, l.premiumModel),
-                    benefit(Icons.block_rounded, l.premiumNoAds),
-                    benefit(Icons.all_inclusive_rounded, l.premiumUnlimitedTours),
-                    benefit(Icons.bookmark_rounded, l.premiumUnlimitedSaves),
+                    const Center(child: ui.PremiumBadge(size: 56)),
+                    const SizedBox(height: 12),
+                    Text(l.premiumTitle,
+                        textAlign: TextAlign.center,
+                        style: t(24, FontWeight.w800, uc.textPrimary)),
+                    const SizedBox(height: 4),
+                    Text(l.premiumTagline,
+                        textAlign: TextAlign.center,
+                        style: t(14, FontWeight.w500, uc.textSecondary)),
+                    const SizedBox(height: 18),
+                    ui.GlassModule(
+                      fill: uc.glassFill(0.05),
+                      sheen: false,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 8),
+                      child: Column(children: [
+                        benefit(Icons.auto_awesome_rounded, l.premiumModel),
+                        benefit(Icons.block_rounded, l.premiumNoAds),
+                        benefit(Icons.all_inclusive_rounded,
+                            l.premiumUnlimitedTours),
+                        benefit(
+                            Icons.bookmark_rounded, l.premiumUnlimitedSaves),
+                      ]),
+                    ),
+                    const SizedBox(height: 20),
+                    if (paid) ...[
+                      Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.check_circle_rounded, color: uc.primary),
+                            const SizedBox(width: 10),
+                            Text(l.premiumActive,
+                                style: t(16, FontWeight.w800, uc.textPrimary)),
+                          ]),
+                      if (kStubBilling) ...[
+                        const SizedBox(height: 6),
+                        Center(
+                            child: TextButton(
+                                onPressed: () => billing.cancelStub(),
+                                child: Text(l.cancelSubscription))),
+                      ],
+                    ] else if (!signedIn)
+                      ui.AppButton(l.signIn, onTap: () async {
+                        Navigator.pop(ctx);
+                        await Navigator.of(context).push(
+                            MaterialPageRoute<void>(
+                                builder: (_) => const LoginScreen()));
+                      })
+                    else if (billing.busy)
+                      const Center(
+                          child: Padding(
+                              padding: EdgeInsets.all(10),
+                              child: CircularProgressIndicator()))
+                    else ...[
+                      Row(children: [
+                        Expanded(
+                            child: plan(
+                                l.premiumMonthly,
+                                billing.monthly?.price ?? r'$5.99/mo',
+                                billing.buyMonthly)),
+                        const SizedBox(width: 10),
+                        Expanded(
+                            child: plan(
+                                l.premiumYearly,
+                                billing.yearly?.price ?? r'$39.99/yr',
+                                billing.buyYearly,
+                                highlight: true)),
+                      ]),
+                      if (!kStubBilling) ...[
+                        const SizedBox(height: 6),
+                        Center(
+                            child: TextButton(
+                                onPressed:
+                                    billing.available ? billing.restore : null,
+                                child: Text(l.premiumRestore))),
+                      ],
+                    ],
                   ]),
-                ),
-                const SizedBox(height: 20),
-                if (paid) ...[
-                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    Icon(Icons.check_circle_rounded, color: uc.primary),
-                    const SizedBox(width: 10),
-                    Text(l.premiumActive, style: t(16, FontWeight.w800, uc.textPrimary)),
-                  ]),
-                  if (kStubBilling) ...[
-                    const SizedBox(height: 6),
-                    Center(child: TextButton(onPressed: () => billing.cancelStub(), child: Text(l.cancelSubscription))),
-                  ],
-                ] else if (!signedIn)
-                  ui.AppButton(l.signIn, onTap: () async {
-                    Navigator.pop(ctx);
-                    await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const LoginScreen()));
-                  })
-                else if (billing.busy)
-                  const Center(child: Padding(padding: EdgeInsets.all(10), child: CircularProgressIndicator()))
-                else ...[
-                  Row(children: [
-                    Expanded(child: plan(l.premiumMonthly, billing.monthly?.price ?? r'$5.99/mo', billing.buyMonthly)),
-                    const SizedBox(width: 10),
-                    Expanded(child: plan(l.premiumYearly, billing.yearly?.price ?? r'$39.99/yr', billing.buyYearly, highlight: true)),
-                  ]),
-                  if (!kStubBilling) ...[
-                    const SizedBox(height: 6),
-                    Center(child: TextButton(onPressed: billing.available ? billing.restore : null, child: Text(l.premiumRestore))),
-                  ],
-                ],
-              ]),
             ),
           );
         },
@@ -3681,82 +4068,121 @@ class _HomePageState extends State<HomePage>
         builder: (c, setSheet) {
           final uc = Theme.of(ctx).extension<ui.AppColors>()!;
           final auth = AuthService.instance;
-          final fill = Theme.of(ctx).brightness == Brightness.dark ? uc.glass : const Color(0x8CFFFFFF);
+          final fill = Theme.of(ctx).brightness == Brightness.dark
+              ? uc.glass
+              : const Color(0x8CFFFFFF);
           final paid = auth.isPaid;
           final premiumTappable = !paid || kStubBilling;
           final name = auth.displayName ?? '';
-          TextStyle ts(double s, FontWeight w, Color col) => GoogleFonts.manrope(fontSize: s, fontWeight: w, color: col);
+          TextStyle ts(double s, FontWeight w, Color col) =>
+              GoogleFonts.manrope(fontSize: s, fontWeight: w, color: col);
           return ui.CardSheet(
             child: Padding(
-              padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
-              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                // dismiss
-                Center(
-                  child: ui.Pressable(
-                    onTap: () => Navigator.pop(ctx),
-                    child: Container(
-                      margin: const EdgeInsets.only(bottom: 16),
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(shape: BoxShape.circle, color: uc.glassFill(0.06), border: Border.all(color: uc.glassBorder)),
-                      child: Icon(Icons.keyboard_arrow_down_rounded, color: uc.textSecondary, size: 24),
+              padding: EdgeInsets.fromLTRB(
+                  20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
+              child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // dismiss
+                    Center(
+                      child: ui.Pressable(
+                        onTap: () => Navigator.pop(ctx),
+                        child: Container(
+                          margin: const EdgeInsets.only(bottom: 16),
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: uc.glassFill(0.06),
+                              border: Border.all(color: uc.glassBorder)),
+                          child: Icon(Icons.keyboard_arrow_down_rounded,
+                              color: uc.textSecondary, size: 24),
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-                // identity header
-                ui.GlassModule(
-                  fill: fill, sheen: false,
-                  padding: const EdgeInsets.all(14),
-                  child: Row(children: [
-                    const ui.TravelerAvatar(size: 52),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(name.isEmpty ? l.homeGuest : name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(17, FontWeight.w800, uc.textPrimary)),
-                        const SizedBox(height: 2),
-                        Text(auth.email ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: ts(13, FontWeight.w600, uc.textFaint)),
+                    // identity header
+                    ui.GlassModule(
+                      fill: fill,
+                      sheen: false,
+                      padding: const EdgeInsets.all(14),
+                      child: Row(children: [
+                        const ui.TravelerAvatar(size: 52),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(name.isEmpty ? l.homeGuest : name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: ts(
+                                        17, FontWeight.w800, uc.textPrimary)),
+                                const SizedBox(height: 2),
+                                Text(auth.email ?? '',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style:
+                                        ts(13, FontWeight.w600, uc.textFaint)),
+                              ]),
+                        ),
+                        if (paid)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 5),
+                            decoration: BoxDecoration(
+                                color: uc.primary.withValues(alpha: 0.14),
+                                borderRadius:
+                                    BorderRadius.circular(ui.Radii.pill)),
+                            child: Text(l.premiumActive,
+                                style: ts(11.5, FontWeight.w800, uc.primary)),
+                          ),
                       ]),
                     ),
-                    if (paid)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                        decoration: BoxDecoration(color: uc.primary.withValues(alpha: 0.14), borderRadius: BorderRadius.circular(ui.Radii.pill)),
-                        child: Text(l.premiumActive, style: ts(11.5, FontWeight.w800, uc.primary)),
+                    const SizedBox(height: 12),
+                    // subscription row
+                    ui.Pressable(
+                      onTap: premiumTappable ? _showUpgrade : null,
+                      child: ui.GlassModule(
+                        fill: fill,
+                        sheen: false,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 16),
+                        child: Row(children: [
+                          const Icon(Icons.workspace_premium_rounded,
+                              color: _accentAlt, size: 22),
+                          const SizedBox(width: 12),
+                          Expanded(
+                              child: Text(paid ? l.premiumActive : l.goPremium,
+                                  style:
+                                      ts(15, FontWeight.w700, uc.textPrimary))),
+                          if (premiumTappable)
+                            Icon(Icons.chevron_right_rounded,
+                                color: uc.textFaint),
+                        ]),
                       ),
+                    ),
+                    const SizedBox(height: 18),
+                    // sign out
+                    ui.AppButton(l.signOut, kind: ui.AppBtnKind.secondary,
+                        onTap: () async {
+                      // Close the sheet BEFORE signing out: sign-out flips the auth gate, which
+                      // disposes HomePage; a still-open sheet would rebuild against a dead context.
+                      Navigator.of(context).pop();
+                      await auth.signOut();
+                    }),
+                    const SizedBox(height: 4),
+                    Center(
+                      child: TextButton.icon(
+                        onPressed: () => _deleteAccount(setSheet),
+                        icon:
+                            const Icon(Icons.delete_outline_rounded, size: 18),
+                        label: Text(l.deleteAccount,
+                            style: ts(13.5, FontWeight.w700, uc.err)),
+                        style: TextButton.styleFrom(foregroundColor: uc.err),
+                      ),
+                    ),
                   ]),
-                ),
-                const SizedBox(height: 12),
-                // subscription row
-                ui.Pressable(
-                  onTap: premiumTappable ? _showUpgrade : null,
-                  child: ui.GlassModule(
-                    fill: fill, sheen: false,
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
-                    child: Row(children: [
-                      const Icon(Icons.workspace_premium_rounded, color: _accentAlt, size: 22),
-                      const SizedBox(width: 12),
-                      Expanded(child: Text(paid ? l.premiumActive : l.goPremium, style: ts(15, FontWeight.w700, uc.textPrimary))),
-                      if (premiumTappable) Icon(Icons.chevron_right_rounded, color: uc.textFaint),
-                    ]),
-                  ),
-                ),
-                const SizedBox(height: 18),
-                // sign out
-                ui.AppButton(l.signOut, kind: ui.AppBtnKind.secondary, onTap: () async {
-                  // Close the sheet BEFORE signing out: sign-out flips the auth gate, which
-                  // disposes HomePage; a still-open sheet would rebuild against a dead context.
-                  Navigator.of(context).pop();
-                  await auth.signOut();
-                }),
-                const SizedBox(height: 4),
-                Center(
-                  child: TextButton.icon(
-                    onPressed: () => _deleteAccount(setSheet),
-                    icon: const Icon(Icons.delete_outline_rounded, size: 18),
-                    label: Text(l.deleteAccount, style: ts(13.5, FontWeight.w700, uc.err)),
-                    style: TextButton.styleFrom(foregroundColor: uc.err),
-                  ),
-                ),
-              ]),
             ),
           );
         },
@@ -3797,14 +4223,19 @@ class _HomePageState extends State<HomePage>
           color: cc.sheetBg,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
         ),
-        padding: EdgeInsets.fromLTRB(12, 12, 12, MediaQuery.of(ctx).padding.bottom + 12),
+        padding: EdgeInsets.fromLTRB(
+            12, 12, 12, MediaQuery.of(ctx).padding.bottom + 12),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           const _SheetGrabber(),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
             child: Align(
               alignment: Alignment.centerLeft,
-              child: Text(title, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: cc.textPrimary)),
+              child: Text(title,
+                  style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      color: cc.textPrimary)),
             ),
           ),
           Flexible(
@@ -3887,14 +4318,17 @@ class _HomePageState extends State<HomePage>
 
   void _endSession() {
     final start = _sessionStart;
-    final elapsed = start == null ? Duration.zero : DateTime.now().difference(start);
+    final elapsed =
+        start == null ? Duration.zero : DateTime.now().difference(start);
     final recorded = elapsed >= _kMinRecord;
     final places = _places.where((p) => p.text.trim().isNotEmpty).toList();
     // Snapshot for the summary before we wipe — prefer the backend street-snapped track (arrives
     // in real time, ~last 25 s tail may be raw) over the local filtered one.
-    final track = List<List<double>>.from(_matchedTrack.length >= 2 ? _matchedTrack : _track);
+    final track = List<List<double>>.from(
+        _matchedTrack.length >= 2 ? _matchedTrack : _track);
     final meters = _sessionMeters;
-    _walkSummary.value = null; // fresh spinner in the sheet until the recap arrives
+    _walkSummary.value =
+        null; // fresh spinner in the sheet until the recap arrives
     _hush(); // cut narration/neural audio IMMEDIATELY (the deferred _disconnect no longer does it)
     // Tell the backend to keep or discard this session's walk BEFORE closing the socket.
     // If the socket is down right at Stop (common on a real walk — cell handover / the
@@ -3905,8 +4339,10 @@ class _HomePageState extends State<HomePage>
     if (_connected) {
       _send(endMsg);
     } else if (_wantConnected) {
-      _pendingEnd = endMsg; // flushed right after the next (re)connect, see _connect
+      _pendingEnd =
+          endMsg; // flushed right after the next (re)connect, see _connect
     }
+    _needsPrewarm = true;
     _stopWalk();
     // A kept walk gets an async structured recap over the WS — keep the socket open briefly so
     // it can land in the Stop sheet, then close. A discarded walk closes at once (no recap) —
@@ -3919,7 +4355,8 @@ class _HomePageState extends State<HomePage>
       _summaryTimer = Timer(const Duration(seconds: 24), () {
         if (!mounted) return;
         if (_walkSummary.value == null) _walkSummary.value = '';
-        _pendingEnd = null; // give up — the server-side rotation prune is the backstop
+        _pendingEnd =
+            null; // give up — the server-side rotation prune is the backstop
         _disconnect();
       });
     } else {
@@ -3927,7 +4364,11 @@ class _HomePageState extends State<HomePage>
     }
     if (AccountsConfig.enabled) AuthService.instance.refreshEntitlement();
     _showSessionSummary(
-        recorded: recorded, elapsed: elapsed, meters: meters, places: places, track: track);
+        recorded: recorded,
+        elapsed: elapsed,
+        meters: meters,
+        places: places,
+        track: track);
     // Hard end: clear the finished walk off the home screen NOW (the summary sheet uses the
     // snapshots above), so nothing lingers on the blurred map behind/after it.
     _clearWalkArtifacts();
@@ -3935,12 +4376,14 @@ class _HomePageState extends State<HomePage>
 
   String _fmtDuration(AppLocalizations l, Duration d) {
     final h = d.inHours, m = d.inMinutes % 60;
-    if (h > 0) return '$h ${l.unitHr} ${m.toString().padLeft(2, '0')} ${l.unitMin}';
+    if (h > 0)
+      return '$h ${l.unitHr} ${m.toString().padLeft(2, '0')} ${l.unitMin}';
     return '$m ${l.unitMin}';
   }
 
   String _fmtDistance(AppLocalizations l, double meters) {
-    if (meters >= 1000) return '${(meters / 1000).toStringAsFixed(1)} ${l.unitKm}';
+    if (meters >= 1000)
+      return '${(meters / 1000).toStringAsFixed(1)} ${l.unitKm}';
     return '${meters.round()} ${l.unitM}';
   }
 
@@ -3963,7 +4406,8 @@ class _HomePageState extends State<HomePage>
         final accent = recorded ? uc.ok : _stAmber;
         Widget stat(IconData icon, String value, String label) => Expanded(
               child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+                padding:
+                    const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
                 decoration: BoxDecoration(
                   color: uc.glassFill(0.05),
                   borderRadius: BorderRadius.circular(ui.Radii.md),
@@ -3972,126 +4416,191 @@ class _HomePageState extends State<HomePage>
                 child: Column(children: [
                   Icon(icon, color: accent, size: 20),
                   const SizedBox(height: 8),
-                  Text(value, maxLines: 1, overflow: TextOverflow.ellipsis,
-                      style: GoogleFonts.manrope(fontSize: 16, fontWeight: FontWeight.w800, color: uc.textPrimary)),
+                  Text(value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: GoogleFonts.manrope(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: uc.textPrimary)),
                   const SizedBox(height: 2),
-                  Text(label, style: GoogleFonts.manrope(fontSize: 11.5, fontWeight: FontWeight.w600, color: uc.textFaint)),
+                  Text(label,
+                      style: GoogleFonts.manrope(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: uc.textFaint)),
                 ]),
               ),
             );
         return ui.CardSheet(
-          scrollable: true,  // one scroll region for the whole summary (stats+map+recap+places)
+          scrollable:
+              true, // one scroll region for the whole summary (stats+map+recap+places)
           child: Padding(
-            padding: EdgeInsets.fromLTRB(20, 14, 20, MediaQuery.of(ctx).padding.bottom + 18),
-            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              // celebratory / info badge
-              Center(
-                child: Container(
-                  width: 64, height: 64, alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(colors: [accent, Color.lerp(accent, Colors.black, 0.28)!], begin: Alignment.topLeft, end: Alignment.bottomRight),
-                    boxShadow: [BoxShadow(color: accent.withValues(alpha: 0.4), blurRadius: 20, spreadRadius: -4, offset: const Offset(0, 8))],
-                  ),
-                  child: Icon(recorded ? Icons.check_rounded : Icons.timer_off_rounded, color: uc.onPrimary, size: 32),
-                ),
-              ),
-              const SizedBox(height: 14),
-              Text(recorded ? l.summaryTitle : l.summaryDiscardTitle,
-                  textAlign: TextAlign.center, style: ui.h1(context).copyWith(fontSize: 22)),
-              const SizedBox(height: 16),
-              Row(children: [
-                stat(Icons.schedule_rounded, _fmtDuration(l, elapsed), l.summaryDuration),
-                const SizedBox(width: 10),
-                stat(Icons.straighten_rounded, _fmtDistance(l, meters), l.summaryDistance),
-                const SizedBox(width: 10),
-                stat(Icons.place_rounded, '${places.length}', l.summaryPlaces),
-              ]),
-              if (track.length >= 2) ...[
-                const SizedBox(height: 14),
-                TrackMap(path: track, height: 150, borderRadius: ui.Radii.md),
-              ],
-              if (recorded) ...[
-                const SizedBox(height: 14),
-                ValueListenableBuilder<String?>(
-                  valueListenable: _walkSummary,
-                  builder: (context, summary, _) {
-                    if (summary == null) {
-                      // Recap still generating — a quiet spinner (no text, so no locale issue).
-                      return Container(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        alignment: Alignment.center,
-                        child: SizedBox(
-                          width: 22, height: 22,
-                          child: CircularProgressIndicator(strokeWidth: 2.2, color: uc.textFaint),
-                        ),
-                      );
-                    }
-                    if (summary.isEmpty) return const SizedBox.shrink();
-                    // No inner scroll / height cap: the whole sheet scrolls (scrollable:true),
-                    // so the recap flows inline and a nested scroll view would conflict.
-                    return Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+            padding: EdgeInsets.fromLTRB(
+                20, 14, 20, MediaQuery.of(ctx).padding.bottom + 18),
+            child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // celebratory / info badge
+                  Center(
+                    child: Container(
+                      width: 64,
+                      height: 64,
+                      alignment: Alignment.center,
                       decoration: BoxDecoration(
-                        color: uc.glassFill(0.05),
-                        borderRadius: BorderRadius.circular(ui.Radii.md),
-                        border: Border.all(color: uc.glassBorder),
+                        shape: BoxShape.circle,
+                        gradient: LinearGradient(
+                            colors: [
+                              accent,
+                              Color.lerp(accent, Colors.black, 0.28)!
+                            ],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight),
+                        boxShadow: [
+                          BoxShadow(
+                              color: accent.withValues(alpha: 0.4),
+                              blurRadius: 20,
+                              spreadRadius: -4,
+                              offset: const Offset(0, 8))
+                        ],
                       ),
-                      child: Text(summary, style: GoogleFonts.manrope(
-                        fontSize: 13.5, height: 1.5, fontWeight: FontWeight.w600,
-                        color: uc.textSecondary)),
-                    );
-                  },
-                ),
-              ],
-              if (!recorded) ...[
-                const SizedBox(height: 14),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: _stAmber.withValues(alpha: 0.10),
-                    borderRadius: BorderRadius.circular(ui.Radii.md),
-                    border: Border.all(color: _stAmber.withValues(alpha: 0.25)),
-                  ),
-                  child: Row(children: [
-                    const Icon(Icons.info_outline_rounded, color: _stAmber, size: 18),
-                    const SizedBox(width: 10),
-                    Expanded(child: Text(l.summaryDiscardNote,
-                        style: GoogleFonts.manrope(fontSize: 13, fontWeight: FontWeight.w600, height: 1.35, color: uc.textSecondary))),
-                  ]),
-                ),
-              ],
-              if (recorded && places.isNotEmpty) ...[
-                const SizedBox(height: 18),
-                Align(alignment: Alignment.centerLeft, child: Text(l.summaryTold, style: ui.label(context))),
-                const SizedBox(height: 8),
-                // Non-scrolling list: the outer CardSheet (scrollable:true) owns the scroll, so
-                // the places flow inline and grow the single scroll region rather than nesting.
-                for (var i = 0; i < places.length; i++) ...[
-                  if (i > 0) const SizedBox(height: 8),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: uc.glassFill(0.05),
-                      borderRadius: BorderRadius.circular(ui.Radii.md),
-                      border: Border.all(color: uc.glassBorder),
+                      child: Icon(
+                          recorded
+                              ? Icons.check_rounded
+                              : Icons.timer_off_rounded,
+                          color: uc.onPrimary,
+                          size: 32),
                     ),
-                    child: Row(children: [
-                      Container(
-                        width: 26, height: 26, alignment: Alignment.center,
-                        decoration: BoxDecoration(shape: BoxShape.circle, color: uc.primary.withValues(alpha: 0.16)),
-                        child: Text('${i + 1}', style: GoogleFonts.manrope(fontSize: 12, fontWeight: FontWeight.w800, color: uc.primary)),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(child: Text(places[i].name.isEmpty ? '—' : places[i].name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ui.titleS(ctx))),
-                    ]),
                   ),
-                ],
-              ],
-              const SizedBox(height: 18),
-              ui.AppButton(l.summaryDone, onTap: () => Navigator.pop(ctx)),
-            ]),
+                  const SizedBox(height: 14),
+                  Text(recorded ? l.summaryTitle : l.summaryDiscardTitle,
+                      textAlign: TextAlign.center,
+                      style: ui.h1(context).copyWith(fontSize: 22)),
+                  const SizedBox(height: 16),
+                  Row(children: [
+                    stat(Icons.schedule_rounded, _fmtDuration(l, elapsed),
+                        l.summaryDuration),
+                    const SizedBox(width: 10),
+                    stat(Icons.straighten_rounded, _fmtDistance(l, meters),
+                        l.summaryDistance),
+                    const SizedBox(width: 10),
+                    stat(Icons.place_rounded, '${places.length}',
+                        l.summaryPlaces),
+                  ]),
+                  if (track.length >= 2) ...[
+                    const SizedBox(height: 14),
+                    TrackMap(
+                        path: track, height: 150, borderRadius: ui.Radii.md),
+                  ],
+                  if (recorded) ...[
+                    const SizedBox(height: 14),
+                    ValueListenableBuilder<String?>(
+                      valueListenable: _walkSummary,
+                      builder: (context, summary, _) {
+                        if (summary == null) {
+                          // Recap still generating — a quiet spinner (no text, so no locale issue).
+                          return Container(
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            alignment: Alignment.center,
+                            child: SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2.2, color: uc.textFaint),
+                            ),
+                          );
+                        }
+                        if (summary.isEmpty) return const SizedBox.shrink();
+                        // No inner scroll / height cap: the whole sheet scrolls (scrollable:true),
+                        // so the recap flows inline and a nested scroll view would conflict.
+                        return Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+                          decoration: BoxDecoration(
+                            color: uc.glassFill(0.05),
+                            borderRadius: BorderRadius.circular(ui.Radii.md),
+                            border: Border.all(color: uc.glassBorder),
+                          ),
+                          child: Text(summary,
+                              style: GoogleFonts.manrope(
+                                  fontSize: 13.5,
+                                  height: 1.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: uc.textSecondary)),
+                        );
+                      },
+                    ),
+                  ],
+                  if (!recorded) ...[
+                    const SizedBox(height: 14),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: _stAmber.withValues(alpha: 0.10),
+                        borderRadius: BorderRadius.circular(ui.Radii.md),
+                        border:
+                            Border.all(color: _stAmber.withValues(alpha: 0.25)),
+                      ),
+                      child: Row(children: [
+                        const Icon(Icons.info_outline_rounded,
+                            color: _stAmber, size: 18),
+                        const SizedBox(width: 10),
+                        Expanded(
+                            child: Text(l.summaryDiscardNote,
+                                style: GoogleFonts.manrope(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    height: 1.35,
+                                    color: uc.textSecondary))),
+                      ]),
+                    ),
+                  ],
+                  if (recorded && places.isNotEmpty) ...[
+                    const SizedBox(height: 18),
+                    Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(l.summaryTold, style: ui.label(context))),
+                    const SizedBox(height: 8),
+                    // Non-scrolling list: the outer CardSheet (scrollable:true) owns the scroll, so
+                    // the places flow inline and grow the single scroll region rather than nesting.
+                    for (var i = 0; i < places.length; i++) ...[
+                      if (i > 0) const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: uc.glassFill(0.05),
+                          borderRadius: BorderRadius.circular(ui.Radii.md),
+                          border: Border.all(color: uc.glassBorder),
+                        ),
+                        child: Row(children: [
+                          Container(
+                            width: 26,
+                            height: 26,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: uc.primary.withValues(alpha: 0.16)),
+                            child: Text('${i + 1}',
+                                style: GoogleFonts.manrope(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w800,
+                                    color: uc.primary)),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                              child: Text(
+                                  places[i].name.isEmpty ? '—' : places[i].name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: ui.titleS(ctx))),
+                        ]),
+                      ),
+                    ],
+                  ],
+                  const SizedBox(height: 18),
+                  ui.AppButton(l.summaryDone, onTap: () => Navigator.pop(ctx)),
+                ]),
           ),
         );
       },
@@ -4108,77 +4617,114 @@ class _HomePageState extends State<HomePage>
       backgroundColor: Colors.transparent,
       builder: (ctx) {
         final uc = Theme.of(ctx).extension<ui.AppColors>()!;
-        final items = _places.reversed.where((p) => p.text.trim().isNotEmpty).toList();
+        final items =
+            _places.reversed.where((p) => p.text.trim().isNotEmpty).toList();
         return ui.CardSheet(
-          scrollable: false,  // holds a Flexible>ListView(shrinkWrap) of places; CardSheet bounds it
+          scrollable:
+              false, // holds a Flexible>ListView(shrinkWrap) of places; CardSheet bounds it
           child: Padding(
-            padding: EdgeInsets.fromLTRB(20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
-            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              Center(
-                child: ui.Pressable(
-                  onTap: () => Navigator.pop(ctx),
-                  child: Container(
-                    margin: const EdgeInsets.only(bottom: 14),
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(shape: BoxShape.circle, color: uc.glassFill(0.06), border: Border.all(color: uc.glassBorder)),
-                    child: Icon(Icons.keyboard_arrow_down_rounded, color: uc.textSecondary, size: 22),
+            padding: EdgeInsets.fromLTRB(
+                20, 12, 20, MediaQuery.of(ctx).padding.bottom + 20),
+            child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Center(
+                    child: ui.Pressable(
+                      onTap: () => Navigator.pop(ctx),
+                      child: Container(
+                        margin: const EdgeInsets.only(bottom: 14),
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: uc.glassFill(0.06),
+                            border: Border.all(color: uc.glassBorder)),
+                        child: Icon(Icons.keyboard_arrow_down_rounded,
+                            color: uc.textSecondary, size: 22),
+                      ),
+                    ),
                   ),
-                ),
-              ),
-              Row(children: [
-                Icon(ui.AppIcons.history, color: uc.primary, size: 22),
-                const SizedBox(width: 10),
-                Text(l.tourLogTitle, style: ui.h2(ctx)),
-              ]),
-              const SizedBox(height: 14),
-              if (items.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 40),
-                  child: Text(l.tourLogEmpty, textAlign: TextAlign.center,
-                      style: GoogleFonts.manrope(fontSize: 14.5, fontWeight: FontWeight.w500, height: 1.4, color: uc.textFaint)),
-                )
-              else
-                Flexible(
-                  child: ListView.separated(
-                    shrinkWrap: true,
-                    padding: EdgeInsets.zero,
-                    itemCount: items.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 10),
-                    itemBuilder: (ctx, i) {
-                      final p = items[i];
-                      return ui.Pressable(
-                        onTap: () {
-                          Navigator.pop(ctx);
-                          _animateTo(p.point, zoom: 17);
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(
-                            color: uc.glassFill(0.05),
-                            borderRadius: BorderRadius.circular(ui.Radii.md),
-                            border: Border.all(color: uc.glassBorder),
-                          ),
-                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Row(children: [
-                              Container(
-                                width: 26, height: 26, alignment: Alignment.center,
-                                decoration: BoxDecoration(shape: BoxShape.circle, color: uc.primary.withValues(alpha: 0.16)),
-                                child: Text('${items.length - i}', style: GoogleFonts.manrope(fontSize: 12, fontWeight: FontWeight.w800, color: uc.primary)),
+                  Row(children: [
+                    Icon(ui.AppIcons.history, color: uc.primary, size: 22),
+                    const SizedBox(width: 10),
+                    Text(l.tourLogTitle, style: ui.h2(ctx)),
+                  ]),
+                  const SizedBox(height: 14),
+                  if (items.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 40),
+                      child: Text(l.tourLogEmpty,
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.manrope(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w500,
+                              height: 1.4,
+                              color: uc.textFaint)),
+                    )
+                  else
+                    Flexible(
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        padding: EdgeInsets.zero,
+                        itemCount: items.length,
+                        separatorBuilder: (_, __) => const SizedBox(height: 10),
+                        itemBuilder: (ctx, i) {
+                          final p = items[i];
+                          return ui.Pressable(
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              _animateTo(p.point, zoom: 17);
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: uc.glassFill(0.05),
+                                borderRadius:
+                                    BorderRadius.circular(ui.Radii.md),
+                                border: Border.all(color: uc.glassBorder),
                               ),
-                              const SizedBox(width: 10),
-                              Expanded(child: Text(p.name.isEmpty ? '—' : p.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: ui.titleS(ctx))),
-                            ]),
-                            if (p.text.trim().isNotEmpty) ...[
-                              const SizedBox(height: 8),
-                              Text(p.text.trim(), style: GoogleFonts.manrope(fontSize: 13.5, fontWeight: FontWeight.w500, height: 1.45, color: uc.textSecondary)),
-                            ],
-                          ]),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-            ]),
+                              child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(children: [
+                                      Container(
+                                        width: 26,
+                                        height: 26,
+                                        alignment: Alignment.center,
+                                        decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: uc.primary
+                                                .withValues(alpha: 0.16)),
+                                        child: Text('${items.length - i}',
+                                            style: GoogleFonts.manrope(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w800,
+                                                color: uc.primary)),
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                          child: Text(
+                                              p.name.isEmpty ? '—' : p.name,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: ui.titleS(ctx))),
+                                    ]),
+                                    if (p.text.trim().isNotEmpty) ...[
+                                      const SizedBox(height: 8),
+                                      Text(p.text.trim(),
+                                          style: GoogleFonts.manrope(
+                                              fontSize: 13.5,
+                                              fontWeight: FontWeight.w500,
+                                              height: 1.45,
+                                              color: uc.textSecondary)),
+                                    ],
+                                  ]),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                ]),
           ),
         );
       },
@@ -4203,21 +4749,37 @@ class _HomePageState extends State<HomePage>
             duration: const Duration(milliseconds: 1100),
             curve: Curves.easeInOutCubic,
             opacity: active ? 0 : 1,
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: dark ? 5 : 3, sigmaY: dark ? 5 : 3),
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      uc.bgTop.withValues(alpha: dark ? 0.16 : 0.03),
-                      uc.bgBottom.withValues(alpha: dark ? 0.28 : 0.08),
-                    ],
+            child: _simulatorSafeVisuals
+                ? DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          uc.bgTop.withValues(alpha: dark ? 0.18 : 0.06),
+                          uc.bgBottom.withValues(alpha: dark ? 0.30 : 0.12),
+                        ],
+                      ),
+                    ),
+                  )
+                : BackdropFilter(
+                    filter: ImageFilter.blur(
+                      sigmaX: dark ? 5 : 3,
+                      sigmaY: dark ? 5 : 3,
+                    ),
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            uc.bgTop.withValues(alpha: dark ? 0.16 : 0.03),
+                            uc.bgBottom.withValues(alpha: dark ? 0.28 : 0.08),
+                          ],
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-              ),
-            ),
           ),
         ),
       ),
@@ -4225,7 +4787,9 @@ class _HomePageState extends State<HomePage>
       // centred on the right edge between the status island and the control panel.
       if (active)
         Positioned(
-          top: 0, bottom: 0, right: 12,
+          top: 0,
+          bottom: 0,
+          right: 12,
           child: Center(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               _zoomFab(l),
@@ -4244,7 +4808,8 @@ class _HomePageState extends State<HomePage>
           nick: nick.isEmpty ? l.homeGuest : nick,
           prompt: l.homePrompt,
           isDark: dark,
-          onToggleTheme: () => widget.onThemeModeChanged(dark ? ThemeMode.light : ThemeMode.dark),
+          onToggleTheme: () => widget
+              .onThemeModeChanged(dark ? ThemeMode.light : ThemeMode.dark),
           onSystemTheme: () => widget.onThemeModeChanged(ThemeMode.system),
           showPremium: !(AuthService.instance.isPaid || kDemoProfile),
           premiumTitle: l.goPremium,
@@ -4291,13 +4856,17 @@ class _HomePageState extends State<HomePage>
             child: Center(
               child: Column(mainAxisSize: MainAxisSize.min, children: [
                 const SizedBox(
-                  width: 34, height: 34,
-                  child: CircularProgressIndicator(strokeWidth: 3, color: Colors.white),
+                  width: 34,
+                  height: 34,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 3, color: Colors.white),
                 ),
                 const SizedBox(height: 16),
                 Text('Строю маршрут…',
                     style: GoogleFonts.manrope(
-                        color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700)),
               ]),
             ),
           ),
@@ -4329,16 +4898,19 @@ class _HomePageState extends State<HomePage>
   // Fetch the signed-in user's walks once and aggregate them into full ProfileStats
   // (cities/distance/objects/languages/streak) for the profile. Cheap: one /walks call.
   Future<void> _ensureProfileStats() async {
-    if (_statsFetched || !(AccountsConfig.enabled && AuthService.instance.isSignedIn)) return;
+    if (_statsFetched ||
+        !(AccountsConfig.enabled && AuthService.instance.isSignedIn)) return;
     _statsFetched = true;
     try {
       final walks = await WalkApi.listWalks();
       if (!mounted) return;
-      setState(() => _aggregatedStats = _aggregateStats(walks, isPaid: AuthService.instance.isPaid));
+      setState(() => _aggregatedStats =
+          _aggregateStats(walks, isPaid: AuthService.instance.isPaid));
     } catch (_) {/* keep the walk-count fallback */}
   }
 
-  static ui.ProfileStats _aggregateStats(List<WalkSummary> walks, {required bool isPaid}) {
+  static ui.ProfileStats _aggregateStats(List<WalkSummary> walks,
+      {required bool isPaid}) {
     final cities = <String>{}, districts = <String>{}, langs = <String>{};
     final cityOrder = <String>[]; // distinct, preserving first-seen order
     var distance = 0, objects = 0;
@@ -4348,7 +4920,8 @@ class _HomePageState extends State<HomePage>
       if (w.city != null && w.city!.isNotEmpty) {
         if (cities.add(w.city!)) cityOrder.add(w.city!);
       }
-      if (w.district != null && w.district!.isNotEmpty) districts.add(w.district!);
+      if (w.district != null && w.district!.isNotEmpty)
+        districts.add(w.district!);
       langs.add(w.language);
       distance += w.distanceM ?? 0;
       objects += w.objectCount;
@@ -4402,7 +4975,8 @@ class _HomePageState extends State<HomePage>
     // the entry screen.
     if (!AccountsConfig.enabled) {
       Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
-        MaterialPageRoute<void>(builder: (_) => const LoginScreen(isGate: true)),
+        MaterialPageRoute<void>(
+            builder: (_) => const LoginScreen(isGate: true)),
         (route) => false,
       );
     }
@@ -4414,12 +4988,21 @@ class _HomePageState extends State<HomePage>
     // Demo: a fully-populated profile matching the seeded test account (Kolbasenko).
     // Real: level/count come from /me; the richer per-walk stats (cities/distance/…)
     // await a /walks fetch — a follow-up — so they read 0 until then.
-    if (!kDemoProfile) _ensureProfileStats(); // real: aggregate from /walks (once)
+    if (!kDemoProfile)
+      _ensureProfileStats(); // real: aggregate from /walks (once)
     final stats = kDemoProfile
         ? const ui.ProfileStats(
-            walks: 16, cities: 3, districts: 16, distanceM: 43600, objects: 195,
-            languages: 3, streakDays: 7, hasEarlyWalk: true, hasNightWalk: true,
-            isPaid: true, signedIn: true,
+            walks: 16,
+            cities: 3,
+            districts: 16,
+            distanceM: 43600,
+            objects: 195,
+            languages: 3,
+            streakDays: 7,
+            hasEarlyWalk: true,
+            hasNightWalk: true,
+            isPaid: true,
+            signedIn: true,
             cityNames: ['Москва', 'Санкт-Петербург', 'Казань'],
           )
         : (_aggregatedStats ??
@@ -4440,7 +5023,8 @@ class _HomePageState extends State<HomePage>
     final myId = AuthService.instance.userId ?? 'me';
     final inviteUrl = 'https://aiguide.app/i/$myId';
     void openInvite() => Navigator.of(context).push(MaterialPageRoute<void>(
-        builder: (_) => ui.InviteScreen(inviteUrl: inviteUrl, nick: nick.isEmpty ? l.homeGuest : nick)));
+        builder: (_) => ui.InviteScreen(
+            inviteUrl: inviteUrl, nick: nick.isEmpty ? l.homeGuest : nick)));
     return ui.ProfileTab(
       nick: nick.isEmpty ? l.homeGuest : nick,
       stats: stats,
@@ -4448,15 +5032,16 @@ class _HomePageState extends State<HomePage>
       signedIn: signedIn || kDemoProfile,
       onSignOut: _confirmSignOut,
       onFriends: () => Navigator.of(context).push(MaterialPageRoute<void>(
-          builder: (_) => ui.FriendsScreen(friends: friends, onInvite: openInvite))),
+          builder: (_) =>
+              ui.FriendsScreen(friends: friends, onInvite: openInvite))),
       onInvite: openInvite,
       onEdit: (signedIn || kDemoProfile)
-          ? () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const AccountEditScreen()))
+          ? () => Navigator.of(context).push(MaterialPageRoute<void>(
+              builder: (_) => const AccountEditScreen()))
           : null,
       friends: friends,
-      onOpenFriend: (f) => Navigator.of(context).push(
-          MaterialPageRoute<void>(builder: (_) => ui.FriendProfileScreen(friend: f))),
+      onOpenFriend: (f) => Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (_) => ui.FriendProfileScreen(friend: f))),
       inviteUrl: inviteUrl,
     );
   }
@@ -4484,7 +5069,8 @@ class _HomePageState extends State<HomePage>
             curve: ui.Motion.emphasized,
             left: 16,
             right: 16,
-            bottom: barHidden ? -110 : MediaQuery.of(context).padding.bottom + 12,
+            bottom:
+                barHidden ? -110 : MediaQuery.of(context).padding.bottom + 12,
             child: AnimatedOpacity(
               duration: ui.Motion.fast,
               opacity: barHidden ? 0 : 1,
@@ -4519,7 +5105,8 @@ class _UserPuckState extends State<_UserPuck> {
   void didUpdateWidget(_UserPuck old) {
     super.didUpdateWidget(old);
     if (old.heading != widget.heading) {
-      var delta = (widget.heading / 360.0 - _turns) % 1.0; // Dart % is non-negative
+      var delta =
+          (widget.heading / 360.0 - _turns) % 1.0; // Dart % is non-negative
       if (delta > 0.5) delta -= 1.0; // take the shorter arc
       setState(() => _turns += delta);
     }
@@ -4545,7 +5132,8 @@ class _UserPuckState extends State<_UserPuck> {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: Colors.white,
-              border: Border.all(color: Colors.black.withValues(alpha: 0.18), width: 1.5),
+              border: Border.all(
+                  color: Colors.black.withValues(alpha: 0.18), width: 1.5),
             ),
             alignment: Alignment.center,
             child: AnimatedRotation(
@@ -4569,13 +5157,15 @@ class _PulsingDot extends StatefulWidget {
   State<_PulsingDot> createState() => _PulsingDotState();
 }
 
-class _PulsingDotState extends State<_PulsingDot> with SingleTickerProviderStateMixin {
+class _PulsingDotState extends State<_PulsingDot>
+    with SingleTickerProviderStateMixin {
   late final AnimationController _c;
 
   @override
   void initState() {
     super.initState();
-    _c = AnimationController(vsync: this, duration: const Duration(milliseconds: 900));
+    _c = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 900));
     if (widget.active) _c.repeat(reverse: true);
   }
 
@@ -4610,7 +5200,11 @@ class _PulsingDotState extends State<_PulsingDot> with SingleTickerProviderState
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           color: widget.color.withValues(alpha: opacity),
-          boxShadow: [BoxShadow(color: widget.color.withValues(alpha: opacity * 0.6), blurRadius: 6)],
+          boxShadow: [
+            BoxShadow(
+                color: widget.color.withValues(alpha: opacity * 0.6),
+                blurRadius: 6)
+          ],
         ),
       );
 }

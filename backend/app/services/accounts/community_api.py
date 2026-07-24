@@ -154,7 +154,15 @@ def _community():
 
 
 async def _ensure(repo, session, user_id: str):
-    """Materialize the caller's durable row (id seeded from the JWT sub == auth.uid())."""
+    """Materialize the caller's durable row (id seeded from the JWT sub == auth.uid()).
+
+    Community screens fan out several authenticated requests at once right after login. If the
+    durable user row already exists for this auth.uid, read it directly instead of sending every
+    request through the create-or-resolve race path again.
+    """
+    existing = await repo.get_user(session, user_id=user_id)
+    if existing is not None:
+        return existing
     return await repo.get_or_create_user(
         session, provider="supabase", provider_uid=user_id, user_id=user_id
     )
@@ -172,9 +180,13 @@ def _user_light(user) -> CommunityUser:
     )
 
 
-async def _user_out(comm, repo, session, user, *, walking: bool | None = None) -> CommunityUser:
+async def _user_out(
+    comm, repo, session, user, *, walking: bool | None = None, tz_offset_min: int = 0
+) -> CommunityUser:
     walk_count = await repo.count_walks(session, user_id=user.id)
-    streak = await comm.compute_streak(session, user_id=user.id)
+    streak = await comm.compute_streak(
+        session, user_id=user.id, tz_offset_min=tz_offset_min
+    )
     if walking is None:
         walking = bool(await comm.walking_now_ids(session, user_ids={user.id}))
     return CommunityUser(
@@ -187,6 +199,35 @@ async def _user_out(comm, repo, session, user, *, walking: bool | None = None) -
         walking_now=walking,
         walk_count=walk_count,
     )
+
+
+async def _users_out_bulk(
+    comm, session, users, *, tz_offset_min: int = 0
+) -> list[CommunityUser]:
+    """Build CommunityUser cards for MANY users with a FIXED query count (one walks
+    sweep + one presence check), independent of N. The per-user _user_out did 3 queries
+    each at ~200 ms RTT to the remote pooler — the community tab's 2-6 s per endpoint."""
+    users = list(users)
+    if not users:
+        return []
+    ids = {u.id for u in users}
+    ts_by_uid = await comm.walks_ts_by_user(session, ids)
+    walking = await comm.walking_now_ids(session, user_ids=ids)
+    out = []
+    for u in users:
+        ts = ts_by_uid.get(u.id, [])
+        days = comm._days_from_ts(ts, tz_offset_min)
+        out.append(CommunityUser(
+            id=str(u.id),
+            handle=u.handle,
+            display_name=u.display_name,
+            avatar_url=u.avatar_url,
+            level=comm.level_for_walks(len(ts)),
+            streak=comm._streak_from_days(days, tz_offset_min=tz_offset_min),
+            walking_now=u.id in walking,
+            walk_count=len(ts),
+        ))
+    return out
 
 
 def _challenge_out(c, *, joined=False, participants=0, my_progress=0, my_rank=None) -> ChallengeOut:
@@ -202,11 +243,14 @@ def _challenge_out(c, *, joined=False, participants=0, my_progress=0, my_rank=No
 
 
 @router.get("/me", response_model=CommunityUser)
-async def community_me(user_id: str = Depends(current_user)) -> CommunityUser:
+async def community_me(
+    user_id: str = Depends(current_user), tz_offset_min: int = Query(default=0, ge=-840, le=840)
+) -> CommunityUser:
     comm, repo, session_scope = _community()
     async with session_scope() as session:
         user = await _ensure(repo, session, user_id)
-        return await _user_out(comm, repo, session, user)
+        out = await _users_out_bulk(comm, session, [user], tz_offset_min=tz_offset_min)
+        return out[0]
 
 
 @router.post("/profile", response_model=CommunityUser)
@@ -236,24 +280,22 @@ async def search(
     async with session_scope() as session:
         await _ensure(repo, session, user_id)
         users = await comm.search_users(session, query=q, exclude=user_id, limit=20)
-        return FriendsOut(friends=[await _user_out(comm, repo, session, u) for u in users])
+        return FriendsOut(friends=await _users_out_bulk(comm, session, users))
 
 
 # -- friends --------------------------------------------------------------- #
 
 
 @router.get("/friends", response_model=FriendsOut)
-async def friends(user_id: str = Depends(current_user)) -> FriendsOut:
+async def friends(
+    user_id: str = Depends(current_user), tz_offset_min: int = Query(default=0, ge=-840, le=840)
+) -> FriendsOut:
     comm, repo, session_scope = _community()
     async with session_scope() as session:
         await _ensure(repo, session, user_id)
         ids = await comm.friend_ids(session, user_id=user_id)
-        walking = await comm.walking_now_ids(session, user_ids=ids)
-        out = []
-        for fid in ids:
-            u = await repo.get_user(session, user_id=fid)
-            if u is not None:
-                out.append(await _user_out(comm, repo, session, u, walking=fid in walking))
+        users = await repo.get_users_by_ids(session, user_ids=ids)
+        out = await _users_out_bulk(comm, session, users, tz_offset_min=tz_offset_min)
         out.sort(key=lambda u: (not u.walking_now, -u.streak))
         return FriendsOut(friends=out)
 
@@ -264,8 +306,12 @@ async def friend_requests(user_id: str = Depends(current_user)) -> RequestsOut:
     async with session_scope() as session:
         await _ensure(repo, session, user_id)
         reqs = await comm.list_requests(session, user_id=user_id)
-        inc = [await _user_out(comm, repo, session, u) for u in reqs["incoming"]]
-        out = [await _user_out(comm, repo, session, u) for u in reqs["outgoing"]]
+        cards = await _users_out_bulk(
+            session=session, comm=comm, users=[*reqs["incoming"], *reqs["outgoing"]]
+        )
+        by_id = {c.id: c for c in cards}
+        inc = [by_id[str(u.id)] for u in reqs["incoming"] if str(u.id) in by_id]
+        out = [by_id[str(u.id)] for u in reqs["outgoing"] if str(u.id) in by_id]
         return RequestsOut(incoming=inc, outgoing=out)
 
 
@@ -455,11 +501,15 @@ async def my_walks(
 
 
 @router.get("/streaks", response_model=GroupStreaksOut)
-async def group_streaks(user_id: str = Depends(current_user)) -> GroupStreaksOut:
+async def group_streaks(
+    user_id: str = Depends(current_user), tz_offset_min: int = Query(default=0, ge=-840, le=840)
+) -> GroupStreaksOut:
     comm, repo, session_scope = _community()
     async with session_scope() as session:
         await _ensure(repo, session, user_id)
-        rows = await comm.list_group_streaks(session, user_id=user_id)
+        rows = await comm.list_group_streaks(
+            session, user_id=user_id, tz_offset_min=tz_offset_min
+        )
         out = []
         for r in rows:
             members = [await _user_out(comm, repo, session, u) for u in r["members"]]

@@ -17,7 +17,7 @@ from app.services.geo.discovery import Discovery
 from app.services.geo.providers import StaticPlaceProvider
 from app.services.state.store import InMemoryStateStore
 from app.shared.memory import is_near_duplicate
-from app.shared.schemas import Address, ControlPatch, GeoPoint, Heading, Pace, Place
+from app.shared.schemas import Address, ControlPatch, GeoPoint, Heading, Pace, Place, RouteScript, StopBeat
 from sim.routes import RED_SQUARE
 from sim.walk import walk
 
@@ -124,6 +124,108 @@ def test_barge_in_applies_control_patch():
     assert state.state == State.ANSWERING
     assert "shop" in state.control_patch.skip_categories
     assert state.conversation  # dialog remembered
+
+
+def test_fact_reserve_ack_marks_facts_told_only_after_playback():
+    async def run():
+        orch = _orch([_place("m", "Музей", "museum")], facts={"m": "Первый факт. Второй факт."})
+        st = await orch.store.load("reserve-ack")
+        st.last_place = _place("m", "Музей", "museum")
+        st.last_place_id = "m"
+        st.language = "ru"
+        st.narration_history = ["Музей — короткий резервный рассказ."]
+        await orch.store.save(st)
+        items = await orch.refresh_fact_reserve("reserve-ack")
+        before = await orch.store.load("reserve-ack")
+        assert items and before.memory.told_facts == []
+        await orch.ack_fact_reserve("reserve-ack", items[0].id)
+        after = await orch.store.load("reserve-ack")
+        return items, before, after
+
+    items, before, after = asyncio.run(run())
+    assert items[0].text
+    assert before.memory.told_facts == []
+    assert after.memory.told_facts
+    assert items[0].id in after.played_reserve_ids
+    assert all(it.id != items[0].id for it in after.fact_reserve)
+
+
+def test_fact_reserve_prefers_object_then_area_then_bridge():
+    async def run():
+        orch = _orch([_place("m", "Музей", "museum")], facts={"m": "Первый факт. Второй факт."})
+        st = await orch.store.load("reserve-order")
+        st.last_place = _place("m", "Музей", "museum")
+        st.last_place_id = "m"
+        st.language = "ru"
+        st.narration_history = ["Музей — резервный объектный рассказ."]
+        st.area_key = "Тверской"
+        st.area_facts = "Факт о районе. Ещё факт о районе."
+        st.address = Address(city="Москва")
+        st.guide_mode = "guided"
+        st.nav.accepted = True
+        st.nav.script = RouteScript(lead_in="Дальше пойдём к площади.")
+        await orch.store.save(st)
+        return await orch.refresh_fact_reserve("reserve-order")
+
+    items = asyncio.run(run())
+    assert [it.kind for it in items[:3]] == ["object", "area", "bridge"]
+
+
+def test_fact_reserve_includes_upcoming_object_before_city_fallback():
+    async def run():
+        places = [
+            _place("near", "Библиотека", "library", lat=55.7538, lon=37.6206),
+            _place("far", "Парк", "park", lat=55.7560, lon=37.6205),
+        ]
+        orch = _orch(places, facts={"near": "Факт о библиотеке.", "far": "Факт о парке."})
+        st = await orch.store.load("reserve-upcoming")
+        st.position = HERE
+        st.heading = Heading()
+        st.language = "ru"
+        st.address = Address(city="Москва")
+        await orch.store.save(st)
+        await orch.discovery.inventory.ensure("reserve-upcoming", HERE, orch.discovery.provider)
+        orch.pipeline.cache.put("near", "Факт о библиотеке.", "ru")
+        orch.pipeline.cache.put("far", "Факт о парке.", "ru")
+        return await orch.refresh_fact_reserve("reserve-upcoming")
+
+    items = asyncio.run(run())
+    kinds = [it.kind for it in items]
+    scopes = [it.scope for it in items]
+    assert "object" in kinds
+    assert scopes.index("place") < scopes.index("city")
+
+
+def test_fact_reserve_builds_beyond_four_items_when_material_exists():
+    async def run():
+        orch = _orch([_place("m", "Музей", "museum")], facts={"m": "Первый факт. Второй факт."})
+        st = await orch.store.load("reserve-long")
+        st.last_place = _place("m", "Музей", "museum")
+        st.last_place_id = "m"
+        st.language = "ru"
+        st.narration_history = ["Музей — короткий офлайн мостик."]
+        st.area_key = "Тверской"
+        st.address = Address(city="Москва", district="Тверской")
+        st.guide_mode = "guided"
+        st.nav.accepted = True
+        st.nav.script = RouteScript(
+            lead_in="Дальше пойдём к площади.",
+            beats=[
+                StopBeat(order=0, leg="Идём дальше вдоль бульвара.", bridge="Впереди — следующий объект."),
+                StopBeat(order=1, leg="Ещё один отрезок маршрута.", bridge="Дальше будет новый поворот темы."),
+            ],
+            finale="Маршрут аккуратно замыкается.",
+        )
+        st.area_facts = "Факт один. Факт два. Факт три. Факт четыре. Факт пять. Факт шесть."
+        await orch.store.save(st)
+        if orch.pipeline.fact_buffer is not None:
+            orch.pipeline.fact_buffer.put_subject("district", "Тверской", "Ещё один факт. Ещё один новый факт.", "ru")
+            orch.pipeline.fact_buffer.put_subject("city", "Москва", "Городской факт. Ещё городской факт.", "ru")
+        return await orch.refresh_fact_reserve("reserve-long")
+
+    items = asyncio.run(run())
+    assert len(items) >= 4
+    assert sum(it.estimated_seconds for it in items) >= 16
 
 
 def test_mute_silences_narration():
@@ -412,7 +514,12 @@ def test_area_cascade_descends_city_to_district_to_street():
 
     async def run():
         st = await orch.store.load("casc")
-        st.address = Address(city="Москва", district="Тверской", street="Тверская")
+        # street_confident=True: the walker is physically ON Тверская, so the cascade
+        # includes the street level (off-street it would stop at district — the
+        # "only talk about the street you're on" rule).
+        st.address = Address(
+            city="Москва", district="Тверской", street="Тверская", street_confident=True
+        )
         st.area_facts = "Проверенные факты о районе."  # cascade requires facts now
         out = await orch._area_line(st, Pace.SLOW)
         assert out.startswith("улица:")  # descended past the dry city/district

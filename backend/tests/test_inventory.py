@@ -23,8 +23,9 @@ class CountingProvider:
 
 
 def test_inventory_skips_overpass_until_anchor_left():
-    """The wide disc is fetched once and reused for nearby ticks; Overpass is
-    re-hit only after the user walks past half the disc radius from the anchor."""
+    """The wide disc is fetched once and reused for nearby ticks. Walking toward the
+    edge now triggers a BACKGROUND re-centre (stale-while-revalidate) — ensure()
+    itself returns the current disc immediately and never blocks the tick."""
 
     async def run():
         prov = CountingProvider([_place()])
@@ -32,15 +33,39 @@ def test_inventory_skips_overpass_until_anchor_left():
         sid = "s"
         await store.ensure(sid, HERE, prov)
         assert prov.calls == 1
-        # small move (~55 m, well inside the 400 m re-fetch edge) -> served from cache
+        # small move (~55 m, inside the predict fraction) -> served from cache, no bg
         near = GeoPoint(lat=HERE.lat + 0.0005, lon=HERE.lon)
         await store.ensure(sid, near, prov)
-        assert prov.calls == 1
-        # big move (~555 m, past the 400 m edge) -> one fresh fetch, re-anchored
+        assert prov.calls == 1 and not store._refreshing
+        # big move (~555 m, past the predict edge, still inside the 800 m disc):
+        # the STALE disc is returned instantly and a background refresh starts.
         far = GeoPoint(lat=HERE.lat + 0.005, lon=HERE.lon)
         inv = await store.ensure(sid, far, prov)
+        assert prov.calls == 1  # not blocked on the fetch
+        assert inv.anchor == HERE  # still the stale disc this tick
+        task = store._refreshing.get(sid)
+        assert task is not None
+        await task  # drain the background refresh
+        inv2 = await store.ensure(sid, far, prov)
         assert prov.calls == 2
-        assert inv.anchor == far  # re-centred where we last looked
+        assert inv2.anchor == far  # re-centred where we last looked
+
+    asyncio.run(run())
+
+
+def test_inventory_teleport_outside_disc_blocks_fresh():
+    """A resume/teleport OUTSIDE the whole disc can't serve stale data from another
+    part of town — that one case still fetches in the foreground."""
+
+    async def run():
+        prov = CountingProvider([_place()])
+        store = InventoryStore()
+        sid = "s"
+        await store.ensure(sid, HERE, prov)
+        away = GeoPoint(lat=HERE.lat + 0.01, lon=HERE.lon)  # ~1.1 km, outside r=800
+        inv = await store.ensure(sid, away, prov)
+        assert prov.calls == 2  # blocking fresh fetch
+        assert inv.anchor == away
 
     asyncio.run(run())
 
@@ -55,6 +80,10 @@ def test_inventory_keeps_stale_disc_on_empty_fetch():
         await store.ensure(sid, HERE, prov)
         prov.places = []  # next fetch comes back empty (transient miss / sparse)
         far = GeoPoint(lat=HERE.lat + 0.005, lon=HERE.lon)
+        await store.ensure(sid, far, prov)  # stale served, bg refresh kicked
+        task = store._refreshing.get(sid)
+        assert task is not None
+        await task
         inv = await store.ensure(sid, far, prov)
         assert prov.calls == 2
         assert [p.id for p in inv.places] == ["x"]  # kept the last good disc
@@ -77,7 +106,10 @@ def test_take_places_update_pushes_once_per_change():
         assert store.take_places_update(sid) is None  # unchanged -> no re-push
         prov.places = [_place("a"), _place("b")]  # disc changes on the next refetch
         far = GeoPoint(lat=HERE.lat + 0.005, lon=HERE.lon)
-        await store.ensure(sid, far, prov)
+        await store.ensure(sid, far, prov)  # stale served, bg refresh kicked
+        task = store._refreshing.get(sid)
+        assert task is not None
+        await task
         upd = store.take_places_update(sid)
         assert upd is not None and {p.id for p in upd} == {"a", "b"}
 

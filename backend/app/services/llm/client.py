@@ -374,10 +374,17 @@ class OpenAICompatLLM:
         if (
             SESSION_TIER.get() == "paid"
             and settings.openai_model_paid
-            # JUDGE/OPTIMIZER are excluded on purpose: the judge must stay a DIFFERENT model
+            # COMPANION/ANSWER_FAST/NARRATE_FAST stay on the fast tier even for paid sessions;
+            # JUDGE/OPTIMIZER are also excluded on purpose: the judge must stay a DIFFERENT model
             # family from the generator (self-preference bias) and the optimizer picks its own
             # strong model — neither should be swapped for the paid generator.
-            and role not in (Role.COMPANION, Role.ANSWER_FAST, Role.JUDGE, Role.OPTIMIZER)
+            and role not in (
+                Role.COMPANION,
+                Role.ANSWER_FAST,
+                Role.NARRATE_FAST,
+                Role.JUDGE,
+                Role.OPTIMIZER,
+            )
         ):
             return settings.openai_model_paid
         override = {
@@ -386,8 +393,10 @@ class OpenAICompatLLM:
             Role.LANDMARK: settings.openai_model_landmark,
             Role.COMPANION: settings.openai_model_companion,
             Role.ENRICHER: settings.openai_model_enricher,
-            # Fast tier-1 answer: its own (fast, Groq-routed) model; falls back to the base model.
+            # Fast tier-1 answer / narration opener: its own (fast, Groq-routed) model; falls back
+            # to the base model when the dedicated fast tier is unset.
             Role.ANSWER_FAST: settings.openai_model_answer_fast,
+            Role.NARRATE_FAST: settings.openai_model_answer_fast,
             # Interestingness judge (Block 4): its own model, a different family than the
             # generator. Empty ⇒ falls back to the base model (fine for offline eval).
             Role.JUDGE: settings.openai_model_judge,
@@ -404,7 +413,7 @@ class OpenAICompatLLM:
         """OpenRouter provider routing for a role (None => let OpenRouter choose). Only the fast
         tier pins a provider (e.g. Groq/Cerebras) so its <1s TTFT is guaranteed and it stays
         reachable past the OpenAI/Google/Anthropic geoblock. Ignored by plain-OpenAI backends."""
-        if role is Role.ANSWER_FAST and settings.openai_provider_answer_fast:
+        if role in (Role.ANSWER_FAST, Role.NARRATE_FAST) and settings.openai_provider_answer_fast:
             raw = settings.openai_provider_answer_fast
             order = [p.strip() for p in raw.split(",") if p.strip()]
             if order:
@@ -547,12 +556,13 @@ class OpenAICompatLLM:
         monologue which runs as NARRATOR) get a hotter temperature + frequency/presence
         penalties to break templated openings and repeated connectors (A1). A 0-valued
         penalty is omitted so single-model/LM-Studio configs stay unaffected."""
-        if role in (Role.NARRATOR, Role.LANDMARK):
+        if role in (Role.NARRATOR, Role.LANDMARK, Role.NARRATE_FAST):
             params: dict[str, Any] = {"temperature": settings.openai_narrator_temperature}
-            if settings.openai_narrator_frequency_penalty:
-                params["frequency_penalty"] = settings.openai_narrator_frequency_penalty
-            if settings.openai_narrator_presence_penalty:
-                params["presence_penalty"] = settings.openai_narrator_presence_penalty
+            if role in (Role.NARRATOR, Role.LANDMARK):
+                if settings.openai_narrator_frequency_penalty:
+                    params["frequency_penalty"] = settings.openai_narrator_frequency_penalty
+                if settings.openai_narrator_presence_penalty:
+                    params["presence_penalty"] = settings.openai_narrator_presence_penalty
             return params
         # The JUDGE is an evaluator, not a writer: it must be as DETERMINISTIC as possible so the
         # same blurb scores the same every time (a gold standard can't flip-flop on borderline
@@ -649,13 +659,18 @@ class OpenAICompatLLM:
         verifiable facts from them. Returns the model's text — the caller decides
         what an empty/"no facts" answer means.
         """
+        plugin: dict = {"id": "web", "max_results": max_results}
+        # Freshness steering: bias the engine toward recent sources so «что здесь
+        # сейчас» reflects the current state, not a 2012 snapshot.
+        if settings.web_search_prompt:
+            plugin["search_prompt"] = settings.web_search_prompt
         return await self._chat(
             Role.ENRICHER,
             system,
             user,
             max_tokens,
             temperature=0.3,
-            plugins=[{"id": "web", "max_results": max_results}],
+            plugins=[plugin],
         )
 
     async def aclose(self) -> None:

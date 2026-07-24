@@ -52,6 +52,52 @@ def is_near_duplicate(text: str, history: list[str], *, threshold: float = 0.82)
     return False
 
 
+def _stem_tokens(text: str) -> set[str]:
+    """Crude 4-char stems of content words (>=4 chars) — tolerant of Russian inflection
+    («нишах»/«ниши» -> «ниша»-ish, «этажах»/«этажей» -> «этаж»)."""
+    return {t[:4] for t in _WORD_RE.findall(text.lower()) if len(t) >= 4}
+
+
+def _trigrams(text: str) -> set[str]:
+    """Character trigrams of the normalized text — morphology- and word-order-blind."""
+    s = " ".join(_WORD_RE.findall(text.lower()))
+    return {s[i:i + 3] for i in range(len(s) - 2)} if len(s) >= 3 else set()
+
+
+def is_fact_duplicate(fact: str, told: list[str], *, jaccard: float = 0.62) -> bool:
+    """Fact-level near-duplicate: does `fact` re-state a claim already in `told`?
+
+    The tester-found failure this exists for: the same real-world fact fetched TWICE by
+    the web distiller (street-scoped query, then district/city-scoped after the area key
+    changed) comes back PARAPHRASED — token-set Jaccard between two LLM wordings of one
+    claim measures ~0.2-0.4, sailing under the 0.62 gate, and the fact is re-told («ниши
+    на первых этажах» on one street, then again framed as a district fact). On top of the
+    verbatim checks (is_near_duplicate) this adds two morphology-tolerant signals:
+    4-char-stem containment and char-trigram Jaccard — tuned on paraphrase/distinct
+    fixture pairs in test_memory_facts.py."""
+    if is_near_duplicate(fact, told, threshold=jaccard):
+        return True
+    fs = _stem_tokens(fact)
+    ft = _trigrams(fact)
+    if len(fs) < 4:
+        return False  # too short to judge as a paraphrase — verbatim checks above suffice
+    # Thresholds are calibrated on the fixture pairs in test_memory_facts.py: paraphrases
+    # of one claim score stem-containment 0.36-0.57 / trigram-Jaccard 0.17-0.31, while
+    # DISTINCT facts about the same street top out at 0.125 / 0.048 — a ~3x separation,
+    # so 0.34 / 0.15 sit comfortably between (catch all rewords, silence nothing new).
+    for h in told:
+        hs = _stem_tokens(h)
+        if len(hs) >= 4:
+            smaller = min(len(fs), len(hs))
+            if len(fs & hs) / smaller >= 0.34:
+                return True
+        ht = _trigrams(h)
+        if ft and ht:
+            if len(ft & ht) / len(ft | ht) >= 0.15:
+                return True
+    return False
+
+
 class ObjectMemo(BaseModel):
     """A narrated object node — the minimal graph node consumed today. Carries just enough
     to find a thematic callback later ('как та церковь, что мы видели раньше'): the name to
@@ -115,13 +161,13 @@ class WalkMemory(BaseModel):
     def new_facts(self, facts: list[str], *, threshold: float = 0.62) -> list[str]:
         """From `facts`, keep only those NOT already told this walk (nor near-duplicated by an
         earlier fact in the same batch) — so a beat gets only genuinely new information, even if
-        an old fact is reworded. A lower threshold than narration dedup: facts are short and a
-        rephrasing shares most tokens."""
+        an old fact is reworded or PARAPHRASED (a re-fetch under a different area scope returns
+        the same claim in fresh words — is_fact_duplicate catches what plain Jaccard misses)."""
         out: list[str] = []
         seen = list(self.told_facts)
         for f in facts:
             f = (f or "").strip()
-            if f and not is_near_duplicate(f, seen, threshold=threshold):
+            if f and not is_fact_duplicate(f, seen, jaccard=threshold):
                 out.append(f)
                 seen.append(f)
         return out

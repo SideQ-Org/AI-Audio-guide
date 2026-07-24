@@ -21,6 +21,7 @@ def _orch(monkeypatch, **over):
     monkeypatch.setattr(settings, "agent_backend", "heuristic")
     monkeypatch.setattr(settings, "geo_source", "fixture")
     monkeypatch.setattr(settings, "enrichment_source", "mock")
+    monkeypatch.setattr(settings, "session_greeting", True)
     monkeypatch.setattr(settings, "nav_offroute_m", 50.0)
     # Reroute mechanics are tested on the per-stop path; scripting has its own suite.
     monkeypatch.setattr(settings, "guided_script_enabled", False)
@@ -38,6 +39,8 @@ def test_offroute_past_debounce_reroutes(monkeypatch):
     async def run():
         await orch.plan_route("r1", ORIGIN, mode="loop", budget_min=40)
         await orch.accept_route("r1")
+        first = await orch.on_position("r1", ORIGIN, Heading(), Pace.SLOW)
+        assert first.kind in ("narration", "silence")
         # Jump ~1 km away from the whole route line -> off-route. The first tick arms the
         # debounce timer; the second (past the zero debounce) reroutes.
         far = GeoPoint(lat=ORIGIN.lat + 0.01, lon=ORIGIN.lon + 0.01)
@@ -59,6 +62,8 @@ def test_offroute_within_debounce_does_not_reroute(monkeypatch):
     async def run():
         await orch.plan_route("r2", ORIGIN, mode="loop", budget_min=40)
         await orch.accept_route("r2")
+        first = await orch.on_position("r2", ORIGIN, Heading(), Pace.SLOW)
+        assert first.kind in ("narration", "silence")
         far = GeoPoint(lat=ORIGIN.lat + 0.01, lon=ORIGIN.lon + 0.01)
         out = await orch.on_position("r2", far, Heading(), Pace.SLOW)
         st = await orch.store.load("r2")
@@ -76,6 +81,8 @@ def test_on_route_does_not_reroute(monkeypatch):
     async def run():
         route = await orch.plan_route("r3", ORIGIN, mode="loop", budget_min=40)
         await orch.accept_route("r3")
+        first = await orch.on_position("r3", ORIGIN, Heading(), Pace.SLOW)
+        assert first.kind in ("narration", "silence")
         # A point right on the route polyline (its first vertex) -> on-route, no reroute.
         on = GeoPoint(lat=route.polyline[1][0], lon=route.polyline[1][1])
         out = await orch.on_position("r3", on, Heading(), Pace.SLOW)

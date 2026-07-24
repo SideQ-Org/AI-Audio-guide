@@ -22,7 +22,10 @@ def test_paid_session_researches_medium_by_default():
     tok = SESSION_TIER.set("paid")
     try:
         assert _fact_warm_gate(Significance.MEDIUM) is True    # paid + MEDIUM -> research
-        assert _fact_warm_gate(Significance.LOW) is False      # ...but not LOW by default
+        # LOW is researched too since the «пусть ищет все» widening (fact_warm_sig_min
+        # default LOW): ordinary-but-real objects get background facts; the paid-tier
+        # gate still bounds the spend and rank_facts keeps only the best on top.
+        assert _fact_warm_gate(Significance.LOW) is True
     finally:
         SESSION_TIER.reset(tok)
 

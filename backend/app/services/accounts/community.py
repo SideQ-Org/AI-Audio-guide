@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -234,26 +234,36 @@ async def list_requests(session: AsyncSession, *, user_id) -> dict:
 # -- streak / presence ------------------------------------------------------- #
 
 
-async def _walk_days(session: AsyncSession, uid: uuid.UUID) -> list[date]:
-    rows = await session.scalars(
-        select(Walk.started_at).where(Walk.user_id == uid).order_by(Walk.started_at.desc())
-    )
+def _tz(tz_offset_min: int) -> tzinfo:
+    """The walker's local timezone from a client-supplied UTC offset in minutes.
+    Day bucketing must be LOCAL: a 23:30 MSK walk belongs to that local day, not to
+    the next UTC one — in UTC the streak visibly broke/joined at local midnight.
+    Clamped to the real offset range; 0 (absent param) keeps the old UTC behaviour."""
+    return timezone(timedelta(minutes=max(-14 * 60, min(14 * 60, tz_offset_min))))
+
+
+def _days_from_ts(ts_list: list[datetime], tz_offset_min: int = 0) -> list[date]:
+    """Distinct LOCAL dates from walk timestamps, newest first (pure — no I/O)."""
+    tz = _tz(tz_offset_min)
     seen: set[date] = set()
     out: list[date] = []
-    for ts in rows:
-        d = ts.astimezone(UTC).date()
+    for ts in sorted(ts_list, reverse=True):
+        # SQLite (tests) hands back NAIVE datetimes; the app writes them in UTC. A naive
+        # astimezone() would assume the SERVER's local zone — pin to UTC explicitly.
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        d = ts.astimezone(tz).date()
         if d not in seen:
             seen.add(d)
             out.append(d)
     return out
 
 
-async def compute_streak(session: AsyncSession, *, user_id) -> int:
-    """Consecutive days (ending today or yesterday) with at least one walk."""
-    days = await _walk_days(session, _as_uuid(user_id))
+def _streak_from_days(days: list[date], *, tz_offset_min: int = 0) -> int:
+    """Consecutive LOCAL days (ending today or yesterday), from newest-first dates (pure)."""
     if not days:
         return 0
-    today = _now().date()
+    today = _now().astimezone(_tz(tz_offset_min)).date()
     if days[0] not in (today, today - timedelta(days=1)):
         return 0
     streak = 1
@@ -263,6 +273,39 @@ async def compute_streak(session: AsyncSession, *, user_id) -> int:
         else:
             break
     return streak
+
+
+async def walks_ts_by_user(
+    session: AsyncSession, user_ids
+) -> dict[uuid.UUID, list[datetime]]:
+    """ONE query: every listed user's walk timestamps. The bulk substrate for
+    count/level/streak so N-user endpoints stop paying an N×~200 ms round-trip tax to
+    the remote pooler (the community tab measured 2-6 s per endpoint live)."""
+    ids = list({_as_uuid(u) for u in user_ids})
+    if not ids:
+        return {}
+    rows = await session.execute(
+        select(Walk.user_id, Walk.started_at).where(Walk.user_id.in_(ids))
+    )
+    out: dict[uuid.UUID, list[datetime]] = {}
+    for uid, ts in rows:
+        out.setdefault(uid, []).append(ts)
+    return out
+
+
+async def _walk_days(
+    session: AsyncSession, uid: uuid.UUID, *, tz_offset_min: int = 0
+) -> list[date]:
+    rows = await session.scalars(
+        select(Walk.started_at).where(Walk.user_id == uid).order_by(Walk.started_at.desc())
+    )
+    return _days_from_ts(list(rows), tz_offset_min)
+
+
+async def compute_streak(session: AsyncSession, *, user_id, tz_offset_min: int = 0) -> int:
+    """Consecutive LOCAL days (ending today or yesterday) with at least one walk."""
+    days = await _walk_days(session, _as_uuid(user_id), tz_offset_min=tz_offset_min)
+    return _streak_from_days(days, tz_offset_min=tz_offset_min)
 
 
 async def walking_now_ids(session: AsyncSession, *, user_ids: set[uuid.UUID]) -> set[uuid.UUID]:
@@ -416,27 +459,73 @@ async def _progress(
     return int(val or 0)
 
 
+def _metric_from_rows(ch: Challenge, rows: list[tuple]) -> int:
+    """A user's metric total inside the challenge window, from prefetched walk rows
+    (started_at, object_count, district, distance_m) — pure, no I/O."""
+    inside = [r for r in rows if ch.starts_at <= r[0] <= ch.ends_at]
+    if ch.metric == "places":
+        return int(sum(r[1] or 0 for r in inside))
+    if ch.metric == "districts":
+        return len({r[2] for r in inside if r[2]})
+    return int(sum(r[3] or 0 for r in inside))
+
+
+async def _boards_bulk(
+    session: AsyncSession, challenges: list[Challenge]
+) -> dict[uuid.UUID, list[tuple[User, int]]]:
+    """Leaderboards for MANY challenges in TWO queries total (participants join users +
+    one walks sweep for every participant), instead of one query per participant per
+    challenge — the old shape cost (challenges × participants) × ~200 ms to the remote
+    pooler and dominated the community tab's load time."""
+    if not challenges:
+        return {}
+    ch_ids = [ch.id for ch in challenges]
+    parts = await session.execute(
+        select(ChallengeParticipant.challenge_id, User)
+        .join(User, ChallengeParticipant.user_id == User.id)
+        .where(ChallengeParticipant.challenge_id.in_(ch_ids))
+    )
+    by_ch: dict[uuid.UUID, list[User]] = {}
+    all_uids: set[uuid.UUID] = set()
+    for cid, user in parts:
+        by_ch.setdefault(cid, []).append(user)
+        all_uids.add(user.id)
+    walks_by_uid: dict[uuid.UUID, list[tuple]] = {}
+    if all_uids:
+        lo = min(ch.starts_at for ch in challenges)
+        hi = max(ch.ends_at for ch in challenges)
+        rows = await session.execute(
+            select(
+                Walk.user_id, Walk.started_at, Walk.object_count, Walk.district, Walk.distance_m
+            ).where(Walk.user_id.in_(all_uids), Walk.started_at >= lo, Walk.started_at <= hi)
+        )
+        for uid, *rest in rows:
+            walks_by_uid.setdefault(uid, []).append(tuple(rest))
+    boards: dict[uuid.UUID, list[tuple[User, int]]] = {}
+    for ch in challenges:
+        board = [
+            (u, _metric_from_rows(ch, walks_by_uid.get(u.id, [])))
+            for u in by_ch.get(ch.id, [])
+        ]
+        board.sort(key=lambda t: t[1], reverse=True)
+        boards[ch.id] = board
+    return boards
+
+
 async def challenge_leaderboard(
     session: AsyncSession, *, challenge_id
 ) -> tuple[Challenge, list[tuple[User, int]]] | None:
     ch = await session.get(Challenge, _as_uuid(challenge_id))
     if ch is None:
         return None
-    parts = await session.execute(
-        select(User)
-        .join(ChallengeParticipant, ChallengeParticipant.user_id == User.id)
-        .where(ChallengeParticipant.challenge_id == ch.id)
-    )
-    board: list[tuple[User, int]] = []
-    for (user,) in parts:
-        board.append((user, await _progress(session, user_id=user.id, ch=ch)))
-    board.sort(key=lambda t: t[1], reverse=True)
-    return ch, board
+    boards = await _boards_bulk(session, [ch])
+    return ch, boards.get(ch.id, [])
 
 
 async def list_challenges(session: AsyncSession, *, user_id) -> list[dict]:
     """Active challenges the user is in or could join (own + friends' + global), each
-    with the caller's progress and rank."""
+    with the caller's progress and rank. Batched: the boards for ALL challenges come
+    from two queries (see _boards_bulk)."""
     uid = _as_uuid(user_id)
     now = _now()
     fids = await friend_ids(session, user_id=uid)
@@ -447,22 +536,22 @@ async def list_challenges(session: AsyncSession, *, user_id) -> list[dict]:
     )
     # Candidate set: active challenges that are global, mine, a friend's, or already joined.
     creators = fids | {uid}
-    rows = await session.scalars(
-        select(Challenge).where(
-            Challenge.ends_at >= now,
-            or_(
-                Challenge.scope == "global",
-                Challenge.creator_id.in_(creators),
-                Challenge.id.in_(joined_ids) if joined_ids else Challenge.id.is_(None),
-            ),
-        ).order_by(Challenge.ends_at.asc())
+    rows = list(
+        await session.scalars(
+            select(Challenge).where(
+                Challenge.ends_at >= now,
+                or_(
+                    Challenge.scope == "global",
+                    Challenge.creator_id.in_(creators),
+                    Challenge.id.in_(joined_ids) if joined_ids else Challenge.id.is_(None),
+                ),
+            ).order_by(Challenge.ends_at.asc())
+        )
     )
+    boards = await _boards_bulk(session, rows)
     out: list[dict] = []
     for ch in rows:
-        res = await challenge_leaderboard(session, challenge_id=ch.id)
-        if res is None:
-            continue
-        _ch, board = res
+        board = boards.get(ch.id, [])
         rank = next((i + 1 for i, (u, _p) in enumerate(board) if u.id == uid), None)
         mine = next((p for u, p in board if u.id == uid), 0)
         out.append(
@@ -524,16 +613,44 @@ async def my_walks_with_path(
 # -- group streaks ----------------------------------------------------------- #
 
 
-async def group_streak_value(session: AsyncSession, *, member_ids) -> int:
-    """Consecutive days (ending today or yesterday) on which EVERY member walked."""
+def _group_value_from_days(
+    per_member: list[set[date]], *, tz_offset_min: int = 0
+) -> int:
+    """Consecutive LOCAL days (ending today or yesterday) on which EVERY member walked
+    — pure core shared by the single and the bulk paths."""
+    if not per_member:
+        return 0
+    common = set.intersection(*per_member)
+    if not common:
+        return 0
+    today = _now().astimezone(_tz(tz_offset_min)).date()
+    if today in common:
+        cursor = today
+    elif (today - timedelta(days=1)) in common:
+        cursor = today - timedelta(days=1)
+    else:
+        return 0
+    streak = 0
+    while cursor in common:
+        streak += 1
+        cursor -= timedelta(days=1)
+    return streak
+
+
+async def group_streak_value(
+    session: AsyncSession, *, member_ids, tz_offset_min: int = 0
+) -> int:
+    """Consecutive LOCAL days (ending today or yesterday) on which EVERY member walked."""
     ids = [_as_uuid(m) for m in member_ids]
     if not ids:
         return 0
-    per_member = [set(await _walk_days(session, mid)) for mid in ids]
+    per_member = [
+        set(await _walk_days(session, mid, tz_offset_min=tz_offset_min)) for mid in ids
+    ]
     common = set.intersection(*per_member) if per_member else set()
     if not common:
         return 0
-    today = _now().date()
+    today = _now().astimezone(_tz(tz_offset_min)).date()
     if today in common:
         cursor = today
     elif (today - timedelta(days=1)) in common:
@@ -561,8 +678,12 @@ async def create_group_streak(
     return gs
 
 
-async def list_group_streaks(session: AsyncSession, *, user_id) -> list[dict]:
-    """The caller's group streaks with members and the current derived value."""
+async def list_group_streaks(
+    session: AsyncSession, *, user_id, tz_offset_min: int = 0
+) -> list[dict]:
+    """The caller's group streaks with members and the current derived value.
+    Batched: members for ALL streaks in one query + one walks sweep for every member
+    (the old per-streak-per-member days query paid ~200 ms each to the remote pooler)."""
     uid = _as_uuid(user_id)
     streak_ids = set(
         await session.scalars(
@@ -571,20 +692,33 @@ async def list_group_streaks(session: AsyncSession, *, user_id) -> list[dict]:
     )
     if not streak_ids:
         return []
-    streaks = await session.scalars(
-        select(GroupStreak)
-        .where(GroupStreak.id.in_(streak_ids))
-        .order_by(GroupStreak.created_at.desc())
+    streaks = list(
+        await session.scalars(
+            select(GroupStreak)
+            .where(GroupStreak.id.in_(streak_ids))
+            .order_by(GroupStreak.created_at.desc())
+        )
     )
+    rows = await session.execute(
+        select(GroupStreakMember.streak_id, User)
+        .join(User, GroupStreakMember.user_id == User.id)
+        .where(GroupStreakMember.streak_id.in_(streak_ids))
+    )
+    members_by_streak: dict[uuid.UUID, list[User]] = {}
+    all_ids: set[uuid.UUID] = set()
+    for sid, user in rows:
+        members_by_streak.setdefault(sid, []).append(user)
+        all_ids.add(user.id)
+    ts_by_uid = await walks_ts_by_user(session, all_ids)
+    days_by_uid = {
+        u: set(_days_from_ts(ts, tz_offset_min)) for u, ts in ts_by_uid.items()
+    }
     out: list[dict] = []
     for gs in streaks:
-        rows = await session.execute(
-            select(User)
-            .join(GroupStreakMember, GroupStreakMember.user_id == User.id)
-            .where(GroupStreakMember.streak_id == gs.id)
+        members = members_by_streak.get(gs.id, [])
+        value = _group_value_from_days(
+            [days_by_uid.get(u.id, set()) for u in members], tz_offset_min=tz_offset_min
         )
-        members = [u for (u,) in rows]
-        value = await group_streak_value(session, member_ids=[u.id for u in members])
         out.append({"streak": gs, "members": members, "days": value})
     return out
 

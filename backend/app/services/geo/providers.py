@@ -6,6 +6,8 @@ to the source (live API vs. cached fixtures vs. virtual walk).
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -30,10 +32,12 @@ class PlaceProvider(Protocol):
 # Overpass (live)
 # --------------------------------------------------------------------------- #
 _SELECTORS = (
-    # culture & sightseeing: every tourism feature (museum, gallery, artwork,
-    # attraction, viewpoint, zoo, aquarium, theme_park, ...) and everything historic
+    # culture & sightseeing: POSITIVE tourism list (museum, gallery, artwork,
+    # attraction, viewpoint, ...) — a bare "tourism" also dragged in hotels, hostels,
+    # apartments, camp sites and information boards: pure low-weight noise that bloated
+    # every response and survived as weight-0.2 filler. Everything historic stays broad
     # (monument, memorial, castle, ruins, city walls/gate, aqueduct, ...).
-    '"tourism"',
+    '"tourism"~"museum|gallery|artwork|attraction|viewpoint|zoo|aquarium|theme_park"',
     '"historic"',
     # worship + civic / cultural / education / health institutions — the landmark
     # buildings people SEE and expect a word about (schools/hospitals were missing).
@@ -48,13 +52,20 @@ _SELECTORS = (
     # named squares & pedestrian promenades — the spine of a city walk
     '"place"="square"',
     '"highway"="pedestrian"',
+    # major roads + named interchanges (МКАД, крупные шоссе, развязки) — ONLY motorway/
+    # trunk + motorway_junction, so ordinary streets never come in; named/ref-only (see
+    # _element_to_place), deduped by name (LINEAR). Narrated as a SECONDARY fallback when
+    # you come near one — you can't walk it, but a famous highway is worth a word.
+    '"highway"~"motorway|trunk"',
+    '"highway"="motorway_junction"',
     # parks, gardens, civic green & sports venues (incl. pitches/tracks/grounds — a
     # neighbourhood football field is usually leisure=pitch, not =stadium; it's often
     # unnamed, so _element_to_place synthesizes a name for the notable sports below)
     '"leisure"~"park|garden|nature_reserve|common|marina|stadium|sports_centre|pitch|track|sports_hall|recreation_ground"',
-    # nature & water — reservoirs, rivers, lakes, forests, hills, caves, rock features
+    # nature & water — reservoirs, rivers, lakes, forests, hills, caves, rock features.
+    # (a bare `"water"` selector was dropped: it triple-duplicated natural~water +
+    # waterway and matched every water=* fragment — extra scan, zero new objects)
     '"natural"~"water|wood|peak|hill|ridge|bay|beach|cape|cliff|cave_entrance|arch|rock|spring|geyser|waterfall|volcano|glacier|wetland"',
-    '"water"',
     '"waterway"~"river|canal|waterfall|dam|lock|weir"',
     '"landuse"~"reservoir|forest|orchard|vineyard|allotments|cemetery"',
     # notable man-made structures
@@ -86,8 +97,10 @@ def build_query(center: GeoPoint, radius_m: float) -> str:
     # `out` (it drops the geometry) and returns no member geometry for a relation, so the
     # centroid is the robust cross-mirror point. _element_to_place still prefers a relation's
     # member geometry (nearest edge) when a mirror DOES expand it, falling back to this center.
+    # [timeout:12] matches the client-side per-mirror timeout (fetch_overpass_elements):
+    # with 15 the server kept computing after the client had already failed over.
     return (
-        f"[out:json][timeout:15];"
+        f"[out:json][timeout:12];"
         f"({nw})->.nw;({rel})->.r;"
         f".nw out tags geom;.r out tags center;"
     )
@@ -170,6 +183,11 @@ def _synth_name(tags: dict) -> str | None:
 def _element_to_place(el: dict, origin: GeoPoint) -> Place | None:
     tags = el.get("tags") or {}
     name = _pick_name(tags) or _synth_name(tags)
+    # A numbered highway with no name still identifies by its route ref (e.g. an
+    # unnamed trunk with ref="М-10"). ONLY for the road classes we fetch — keeps
+    # ref-fallback from resurrecting other unnamed junk.
+    if not name and tags.get("highway") in {"motorway", "trunk"} and tags.get("ref"):
+        name = tags["ref"].split(";")[0].strip()
     if not name:
         return None
     # Drop private service/commerce (clinics/dentists/kindergartens/…) before it ever becomes a
@@ -256,36 +274,145 @@ def overpass_mirrors() -> list[str]:
     return out
 
 
-async def fetch_overpass_elements(query: str, *, per_timeout: float = 8.0) -> list[dict]:
-    """POST a query to each mirror in turn; first JSON-200 wins. A slow/blocked
-    mirror fails over fast (per_timeout) instead of stalling the whole tick."""
+# --- L2 disk cache for Overpass responses (optional, `overpass_disk_cache` dir) ------
+# Survives process restarts (prod restarts wiped every warm disc — the next walk paid
+# the full cold 5-12 s again) and is shared across sessions. Keyed by query hash; OSM
+# data changes on the scale of days, so a TTL of hours-to-a-day is safe.
+
+
+def _disk_cache_path(query: str) -> Path | None:
+    root = settings.overpass_disk_cache
+    if not root:
+        return None
+    return Path(root) / (hashlib.sha1(query.encode("utf-8")).hexdigest() + ".json")
+
+
+def _disk_cache_read(query: str) -> list[dict] | None:
+    p = _disk_cache_path(query)
+    if p is None:
+        return None
+    try:
+        if not p.exists():
+            return None
+        if time.time() - p.stat().st_mtime > settings.overpass_disk_ttl_s:
+            return None
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _disk_cache_write(query: str, elements: list[dict]) -> None:
+    p = _disk_cache_path(query)
+    if p is None:
+        return
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(elements, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(p)  # atomic — a killed process can't leave a torn cache file
+        # Occasional prune: keep the directory bounded (oldest-by-mtime out first).
+        files = list(p.parent.glob("*.json"))
+        if len(files) > 2048:
+            for old in sorted(files, key=lambda f: f.stat().st_mtime)[:256]:
+                old.unlink(missing_ok=True)
+    except OSError:
+        pass  # cache is best-effort — never break a fetch over disk trouble
+
+
+async def _fetch_one(client: httpx.AsyncClient, url: str, query: str) -> list[dict]:
+    resp = await client.post(url, data={"data": query})
+    resp.raise_for_status()
+    return resp.json().get("elements", [])
+
+
+async def fetch_overpass_elements(query: str, *, per_timeout: float = 12.0) -> list[dict]:
+    """Fetch a query's elements: L2 disk cache first, then a RACE of the first
+    `overpass_race` mirrors (staggered by `overpass_race_stagger_s` so a fast healthy
+    primary usually wins alone), then the remaining mirrors sequentially. The measured
+    reality this serves: the primary's server-side execution is ~5 s on a dense disc
+    and mirrors fail unpredictably — a race turns p90 (slow/failed primary + failover)
+    into min(alive mirrors), and the stagger keeps the extra public load near zero
+    when the primary answers fast."""
+    cached = await asyncio.to_thread(_disk_cache_read, query)
+    if cached is not None:
+        GUIDE.overpass(True)
+        return cached
+    mirrors = overpass_mirrors()
     last_exc: Exception | None = None
+    # An EMPTY 200 is only accepted as the FINAL answer: a REGION-CLIPPED self-hosted
+    # primary answers instantly-but-empty outside its clip, and an empty race win there
+    # would blind discovery for the whole walk. A non-empty result from ANY mirror wins;
+    # if every mirror agrees the area is empty (genuinely sparse), empty it is.
+    saw_empty = False
     async with httpx.AsyncClient(
         timeout=per_timeout,
         headers={"User-Agent": _OVERPASS_UA},
         follow_redirects=False,  # Overpass endpoints don't redirect; refuse any (SSRF floor)
     ) as client:
-        for url in overpass_mirrors():
+        race_n = max(1, int(settings.overpass_race))
+        racers, rest = mirrors[:race_n], mirrors[race_n:]
+
+        async def _staggered(i: int, url: str) -> list[dict]:
+            if i:
+                await asyncio.sleep(settings.overpass_race_stagger_s * i)
+            return await _fetch_one(client, url, query)
+
+        tasks = [
+            asyncio.ensure_future(_staggered(i, u)) for i, u in enumerate(racers)
+        ]
+        try:
+            while tasks:
+                done, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED
+                )
+                tasks = list(pending)
+                winner: list[dict] | None = None
+                for t in done:
+                    try:
+                        result = t.result()
+                        if result:
+                            winner = result
+                        else:
+                            saw_empty = True
+                    except Exception as e:  # noqa: BLE001 — a lost racer, try the rest
+                        last_exc = e
+                if winner is not None:
+                    GUIDE.overpass(True)  # a mirror answered — the guide won't go dark
+                    await asyncio.to_thread(_disk_cache_write, query, winner)
+                    return winner
+        finally:
+            for t in tasks:
+                t.cancel()
+        for url in rest:  # the race lost entirely — walk the remaining mirrors
             try:
-                resp = await client.post(url, data={"data": query})
-                resp.raise_for_status()
-                elements = resp.json().get("elements", [])
-                GUIDE.overpass(True)  # a mirror answered — the guide won't go dark
+                elements = await _fetch_one(client, url, query)
+                if not elements:
+                    saw_empty = True
+                    continue
+                GUIDE.overpass(True)
+                await asyncio.to_thread(_disk_cache_write, query, elements)
                 return elements
             except Exception as e:  # noqa: BLE001 — timeout/non-200/non-JSON -> next mirror
                 last_exc = e
                 continue
+    if saw_empty:
+        # Every reachable mirror said "nothing here" — a real (sparse) empty, not an
+        # outage. Cache it too, so a genuinely empty area doesn't refetch every disc.
+        GUIDE.overpass(True)
+        await asyncio.to_thread(_disk_cache_write, query, [])
+        return []
     if last_exc is not None:
         GUIDE.overpass(False, f"{type(last_exc).__name__}: {last_exc}")
         raise last_exc
     return []
 
 
-# Short-lived cache of Overpass results, keyed by (rounded position, radius). A
+# Short-lived cache of RAW Overpass elements, keyed by (snapped position, radius). A
 # walking user re-queries almost the same circle every tick; without this the heavy
 # multi-selector query (and its 1.5-8s latency) runs on every tick and every
-# adaptive-radius step. 4-decimal rounding ≈ 11 m, so we reuse within a step or two.
-_OVERPASS_CACHE: dict[tuple[float, float, int], tuple[float, list[Place]]] = {}
+# adaptive-radius step. Raw elements (not Places) so a hit re-parses against the
+# caller's TRUE center — nearest-edge anchor points stay correct as the walker moves.
+_OVERPASS_CACHE: dict[tuple[float, float, int], tuple[float, list[dict]]] = {}
 _OVERPASS_CACHE_TTL_S = 90.0
 _OVERPASS_CACHE_MAX = 512
 
@@ -295,19 +422,25 @@ class OverpassProvider:
         self.url = url or settings.overpass_url
 
     async def fetch_places(self, center: GeoPoint, radius_m: float) -> list[Place]:
-        key = (round(center.lat, 4), round(center.lon, 4), int(radius_m))
+        # SNAP the query center to a ~110/55 m grid: the disc is hundreds of metres wide,
+        # so a ≤70 m shift is immaterial — but it makes the query text (and thus the L1
+        # memory cache AND the L2 disk cache) reusable across ticks, sessions and whole
+        # repeat walks, instead of a fresh cache key per GPS wobble. Parsing still snaps
+        # anchor points against the TRUE center.
+        qcenter = GeoPoint(lat=round(center.lat, 3), lon=round(center.lon, 3))
+        key = (qcenter.lat, qcenter.lon, int(radius_m))
         now = time.monotonic()
         hit = _OVERPASS_CACHE.get(key)
         if hit is not None and now - hit[0] < _OVERPASS_CACHE_TTL_S:
-            return hit[1]
-        query = build_query(center, radius_m)
-        # Multi-mirror with fast failover (see fetch_overpass_elements): a slow/down
+            return parse_elements(hit[1], center)
+        query = build_query(qcenter, radius_m)
+        # Multi-mirror race with failover (see fetch_overpass_elements): a slow/down
         # endpoint can't stack multi-minute stalls across adaptive-radius expansions.
         elements = await fetch_overpass_elements(query)
         places = parse_elements(elements, center)
         if len(_OVERPASS_CACHE) >= _OVERPASS_CACHE_MAX:
             _OVERPASS_CACHE.pop(next(iter(_OVERPASS_CACHE)), None)  # FIFO trim
-        _OVERPASS_CACHE[key] = (now, places)
+        _OVERPASS_CACHE[key] = (now, elements)
         return places
 
 

@@ -17,6 +17,7 @@ isolated between tests (each test builds its own orchestrator).
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 
@@ -57,6 +58,10 @@ class InventoryStore:
         self._data: dict[str, tuple[float, SessionInventory]] = {}
         # session_id -> last inventory version pushed to that client (map pins)
         self._pulled: dict[str, int] = {}
+        # session_id -> in-flight background refresh (stale-while-revalidate)
+        self._refreshing: dict[str, asyncio.Task] = {}
+        # session_id -> monotonic time of the last background refresh START (rate limit)
+        self._last_refresh: dict[str, float] = {}
 
     def _evict_expired(self, now: float) -> None:
         ttl = settings.inventory_ttl_s
@@ -73,51 +78,97 @@ class InventoryStore:
             self._data.pop(oldest, None)
 
     def _should_fetch(self, inv: SessionInventory | None, position: GeoPoint) -> bool:
+        """Foreground (blocking) fetch is needed only when there is NO usable disc at
+        all: no inventory yet, or the walker is entirely OUTSIDE the current one (a
+        resume/teleport into another part of town). Ordinary edge-crossing is handled
+        by the predictive background refresh (stale-while-revalidate)."""
         if inv is None:
             return True
-        edge = settings.inventory_radius_m * settings.inventory_refetch_frac
-        # We always re-anchor to the fetch position (see `ensure`), so crossing the
-        # edge can't hammer Overpass: after a fetch the user is back inside the disc.
-        return haversine_m(position, inv.anchor) >= edge
+        return haversine_m(position, inv.anchor) >= settings.inventory_radius_m
+
+    async def _fetch_into(
+        self, session_id: str, position: GeoPoint, provider: PlaceProvider, *, reason: str
+    ) -> SessionInventory | None:
+        """One disc fetch + commit into the store (shared by cold and background paths).
+        Keeps the stale disc when the fetch comes back empty (transient mirror miss)."""
+        t0 = time.monotonic()
+        tick_bump("overpass")
+        places = await provider.fetch_places(position, settings.inventory_radius_m)
+        now = time.monotonic()
+        log.info(
+            "overpass fetch reason=%s r=%.0f -> %d places (t=%dms)%s",
+            reason, settings.inventory_radius_m, len(places),
+            int((now - t0) * 1000),
+            "" if places else " EMPTY (endpoint miss or genuinely no coverage here)",
+        )
+        entry = self._data.get(session_id)
+        inv = entry[1] if entry is not None else None
+        if inv is None:
+            inv = SessionInventory(
+                anchor=position, places=places, last_fetch_at=now, version=1
+            )
+        else:
+            # Always re-centre to where we just looked (so we don't refetch next
+            # tick); keep the stale disc only if the new fetch came back empty
+            # (transient Overpass miss) rather than blanking a usable inventory.
+            inv.anchor = position
+            inv.last_fetch_at = now
+            if places:
+                inv.places = places
+                inv.version += 1  # disc changed -> client should refresh its pins
+                ids = {p.id for p in places}
+                inv.approach = {k: v for k, v in inv.approach.items() if k in ids}
+        self._data[session_id] = (now, inv)
+        self._cap()
+        return inv
+
+    def _start_refresh(
+        self, session_id: str, position: GeoPoint, provider: PlaceProvider
+    ) -> None:
+        """Fire-and-forget background re-centre of the disc (one in flight per session,
+        rate-limited) — the tick keeps serving the stale disc meanwhile."""
+        now = time.monotonic()
+        if session_id in self._refreshing:
+            return
+        last = self._last_refresh.get(session_id)
+        if last is not None and (now - last) < settings.inventory_refresh_min_gap_s:
+            return
+        self._last_refresh[session_id] = now
+
+        async def _run() -> None:
+            try:
+                await self._fetch_into(session_id, position, provider, reason="predict-ahead")
+            except Exception as e:  # noqa: BLE001 — a failed refresh keeps the stale disc
+                log.info("inventory bg refresh failed: %r", e)
+            finally:
+                self._refreshing.pop(session_id, None)
+
+        task = asyncio.ensure_future(_run())
+        self._refreshing[session_id] = task
 
     async def ensure(
         self, session_id: str, position: GeoPoint, provider: PlaceProvider
     ) -> SessionInventory:
-        """Return the session's inventory, (re)fetching the wide disc only when the
-        user has walked past half its radius from the anchor it was centred on."""
+        """Return the session's inventory IMMEDIATELY (stale-while-revalidate): the disc
+        blocks only when the session has none (cold) or the walker left it entirely
+        (teleport/resume). Walking toward the edge triggers a predictive BACKGROUND
+        re-centre instead of the old in-tick refetch that froze narration for the whole
+        cold fetch (10-26 s measured in prod)."""
         now = time.monotonic()
         self._evict_expired(now)
         entry = self._data.get(session_id)
         inv = entry[1] if entry is not None else None
         if self._should_fetch(inv, position):
-            reason = "cold" if inv is None else "walked-past-edge"
-            t0 = time.monotonic()
-            tick_bump("overpass")
-            places = await provider.fetch_places(position, settings.inventory_radius_m)
-            log.info(
-                "overpass fetch reason=%s r=%.0f -> %d places (t=%dms)%s",
-                reason, settings.inventory_radius_m, len(places),
-                int((time.monotonic() - t0) * 1000),
-                "" if places else " EMPTY (endpoint miss or genuinely no coverage here)",
-            )
-            if inv is None:
-                inv = SessionInventory(
-                    anchor=position, places=places, last_fetch_at=now, version=1
-                )
-            else:
-                # Always re-centre to where we just looked (so we don't refetch next
-                # tick); keep the stale disc only if the new fetch came back empty
-                # (transient Overpass miss) rather than blanking a usable inventory.
-                inv.anchor = position
-                inv.last_fetch_at = now
-                if places:
-                    inv.places = places
-                    inv.version += 1  # disc changed -> client should refresh its pins
-                    ids = {p.id for p in places}
-                    inv.approach = {k: v for k, v in inv.approach.items() if k in ids}
+            reason = "cold" if inv is None else "left-disc"
+            inv = await self._fetch_into(session_id, position, provider, reason=reason)
+        else:
+            assert inv is not None
+            if haversine_m(position, inv.anchor) >= (
+                settings.inventory_radius_m * settings.inventory_predict_frac
+            ):
+                self._start_refresh(session_id, position, provider)
+            self._data[session_id] = (now, inv)  # refresh LRU access stamp
         assert inv is not None
-        self._data[session_id] = (now, inv)
-        self._cap()
         return inv
 
     def peek(self, session_id: str) -> SessionInventory | None:

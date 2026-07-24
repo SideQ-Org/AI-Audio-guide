@@ -428,6 +428,17 @@ async def count_walks(session: AsyncSession, *, user_id: uuid.UUID | str) -> int
     ) or 0
 
 
+async def get_users_by_ids(
+    session: AsyncSession, *, user_ids
+) -> list[User]:
+    """Many users in ONE query (community bulk endpoints — kills the per-friend
+    get_user round-trip to the remote pooler)."""
+    ids = list({_as_uuid(u) for u in user_ids})
+    if not ids:
+        return []
+    return list(await session.scalars(select(User).where(User.id.in_(ids))))
+
+
 async def count_walks_since(
     session: AsyncSession, *, user_id: uuid.UUID | str, since: datetime
 ) -> int:
@@ -484,3 +495,27 @@ async def delete_walk(
         )
     )
     return (result.rowcount or 0) > 0
+
+
+async def prune_short_walk(
+    session: AsyncSession,
+    *,
+    walk_id: uuid.UUID | str,
+    user_id: uuid.UUID | str,
+    min_s: float,
+) -> bool:
+    """Delete a FINISHED walk that spanned less than ``min_s`` seconds (started_at →
+    ended_at, i.e. first → last narrated object). The server-side backstop behind the
+    client's 10-minute record rule, for walks that never received an explicit
+    ``end``/discard (killed app, socket down at Stop) — called when a session rotates
+    to a new walk, so it never touches a walk still in progress."""
+    if min_s <= 0:
+        return False
+    walk = await session.get(Walk, _as_uuid(walk_id))
+    if walk is None or walk.user_id != _as_uuid(user_id):
+        return False
+    span = ((walk.ended_at or walk.started_at) - walk.started_at).total_seconds()
+    if span >= min_s:
+        return False
+    await session.delete(walk)
+    return True

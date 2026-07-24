@@ -18,12 +18,15 @@ cp .env.example .env        # then add OPENAI_API_KEY (OpenRouter sk-or-...)
 ```
 - `GET /health` — liveness
 - `GET /` — WebSocket test client (`web/index.html`)
-- `WS  /ws` — drives the agent: `position` / `utterance` / `audio` / `language` / `ping` in →
+- `WS  /ws` — drives the agent: `position` / `utterance` / `audio` / `language` / `ping` / `prewarm` in →
   `narration` / `reply` / `transcript` / `state` / `ping` out. **Guided mode ("Проведи меня"):**
-  `start_guided` / `route_accept` / `route_reject` / `skip_stop` in → `route` / `stop_reached` /
-  `reroute` / `route_done` out; plus a `track` frame carrying the street-snapped walked track.
-  Connect with `?sid=<stable-id>` to **resume** the same session across reconnects (WiFi/cell
-  drops); both sides send a `ping` keepalive so an idle socket isn't reaped mid-walk.
+  `start_guided` / `route_accept` / `route_reject` / `skip_stop` in → `route` / `route_accepted` /
+  `stop_reached` / `reroute` / `route_done` out; plus a `track` frame carrying the street-snapped
+  walked track. `prewarm` is a non-narrative home-screen warmup: the client may open a short-lived
+  socket, send `language` + `prewarm`, and close it again; the backend warms inventory / area /
+  startup-contract caches but must not set `live_position`, greet, or wake the producer. Connect
+  with `?sid=<stable-id>` to **resume** the same session across reconnects (WiFi/cell drops); both
+  sides send a `ping` keepalive so an idle socket isn't reaped mid-walk.
 
 ## Checks
 ```bash
@@ -41,7 +44,8 @@ cp .env.example .env          # then fill OPENAI_API_KEY (sk-or-...)
 docker compose up -d --build
 curl http://localhost:8000/health        # {"status":"ok",...}
 ```
-The phone then connects to `ws://<server-ip>:8000/ws` (Settings → WebSocket URL).
+The phone then connects to `ws://<server-ip>:8000/ws`, typically by building/running the client with
+`--dart-define=WS_URL=ws://<server-ip>:8000/ws` (the in-app WebSocket URL field has been removed).
 Key `.env` values for a **real walk**: `GEO_SOURCE=overpass` (not `fixture`),
 `ENRICHMENT_SOURCE=websearch`, `AGENT_BACKEND=openai`. The first voice question
 downloads the Whisper model into the volume (one-time).

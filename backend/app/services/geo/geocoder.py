@@ -12,8 +12,10 @@ slowly), so the extra request is rare.
 from __future__ import annotations
 
 import math
+import time
 from typing import Protocol
 
+from app.config import settings
 from app.shared.schemas import Address, GeoPoint
 
 from .providers import fetch_overpass_elements
@@ -167,6 +169,34 @@ def parse_address(
 
 
 class OverpassGeocoder:
+    """Overpass-based reverse geocoding with a FINE ~15 m GRID cache: a block's address is
+    stable, so a repeat/stationary tick resolves instantly instead of paying a 3-10 s
+    Overpass round-trip. The cell is deliberately SMALL (4 decimals ≈ 11 m, not 110 m):
+    a coarse cell shares one cached address between PARALLEL streets <110 m apart, so the
+    guide named the wrong street after a turn ("путала улицы"). At ~11 m the STREET is
+    always resolved for where you actually are; the non-blocking win (miss => background
+    warm, old address carries the tick) is unchanged."""
+
+    _CACHE_CAP = 8192
+
+    def __init__(self) -> None:
+        # (round4 lat, round4 lon, lang) -> (monotonic ts, Address)
+        self._grid: dict[tuple[float, float, str], tuple[float, Address]] = {}
+
+    @staticmethod
+    def _key(point: GeoPoint, language: str) -> tuple[float, float, str]:
+        return (round(point.lat, 4), round(point.lon, 4), language)
+
+    def cached(self, point: GeoPoint, language: str = "ru") -> Address | None:
+        """The grid-cached address for this ~11 m cell, or None (no network ever)."""
+        hit = self._grid.get(self._key(point, language))
+        if hit is None:
+            return None
+        ts, addr = hit
+        if time.monotonic() - ts > settings.geocoder_cache_ttl_s:
+            return None
+        return addr
+
     @staticmethod
     def _query(point: GeoPoint) -> str:
         lat, lon = point.lat, point.lon
@@ -183,11 +213,18 @@ class OverpassGeocoder:
         )
 
     async def reverse(self, point: GeoPoint, language: str = "ru") -> Address:
+        cached = self.cached(point, language)
+        if cached is not None:
+            return cached
         # Same multi-mirror failover as place discovery — geocoding shares the
         # outage risk, so it must share the resilience (one slow mirror used to
         # block the area intro and leave the guide silent).
         elements = await fetch_overpass_elements(self._query(point))
-        return parse_address(elements, language, point)
+        addr = parse_address(elements, language, point)
+        if len(self._grid) >= self._CACHE_CAP:
+            self._grid.pop(next(iter(self._grid)), None)  # FIFO trim
+        self._grid[self._key(point, language)] = (time.monotonic(), addr)
+        return addr
 
 
 class MockGeocoder:

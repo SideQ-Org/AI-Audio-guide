@@ -9,6 +9,7 @@ STT needs no mapping. The LLM prompt wants a human-readable language name, so
 from __future__ import annotations
 
 import random
+import re
 
 # code -> name injected into the CORE prompt's "{language}" placeholder.
 PROMPT_NAME: dict[str, str] = {
@@ -72,6 +73,22 @@ def transliterate(s: str) -> str:
         else:
             out.append(rep[0].upper() + rep[1:])  # uppercase source -> "Shch", "Ya"
     return "".join(out)
+
+
+_ASCII_FACT_RE = re.compile(r"[A-Za-z]")
+_CYR_FACT_RE = re.compile(r"[А-Яа-яЁё]")
+
+
+def looks_foreign_facts(text: str | None, code: str | None) -> bool:
+    """Cheap heuristic: does a fact string look like the WRONG script for the session language?
+    We only gate the high-signal RU case for now: a Russian session should not speak mostly-Latin
+    factual lines verbatim. This intentionally ignores proper-name mix and keeps the check cheap."""
+    if not text:
+        return False
+    if normalize(code) != "ru":
+        return False
+    s = text.strip()
+    return bool(_ASCII_FACT_RE.search(s)) and not bool(_CYR_FACT_RE.search(s))
 
 
 def display_name(tags: dict[str, str], fallback: str, code: str | None) -> str:
@@ -459,6 +476,25 @@ _RESUME_CONNECTIVES: dict[str, tuple[str, ...]] = {
 }
 
 
+_AREA_FAST_OPENERS: dict[str, tuple[str, ...]] = {
+    "ru": (
+        "Вот что здесь важно.",
+        "Если коротко, здесь главное вот что.",
+        "Самое интересное здесь — вот это.",
+    ),
+    "en": (
+        "Here is the key thing.",
+        "In short, this is what matters here.",
+        "The important part is this.",
+    ),
+}
+
+
+def area_fast_opener(code: str | None, index: int = 0) -> str:
+    variants = _AREA_FAST_OPENERS.get(normalize(code), _AREA_FAST_OPENERS[FALLBACK])
+    return variants[index % len(variants)]
+
+
 def resume_connective(code: str | None, index: int = 0) -> str:
     """Spoken before the remaining sentences of a narration we paused to weave an object in.
     `index` rotates through the per-language variants (`% len`) so repeated resumes vary."""
@@ -752,6 +788,22 @@ def street_hook(code: str | None, street: str) -> str:
     return _STREET_HOOK.get(normalize(code), _STREET_HOOK_EN).format(street=street)
 
 
+# Director's note (beat_angle) for the SECOND ordinary object of the same category told
+# shortly after the first — frame it as "another one nearby", not a cold re-introduction
+# (the "две библиотеки подряд" complaint). A steering string, not spoken verbatim.
+_SAME_CAT_CALLBACK: dict[str, str] = {
+    "ru": ("это второй объект того же типа подряд — подай его именно так: коротко "
+           "свяжи с предыдущим («здесь их два рядом», «ещё одна…») и не пересказывай "
+           "то же самое; только отличие или одна новая деталь"),
+    "en": ("this is the second object of the same kind in a row — frame it that way: "
+           "link it briefly to the previous one and give only what makes it different"),
+}
+
+
+def same_category_callback(code: str | None) -> str:
+    return _SAME_CAT_CALLBACK.get(normalize(code), _SAME_CAT_CALLBACK["en"])
+
+
 def area_intro_told(code: str | None) -> str:
     """Internal 'told' ledger marker for the area opener."""
     return _AREA_INTRO_TOLD.get(normalize(code), _AREA_INTRO_TOLD_EN)
@@ -777,6 +829,146 @@ def nav_teaser(code: str | None, name: str, dist_m: float) -> str:
     d = max(10, int(round(dist_m / 10.0)) * 10)
     tmpl = _NAV_TEASER.get(normalize(code), _NAV_TEASER_EN)
     return tmpl.format(name=name, dist=d)
+
+
+# Guided mode: a canned closing word for a finished route when the scripted finale is
+# unavailable (per-stop fallback path). Canned => can never fabricate; warm, short.
+_ROUTE_FINALE: dict[str, str] = {
+    "ru": "Вот и весь маршрут — мы прошли всё, что я хотел показать. Хорошей прогулки!",
+    "en": (
+        "And that's the whole route — we've seen everything I wanted to show you. "
+        "Enjoy the rest of your walk!"
+    ),
+    "es": (
+        "Y ese es todo el recorrido: hemos visto todo lo que quería enseñarte. "
+        "¡Disfruta el resto del paseo!"
+    ),
+    "fr": (
+        "Et voilà tout le parcours — nous avons vu tout ce que je voulais vous montrer. "
+        "Bonne fin de promenade !"
+    ),
+    "de": (
+        "Das war die ganze Route — wir haben alles gesehen, was ich zeigen wollte. "
+        "Genieß den Rest des Spaziergangs!"
+    ),
+    "it": (
+        "Ed ecco tutto il percorso: abbiamo visto tutto quello che volevo mostrarti. "
+        "Buona passeggiata!"
+    ),
+    "pt": (
+        "E esse é todo o percurso — vimos tudo o que eu queria mostrar. "
+        "Aproveite o resto do passeio!"
+    ),
+    "zh": "这就是整条路线——我想带你看的都看过了。祝你散步愉快！",
+}
+
+
+def route_finale(code: str | None) -> str:
+    """The canned end-of-route closing word (fallback when no scripted finale exists)."""
+    return _ROUTE_FINALE.get(normalize(code), _ROUTE_FINALE["en"])
+
+
+# Guided mode: if the rich route script hasn't produced a `lead_in` yet, still launch the
+# route with one short thematic walking line so the user doesn't hear cue->cue while the
+# route context spins up. This is intentionally generic but route-aware (area + first stop),
+# and is used only as a fallback until the scripted lead-in exists.
+_DEF_LEAD_RU = (
+    "Пока идём к {name}, присмотримся, как в {area} прошлое вплетено "
+    "в то, что здесь вокруг сейчас."
+)
+_DEF_LEAD_EN = (
+    "As we head toward {name}, watch how the past is woven into what "
+    "surrounds us here in {area}."
+)
+
+
+def guided_lead_in(code: str | None, area: str, stop_name: str) -> str:
+    tmpl = _DEF_LEAD_RU if normalize(code) == "ru" else _DEF_LEAD_EN
+    return tmpl.format(area=area or "этом месте", name=stop_name)
+
+
+# --- Turn-by-turn navigator cues (guided mode, OSRM steps; NO LLM) -------------------
+# Deterministic spoken directions. RU avoids declining street names (no morphology lib):
+# the way turned onto rides as a nominative tail — «Поверни направо, дальше — Парковая
+# улица.» Distances are spoken as WORDS (this is audio), rounded to the nearest 50 m.
+
+_NAV_DIST_RU: dict[int, str] = {
+    50: "пятьдесят", 100: "сто", 150: "сто пятьдесят", 200: "двести",
+    250: "двести пятьдесят", 300: "триста",
+}
+_NAV_DIST_EN: dict[int, str] = {
+    50: "fifty", 100: "a hundred", 150: "a hundred and fifty", 200: "two hundred",
+    250: "two hundred and fifty", 300: "three hundred",
+}
+
+# (kind, modifier) -> the imperative action. Only maneuvers worth a voice cue; anything
+# unmapped returns "" and the cue engine silently skips it (the chip still shows it).
+_NAV_ACTIONS_RU: dict[tuple[str, str], str] = {
+    ("turn", "left"): "поверни налево",
+    ("turn", "right"): "поверни направо",
+    ("turn", "slight left"): "возьми левее",
+    ("turn", "slight right"): "возьми правее",
+    ("turn", "sharp left"): "поверни резко налево",
+    ("turn", "sharp right"): "поверни резко направо",
+    ("turn", "uturn"): "развернись",
+    ("fork", "slight left"): "на развилке держись левее",
+    ("fork", "slight right"): "на развилке держись правее",
+    ("fork", "left"): "на развилке — левее",
+    ("fork", "right"): "на развилке — правее",
+    ("end of road", "left"): "в конце дороги поверни налево",
+    ("end of road", "right"): "в конце дороги поверни направо",
+    ("merge", "slight left"): "держись левее",
+    ("merge", "slight right"): "держись правее",
+    ("roundabout", ""): "пройди по кругу",
+}
+_NAV_ACTIONS_EN: dict[tuple[str, str], str] = {
+    ("turn", "left"): "turn left",
+    ("turn", "right"): "turn right",
+    ("turn", "slight left"): "bear left",
+    ("turn", "slight right"): "bear right",
+    ("turn", "sharp left"): "turn sharply left",
+    ("turn", "sharp right"): "turn sharply right",
+    ("turn", "uturn"): "turn around",
+    ("fork", "slight left"): "keep left at the fork",
+    ("fork", "slight right"): "keep right at the fork",
+    ("fork", "left"): "keep left at the fork",
+    ("fork", "right"): "keep right at the fork",
+    ("end of road", "left"): "turn left at the end of the road",
+    ("end of road", "right"): "turn right at the end of the road",
+    ("merge", "slight left"): "keep left",
+    ("merge", "slight right"): "keep right",
+    ("roundabout", ""): "go through the roundabout",
+}
+
+
+def _nav_dist_words(code: str, meters: float) -> str:
+    step = min(300, max(50, int(round(meters / 50.0)) * 50))
+    if code == "ru":
+        return _NAV_DIST_RU[step]
+    return _NAV_DIST_EN[step]
+
+
+def nav_cue(
+    code: str | None, kind: str, modifier: str, name: str = "",
+    *, pre_dist_m: float | None = None,
+) -> str:
+    """One spoken navigator cue: the at-the-turn command, or (with pre_dist_m) the
+    heads-up version. "" when the maneuver has no mapped action — the engine skips it."""
+    lang_code = normalize(code)
+    actions = _NAV_ACTIONS_RU if lang_code == "ru" else _NAV_ACTIONS_EN
+    action = actions.get((kind, modifier)) or actions.get((kind, "")) or ""
+    if not action:
+        return ""
+    if pre_dist_m is not None:
+        dist = _nav_dist_words(lang_code, pre_dist_m)
+        head = (f"Через {dist} метров {action}" if lang_code == "ru"
+                else f"In {dist} metres {action}")
+    else:
+        head = action[0].upper() + action[1:]
+    if name:
+        tail = f", дальше — {name}." if lang_code == "ru" else f", onto {name}."
+        return head + tail
+    return head + "."
 
 
 # --- Code-level narration guards (backstops over the prompt, which models disobey) --

@@ -142,3 +142,34 @@ def test_match_track_good_match_uses_snapped():
     stub = _StubMatch(snapped, dist=250, conf=0.9)  # reasonable length + high confidence
     out = asyncio.run(match_track(path, stub))
     assert [p[:2] for p in out] == snapped  # snapped geometry used
+
+
+def test_parse_steps_flattens_maneuvers_and_skips_noise():
+    from app.services.geo.routing import _parse_steps
+
+    route = {
+        "legs": [
+            {"steps": [
+                {"maneuver": {"type": "depart", "location": [37.62, 55.75]}, "name": "A"},
+                {"maneuver": {"type": "turn", "modifier": "right",
+                              "location": [37.621, 55.751]},
+                 "name": "Парковая улица", "distance": 120.0},
+                {"maneuver": {"type": "continue", "modifier": "straight",
+                              "location": [37.622, 55.752]}, "name": "Парковая улица"},
+                {"maneuver": {"type": "arrive", "location": [37.623, 55.753]}, "name": ""},
+            ]},
+            {"steps": [
+                {"maneuver": {"type": "new name", "location": [37.624, 55.754]}, "name": "B"},
+                {"maneuver": {"type": "fork", "modifier": "slight left",
+                              "location": [37.625, 55.755]}, "name": "", "distance": 60.0},
+                {"maneuver": {"type": "arrive", "location": [37.626, 55.756]}, "name": ""},
+            ]},
+        ]
+    }
+    steps = _parse_steps(route)
+    kinds = [(s.kind, s.modifier) for s in steps]
+    # depart/continue/new-name dropped; the INTERMEDIATE arrive (leg 1) dropped; the
+    # final arrive kept; lat/lon swapped from GeoJSON [lon, lat].
+    assert kinds == [("turn", "right"), ("fork", "slight left"), ("arrive", "")]
+    assert steps[0].name == "Парковая улица" and steps[0].distance_m == 120.0
+    assert (steps[0].lat, steps[0].lon) == (55.751, 37.621)

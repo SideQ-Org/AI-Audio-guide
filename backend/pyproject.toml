@@ -11,6 +11,9 @@ dependencies = [
     "httpx>=0.27",
     "anthropic>=0.69",
     "websockets>=12",
+    # Durable session store (RedisStateStore) — import stays deferred; with REDIS_URL
+    # unset the in-memory store is used and this package is never imported.
+    "redis>=5",
 ]
 
 [project.optional-dependencies]

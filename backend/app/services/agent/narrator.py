@@ -17,10 +17,19 @@ from app.services.llm.router import Role
 from app.shared.schemas import AreaInput, NarratorInput, Significance
 
 from .languages import attribution_markers, solicit_markers
-from .prompts import build_area_user, build_narrator_user, system_for, system_for_area
+from .prompts import (
+    build_area_user,
+    build_narrator_user,
+    system_for,
+    system_for_area,
+    system_for_guided_narrate_fast,
+    system_for_narrate_fast,
+)
 from .significance import role_for_significance
 
 SILENCE = "[SILENCE]"
+
+_SENT_END = re.compile(r"[.!?…](?=\s)")
 
 # Cross-paragraph baton: the Narrator appends an internal "HOOK: ..." line that we
 # strip from the spoken text and hand to the next paragraph as `next_hook`, so the
@@ -311,6 +320,18 @@ class Narrator(Protocol):
 
     async def narrate_area(self, inp: AreaInput) -> str: ...
 
+    async def narrate_area_fast(self, inp: AreaInput) -> str: ...
+
+    async def narrate_guided_intro_fast(self, inp: AreaInput) -> str: ...
+
+
+def _trim_fast_sentence(text: str) -> str:
+    text = normalize(text)
+    if not text or text.upper().startswith("[SILENCE]"):
+        return ""
+    m = _SENT_END.search(text)
+    return text[: m.end()].strip() if m else text
+
 
 class TemplateNarrator:
     async def narrate(self, inp: NarratorInput) -> str:
@@ -333,6 +354,29 @@ class TemplateNarrator:
         generic = _GENERIC.get(inp.place.category, "")
         return normalize(f"{prefix}{generic}" if generic else "")
 
+    async def narrate_area_fast(self, inp: AreaInput) -> str:
+        """Offline/template fast area opener — short and factual, no extra model call."""
+        where = inp.address.district or inp.address.city or inp.address.street
+        if not where:
+            return ""
+        topic = inp.topic or inp.theme or "этот район"
+        return normalize(f"Здесь, в {where}, разговор пойдёт про {topic}.")
+
+    async def narrate_guided_intro_fast(self, inp: AreaInput) -> str:
+        """Offline/template fast guided opener — greeting + place + route focus."""
+        if inp.address.city:
+            where = f"в городе {inp.address.city}"
+        elif inp.address.district:
+            where = f"в районе {inp.address.district}"
+        elif inp.address.street:
+            where = f"на улице {inp.address.street}"
+        else:
+            where = "в этих местах"
+        topic = inp.topic or inp.theme or "как здесь история переходит в сегодняшнюю жизнь"
+        return normalize(
+            f"Начинаем прогулку {where}: сначала разберёмся, {topic}."
+        )
+
     async def narrate_area(self, inp: AreaInput) -> str:
         # deterministic fallback: name the area / use facts, else silence
         where = inp.address.district or inp.address.city or inp.address.street
@@ -348,6 +392,21 @@ class TemplateNarrator:
 class LLMNarrator:
     def __init__(self, llm: LLMClient) -> None:
         self._llm = llm
+
+    async def narrate_area_fast(self, inp: AreaInput) -> str:
+        """Tier-1 fast area narration: one short natural opening sentence, as fast as possible,
+        so the user hears a real narrated line before the richer area block is ready."""
+        system = system_for_narrate_fast(inp.language)
+        user = build_area_user(inp)
+        text = await self._llm.complete_text(Role.NARRATE_FAST, system, user, max_tokens=80)
+        return _trim_fast_sentence(text)
+
+    async def narrate_guided_intro_fast(self, inp: AreaInput) -> str:
+        """Tier-1 fast guided opener after route accept: greeting + place + route focus."""
+        system = system_for_guided_narrate_fast(inp.language)
+        user = build_area_user(inp)
+        text = await self._llm.complete_text(Role.NARRATE_FAST, system, user, max_tokens=96)
+        return _trim_fast_sentence(text)
 
     async def narrate(self, inp: NarratorInput) -> str:
         # Deterministic silence — decide in code, don't spend an LLM call (or rely
