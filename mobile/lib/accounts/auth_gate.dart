@@ -6,6 +6,8 @@
 
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 
@@ -21,8 +23,12 @@ class AuthGate extends StatefulWidget {
   State<AuthGate> createState() => _AuthGateState();
 }
 
-class _AuthGateState extends State<AuthGate> with SingleTickerProviderStateMixin {
+class _AuthGateState extends State<AuthGate>
+    with SingleTickerProviderStateMixin {
   final GlobalKey _loginKey = GlobalKey();
+
+  bool get _skipTearOnThisPlatform =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
   // Created eagerly in initState (NOT a lazy `late final`): a lazy controller would be
   // built on first access, and if no tear ever runs, that first access is dispose() —
   // creating a ticker while the element is deactivated throws.
@@ -35,14 +41,21 @@ class _AuthGateState extends State<AuthGate> with SingleTickerProviderStateMixin
   @override
   void initState() {
     super.initState();
-    _tear = AnimationController(vsync: this, duration: const Duration(milliseconds: 720));
+    _tear = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 720));
   }
 
   @override
   void didUpdateWidget(covariant AuthGate old) {
     super.didUpdateWidget(old);
     // Login → app edge: start the tear (snapshot the login we were just showing).
-    if (old.showLogin && !widget.showLogin && _snap == null) {
+    // Android gets an instant swap: Samsung devices were intermittently landing on a
+    // grey screen on the first login while the tear/reveal transition was trying to
+    // uncover HomePage underneath.
+    if (old.showLogin &&
+        !widget.showLogin &&
+        _snap == null &&
+        !_skipTearOnThisPlatform) {
       _beginTear();
     }
   }
@@ -50,10 +63,11 @@ class _AuthGateState extends State<AuthGate> with SingleTickerProviderStateMixin
   void _beginTear() {
     final boundary =
         _loginKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
-    // Skip (→ instant swap) if the login isn't mounted or hasn't been painted (e.g. it's
-    // hidden under a pushed register route). Capturing an un-painted boundary would throw
-    // and flash a one-frame error screen.
-    if (boundary == null || boundary.debugNeedsPaint) return;
+    // Skip (→ instant swap) if the login isn't mounted. Whether it has already been painted is
+    // checked implicitly by the synchronous snapshot below; on some Samsung builds the
+    // `debugNeedsPaint` getter itself trips a LateInitializationError during the first auth
+    // transition, leaving the app stuck behind the spinner.
+    if (boundary == null) return;
     final dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? 2.0;
     final ui.Image img;
     try {
@@ -83,7 +97,8 @@ class _AuthGateState extends State<AuthGate> with SingleTickerProviderStateMixin
   Widget build(BuildContext context) {
     // Still showing login.
     if (widget.showLogin) {
-      return RepaintBoundary(key: _loginKey, child: const LoginScreen(isGate: true));
+      return RepaintBoundary(
+          key: _loginKey, child: const LoginScreen(isGate: true));
     }
 
     // Signed in. Reveal the app; overlay the tearing halves while the animation runs.
@@ -119,7 +134,8 @@ class _TearPainter extends CustomPainter {
     final srcSplit = imgH * _splitFrac;
     final ease = Curves.easeInCubic.transform(t.clamp(0.0, 1.0));
     final up = ease * splitY; // top half rises fully off the top
-    final down = ease * (size.height - splitY); // bottom half drops fully off the bottom
+    final down =
+        ease * (size.height - splitY); // bottom half drops fully off the bottom
     final paint = Paint()..filterQuality = FilterQuality.low;
 
     // Top half.

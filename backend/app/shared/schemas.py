@@ -556,6 +556,7 @@ class SessionState(BaseModel):
     # and consumed before the normal reactive runtime path, so startup does not depend on whether
     # planner/area/object generation happens to be ready live on the next tick.
     startup_block: FactReserveItem | None = None
+    startup_contract_done: bool = False  # once the startup block was spoken, never stage/adopt it again this walk
     # Session-scoped reserve for degraded/offline playback. These lines are buffered from real
     # facts but are NOT considered told until the client explicitly acks playback.
     fact_reserve: list[FactReserveItem] = Field(default_factory=list)

@@ -211,6 +211,7 @@ _LEVEL_ATTEMPTS_PER_TICK = 3  # one lull tick may descend city->district->street
 # place, while leaving enough room for the wide query + one failover. On timeout we
 # keep talking about the current place rather than going silent.
 _DISCOVERY_DEADLINE_S = 20.0
+_PREWARM_ADOPT_WAIT_S = 0.8  # short grace window for the one-shot prewarm to finish materializing startup
 
 
 class State(StrEnum):
@@ -1762,9 +1763,16 @@ class Orchestrator:
             # is the client's job offline). Stay until GO_ONLINE.
             return await self._finish(st, State.OFFLINE, "offline")
 
-        if st.startup_block is None and st.guide_mode == "free":
+        if st.startup_block is None and not st.startup_contract_done and st.guide_mode == "free":
             key = _startup_contract_key(position, st.language)
             warmed = self._prewarmed_startup_contracts.pop(key, None)
+            if warmed is None:
+                deadline = time.monotonic() + _PREWARM_ADOPT_WAIT_S
+                while time.monotonic() < deadline:
+                    await asyncio.sleep(0.1)
+                    warmed = self._prewarmed_startup_contracts.pop(key, None)
+                    if warmed is not None:
+                        break
             if warmed is not None:
                 st.startup_block = warmed.model_copy(deep=True)
                 log.info(
@@ -2259,8 +2267,10 @@ class Orchestrator:
         2. deterministic nearby object from cached inventory
         3. factual fallback from area/city facts
         Best-effort and side-effect free wrt told/seen ledgers until actually spoken."""
-        if st.startup_block is not None:
+        if st.startup_block is not None or st.startup_contract_done:
             return
+        if st.guide_mode == "free" and st.area_intro_done:
+            return  # the startup intro already landed; never stage it again mid-walk
         area_key = st.area_key
         topic = st.narrative_plan.next_topic()
         warmed = self.pipeline.peek_startup_area_beat(area_key, language=st.language, topic=topic)
@@ -2641,8 +2651,12 @@ class Orchestrator:
         Read-only wrt the LLM (the fetch is a background warm); state edits are local."""
         if not settings.area_enrich or settings.area_deepen_max <= 0:
             return
-        if not st.area_facts or st.area_fetch_round >= settings.area_deepen_max:
+        if not st.area_facts:
             return
+        if st.area_fetch_round >= settings.area_deepen_max:
+            if st.address.street_confident or not st.address.city:
+                return
+            st.area_fetch_round = 0  # before we identify the street, keep cycling city-level searches
         # Still have untold material? Don't deepen yet.
         untold = st.memory.new_facts(atomize_facts(st.area_facts))
         state = self.pipeline.subject_coverage("area", st.area_key, st.language, st.area_facts)
@@ -2694,9 +2708,12 @@ class Orchestrator:
         # Dry-area gate: after several consecutive silent beats the area has nothing
         # left to say — stop burning a 9-18 s narrate_area LLM call per tick on
         # [SILENCE]. Re-armed by a real object (_commit_step), a new area, a new street,
-        # or a deepen fetch landing fresh facts (_maybe_deepen_area).
+        # or a deepen fetch landing fresh facts (_maybe_deepen_area). Exception: before the
+        # street is identified, keep the city/district continuation alive instead of freezing.
         if st.area_silent_streak >= settings.area_dry_max:
-            return ""
+            if st.address.street_confident or not st.address.city:
+                return ""
+            st.area_silent_streak = 0
         # Fetch verified area facts once, up front (used to ground every beat). Prefer the
         # background-warmed facts (from area entry). When the warm hasn't landed yet, kick
         # it in the background and SKIP this beat — the old inline fetch blocked the tick
@@ -2772,8 +2789,10 @@ class Orchestrator:
             # is_repeat can't stop the loop (8 invented monologues down 1-я Советская). After
             # a couple of grounded lines, go quiet; a real object / new area re-arms it.
             if st.area_cityless_beats >= settings.area_cityless_max:
-                log.info("cityless cap reached (%d) -> quiet", st.area_cityless_beats)
-                return ""
+                if st.address.street_confident:
+                    log.info("cityless cap reached (%d) -> quiet", st.area_cityless_beats)
+                    return ""
+                st.area_cityless_beats = 0  # before the street is known, keep city-level continuation alive
             city_l, _, _ = lang.level_labels(st.language)
             topic = lang.area_topic_grounded(st.language, city_l, city)
             # Count the ATTEMPT, not the success: a [SILENCE] burns the same 9-18 s LLM

@@ -760,6 +760,7 @@ class _SessionRuntime:
             category=block.category,
         )
         st.startup_block = None
+        st.startup_contract_done = True
         st.narration_history = (st.narration_history + [block.text])[-_HISTORY_CAP:]
         st.memory.mark_facts_told(atomize_facts(block.text))
         if block.place_id:
